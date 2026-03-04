@@ -344,7 +344,7 @@ class MultiStrategyBot:
         elif best.side == Side.SHORT:
             self._execute_short(symbol, best)
 
-    def _execute_short(self, symbol: str, signal) -> None:
+    def _execute_short(self, symbol: str, signal: "EnhancedSignal") -> None:
         """
         Führt ein SHORT-Signal aus:
         - Live + Spot:    blockiert (Spot kann nicht shorten)

@@ -128,14 +128,16 @@ class RiskEngine(RiskManager):
             amount=amount,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
+            side=signal.side.value,          # "long" oder "short" – PFLICHT für korrekte PnL/SL/TP
             highest_price=signal.entry,
             strategy_name=signal.strategy_name,
         )
         self.open_positions[signal.symbol] = position
         self.balance -= signal.entry * amount
 
+        side_label = "[LONG]" if position.side == "long" else "[SHORT]"
         logger.info(
-            f"[green]Position eröffnet:[/green] {signal.symbol} | "
+            f"[green]Position eröffnet {side_label}:[/green] {signal.symbol} | "
             f"Strategie: {signal.strategy_name} | "
             f"Einstieg: {signal.entry:.4f} | Menge: {amount:.6f} | "
             f"SL: {signal.stop_loss:.4f} | TP: {signal.take_profit:.4f} | "

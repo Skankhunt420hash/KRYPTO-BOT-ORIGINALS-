@@ -17,11 +17,6 @@ class Position:
     highest_price: float = field(default=0.0)
     strategy_name: str = ""  # welche Strategie diese Position eröffnet hat
 
-    def __post_init__(self):
-        # lowest_price für SHORT-Trailing-Stop
-        if not hasattr(self, "_lowest_price"):
-            object.__setattr__(self, "_lowest_price", self.entry_price)
-
     @property
     def value(self) -> float:
         return self.entry_price * self.amount

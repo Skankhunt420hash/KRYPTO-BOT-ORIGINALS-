@@ -81,5 +81,17 @@ class Settings:
     # Schutz vor doppelten Signalen: gleiche Strategie + Symbol in N Minuten (Minuten)
     DUPLICATE_SIGNAL_MINUTES: int = int(os.getenv("DUPLICATE_SIGNAL_MINUTES", 15))
 
+    # ------------------------------------------------------------------
+    # SHORT-Trading Einstellungen
+    # ------------------------------------------------------------------
+
+    # SHORT im Paper-Modus immer erlaubt (Simulation). Im Live-Modus nur
+    # wenn FUTURES_MODE=true, sonst blockiert (Spot kann nicht shorten).
+    SHORT_ENABLED: bool = os.getenv("SHORT_ENABLED", "true").lower() == "true"
+
+    # True = Futures-/Margin-Konto (SHORT live ausführbar)
+    # False = Spot-Konto (SHORT nur im Paper-Modus simulierbar)
+    FUTURES_MODE: bool = os.getenv("FUTURES_MODE", "false").lower() == "true"
+
 
 settings = Settings()

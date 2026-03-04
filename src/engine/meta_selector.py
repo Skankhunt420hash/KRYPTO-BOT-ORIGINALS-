@@ -5,6 +5,18 @@ from src.utils.logger import setup_logger
 
 logger = setup_logger("meta_selector")
 
+# Richtungs-Multiplikator: penalisiert Signale die gegen das Regime laufen.
+# SHORT im TREND_UP = kontra-zyklisch = 0.55 Abzug auf den Fit-Score.
+# LONG im TREND_DOWN = kontra-zyklisch = 0.55 Abzug.
+# In RANGE / HIGH_VOL / LOW_VOL: beide Richtungen gleichwertig.
+DIRECTION_MULTIPLIER: Dict[Regime, Dict[Side, float]] = {
+    Regime.TREND_UP:        {Side.LONG: 1.00, Side.SHORT: 0.55, Side.NONE: 0.0},
+    Regime.TREND_DOWN:      {Side.LONG: 0.55, Side.SHORT: 1.00, Side.NONE: 0.0},
+    Regime.RANGE:           {Side.LONG: 1.00, Side.SHORT: 1.00, Side.NONE: 0.0},
+    Regime.HIGH_VOLATILITY: {Side.LONG: 1.00, Side.SHORT: 1.00, Side.NONE: 0.0},
+    Regime.LOW_VOLATILITY:  {Side.LONG: 1.00, Side.SHORT: 1.00, Side.NONE: 0.0},
+}
+
 # Regime-Fit-Tabelle: je höher der Wert, desto besser passt die Strategie zum Regime.
 # Neue Strategien haben primäre Werte, Legacy-Strategien werden ebenfalls bewertet.
 REGIME_STRATEGY_FIT: Dict[Regime, Dict[str, float]] = {
@@ -90,13 +102,18 @@ class MetaSelector:
         regime_fits = REGIME_STRATEGY_FIT.get(regime, {})
         scored: List[tuple] = []
 
+        dir_mults = DIRECTION_MULTIPLIER.get(regime, {})
+
         for sig in actionable:
-            fit = regime_fits.get(sig.strategy_name, 0.30)
+            base_fit = regime_fits.get(sig.strategy_name, 0.30)
+            dir_mult = dir_mults.get(sig.side, 1.0)
+            fit = base_fit * dir_mult
 
             if fit < MIN_REGIME_FIT:
                 logger.debug(
-                    f"[REGIME-FILTER] {sig.strategy_name} | {symbol} | "
-                    f"fit={fit:.2f} < {MIN_REGIME_FIT} – blockiert"
+                    f"[REGIME-FILTER] {sig.strategy_name} [{sig.side.value.upper()}] "
+                    f"| {symbol} | fit={fit:.2f} (base={base_fit:.2f} × dir={dir_mult:.2f}) "
+                    f"< {MIN_REGIME_FIT} – blockiert"
                 )
                 continue
 
@@ -112,8 +129,8 @@ class MetaSelector:
             )
             scored.append((total, sig))
             logger.debug(
-                f"  {sig.strategy_name:<22} | fit={fit:.2f} "
-                f"conf={sig.confidence:.0f} rr={sig.rr:.2f} "
+                f"  {sig.strategy_name:<22} [{sig.side.value.upper():<5}] | "
+                f"fit={fit:.2f} conf={sig.confidence:.0f} rr={sig.rr:.2f} "
                 f"vol={'✓' if sig.volume_confirmed else '✗'} "
                 f"→ score={total:.3f}"
             )

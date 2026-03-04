@@ -9,19 +9,20 @@ logger = setup_logger("strategy.volatility_breakout")
 
 class VolatilityBreakoutStrategy(EnhancedBaseStrategy):
     """
-    Volatility Breakout (Squeeze-Breakout)
+    Volatility Breakout (Squeeze-Breakout) – LONG und SHORT
 
-    Erkennt Konsolidierungsphasen (BB-Squeeze: Bandbreite unter ihrem
-    20-Perioden-Durchschnitt) und handelt den Ausbruch mit Volumenbestätigung.
+    Erkennt Konsolidierungsphasen (BB-Squeeze) und handelt den Ausbruch
+    in beide Richtungen mit Volumenbestätigung.
+
+    LONG  (Ausbruch nach oben):
+      Preis > Hoch der letzten N Kerzen + Volumen > 1.3× Durchschnitt
+      SL = max(entry - 1.0×ATR, recent_low)  |  TP = entry + 2.5×range
+
+    SHORT (Ausbruch nach unten):
+      Preis < Tief der letzten N Kerzen + Volumen > 1.3× Durchschnitt
+      SL = min(entry + 1.0×ATR, recent_high)  |  TP = entry - 2.5×range
 
     Regime-Fit: HIGH_VOLATILITY (primär), TREND_UP/DOWN (sekundär)
-
-    Bedingungen LONG:
-    - BB-Bandbreite aktuell < SMA(BB-Bandbreite, 20) – Squeeze aktiv
-    - Preis bricht über das 20-Perioden-Hoch (Ausbruch nach oben)
-    - Volumen > 1.3× Durchschnitt (Bestätigung)
-    SL: Mitte der Squeeze-Range (oder 1.0 × ATR)
-    TP: Einstieg + 2.5 × Squeeze-Breite
     """
 
     BB_WINDOW = 20
@@ -49,7 +50,6 @@ class VolatilityBreakoutStrategy(EnhancedBaseStrategy):
                 df["high"], df["low"], df["close"], window=14
             ).average_true_range()
 
-            # BB-Squeeze: aktuelle Bandbreite < Durchschnitt der Bandbreite
             width_sma = df["bb_width"].rolling(self.SQUEEZE_LOOKBACK).mean()
             squeeze_active = float(df["bb_width"].iloc[-1]) < float(width_sma.iloc[-1])
 
@@ -63,57 +63,72 @@ class VolatilityBreakoutStrategy(EnhancedBaseStrategy):
             price = float(df["close"].iloc[-1])
             atr = float(df["atr"].iloc[-1])
 
-            # Ausbruch nach oben: Preis > Hoch der letzten N Kerzen (ohne aktuelle)
             recent_high = float(df["high"].iloc[-(self.BREAKOUT_LOOKBACK + 1):-1].max())
             recent_low = float(df["low"].iloc[-(self.BREAKOUT_LOOKBACK + 1):-1].min())
             squeeze_range = recent_high - recent_low
 
-            # Volumen-Bestätigung
-            vol_sma = df["volume"].rolling(self.SQUEEZE_LOOKBACK).mean().iloc[-1]
-            vol_confirmed = float(df["volume"].iloc[-1]) > float(vol_sma) * self.VOLUME_MULT
+            vol_sma = float(df["volume"].rolling(self.SQUEEZE_LOOKBACK).mean().iloc[-1])
+            vol_confirmed = float(df["volume"].iloc[-1]) > vol_sma * self.VOLUME_MULT
 
+            # Squeeze-Stärke als Konfidenz-Basis (gemeinsam für LONG/SHORT)
+            squeeze_ratio = 1.0 - (
+                float(df["bb_width"].iloc[-1]) / (float(width_sma.iloc[-1]) + 1e-9)
+            )
+            base_conf = round(50.0 + squeeze_ratio * 30 + (10 if vol_confirmed else 0), 1)
+            base_conf = min(base_conf, 88.0)
+
+            # ── LONG: Ausbruch nach oben ──────────────────────────────────
             if price > recent_high and vol_confirmed:
                 entry = price
                 sl = max(entry - self.ATR_SL_MULT * atr, recent_low)
                 tp = entry + self.TP_RANGE_MULT * squeeze_range
                 rr = self._calc_rr(entry, sl, tp)
 
-                # Squeeze-Stärke als Konfidenz-Basis
-                squeeze_ratio = 1.0 - (
-                    float(df["bb_width"].iloc[-1]) / (float(width_sma.iloc[-1]) + 1e-9)
-                )
-                confidence = round(50.0 + squeeze_ratio * 30 + (10 if vol_confirmed else 0), 1)
-                confidence = min(confidence, 88.0)
-
                 return EnhancedSignal(
                     strategy_name=self.name,
                     symbol=symbol,
                     timeframe=timeframe,
                     side=Side.LONG,
-                    confidence=confidence,
+                    confidence=base_conf,
                     entry=entry,
                     stop_loss=sl,
                     take_profit=tp,
                     rr=rr,
                     reason=(
-                        f"BB-Squeeze Breakout über {recent_high:.4f} | "
-                        f"Range={squeeze_range:.4f} | Vol={'✓' if vol_confirmed else '✗'}"
+                        f"[LONG] BB-Squeeze Breakout über {recent_high:.4f} | "
+                        f"Range={squeeze_range:.4f} | Vol=✓"
                     ),
-                    volume_confirmed=vol_confirmed,
+                    volume_confirmed=True,
                 )
 
+            # ── SHORT: Ausbruch nach unten ────────────────────────────────
             if price < recent_low and vol_confirmed:
-                # Downside-Breakout – in Spot nur dokumentieren, kein SHORT
-                return self._no_signal(
-                    symbol, timeframe,
-                    f"Downside-Breakout unter {recent_low:.4f} "
-                    f"(SHORT nicht verfügbar im Spot-Modus)"
+                entry = price
+                sl = min(entry + self.ATR_SL_MULT * atr, recent_high)
+                tp = entry - self.TP_RANGE_MULT * squeeze_range
+                rr = self._calc_rr(entry, sl, tp)
+
+                return EnhancedSignal(
+                    strategy_name=self.name,
+                    symbol=symbol,
+                    timeframe=timeframe,
+                    side=Side.SHORT,
+                    confidence=base_conf,
+                    entry=entry,
+                    stop_loss=sl,
+                    take_profit=tp,
+                    rr=rr,
+                    reason=(
+                        f"[SHORT] BB-Squeeze Breakdown unter {recent_low:.4f} | "
+                        f"Range={squeeze_range:.4f} | Vol=✓"
+                    ),
+                    volume_confirmed=True,
                 )
 
             return self._no_signal(
                 symbol, timeframe,
                 f"Squeeze aktiv – kein Ausbruch | "
-                f"Preis={price:.4f} Hoch={recent_high:.4f} "
+                f"Preis={price:.4f} Hoch={recent_high:.4f} Tief={recent_low:.4f} "
                 f"Vol={'✓' if vol_confirmed else '✗'}"
             )
 

@@ -220,26 +220,31 @@ class MultiStrategyBot:
 
         current_price = float(df["close"].iloc[-1])
 
-        # 1. Exits prüfen (SL, TP, Trailing Stop)
+        # 1. Exits prüfen (SL, TP, Trailing Stop) – side-aware
         exit_reason = self.risk.check_exit_conditions(symbol, current_price)
         if exit_reason:
             position = self.risk.open_positions.get(symbol)
             if position:
-                # Position-Daten vor dem Schließen sichern
                 entry_price = position.entry_price
                 pos_size = position.amount
+                pos_side = position.side
 
-                self.exchange.create_market_sell_order(symbol, position.amount)
+                # LONG schließen: Sell-Order / SHORT schließen: Buy-Order (zurückkaufen)
+                if pos_side == "long":
+                    self.exchange.create_market_sell_order(symbol, position.amount)
+                else:
+                    # Paper-SHORT: simuliertes Zurückkaufen
+                    self.exchange.create_market_buy_order(symbol, position.amount)
+
                 pnl = self.risk.close_position(symbol, current_price)
 
-                log_msg = (
-                    f"[bold]EXIT[/bold] {symbol} | Grund: {exit_reason} | "
-                    f"PnL: {pnl:+.4f} USDT" if pnl is not None else
-                    f"[bold]EXIT[/bold] {symbol} | Grund: {exit_reason}"
+                side_label = "[LONG]" if pos_side == "long" else "[SHORT]"
+                pnl_str = f"{pnl:+.4f} USDT" if pnl is not None else "?"
+                logger.info(
+                    f"[bold]EXIT {side_label}[/bold] {symbol} | "
+                    f"Grund: {exit_reason} | PnL: {pnl_str}"
                 )
-                logger.info(log_msg)
 
-                # DB schließen
                 trade_id = self._open_trade_ids.pop(symbol, None)
                 if trade_id is not None and pnl is not None:
                     cost = entry_price * pos_size
@@ -312,13 +317,12 @@ class MultiStrategyBot:
             if order:
                 self.risk.open_with_signal(best, amount)
                 logger.info(
-                    f"[bold green]KAUF[/bold green] {symbol} | "
+                    f"[bold green]LONG ERÖFFNET[/bold green] {symbol} | "
                     f"Strategie: {best.strategy_name} | "
                     f"Einstieg: {best.entry:.4f} | Menge: {amount:.6f} | "
                     f"SL: {best.stop_loss:.4f} | TP: {best.take_profit:.4f} | "
                     f"RR: {best.rr:.2f} | Konfidenz: {best.confidence:.0f}/100"
                 )
-                # DB speichern
                 trade_id = self.repo.save_open_trade(
                     symbol=symbol,
                     timeframe=best.timeframe,
@@ -338,11 +342,62 @@ class MultiStrategyBot:
                     self._open_trade_ids[symbol] = trade_id
 
         elif best.side == Side.SHORT:
-            # Im Spot-Modus: SHORT wird ignoriert, nur geloggt
-            logger.debug(
-                f"{symbol} | SHORT-Signal von {best.strategy_name} "
-                f"– Spot-Modus unterstützt kein Short-Selling"
+            self._execute_short(symbol, best)
+
+    def _execute_short(self, symbol: str, signal) -> None:
+        """
+        Führt ein SHORT-Signal aus:
+        - Live + Spot:    blockiert (Spot kann nicht shorten)
+        - Live + Futures: nicht implementiert, Warnung ausgeben
+        - Paper-Modus:    SHORT vollständig simulieren
+        """
+        is_live = settings.TRADING_MODE == "live"
+
+        if is_live and not settings.FUTURES_MODE:
+            logger.warning(
+                f"[yellow]SHORT BLOCKIERT (Spot-Modus)[/yellow] {symbol} | "
+                f"Strategie: {signal.strategy_name} | "
+                f"Für SHORT: FUTURES_MODE=true in .env setzen"
             )
+            return
+
+        if is_live and settings.FUTURES_MODE:
+            logger.warning(
+                f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
+                f"{symbol} – Paper-Simulation wird verwendet"
+            )
+            # Fällt durch in Paper-Simulation
+
+        # Paper-SHORT-Simulation
+        amount = self.risk.calculate_position_size(signal.entry)
+        # Für SHORT: Exchange-Call simuliert das "Verkaufen" (kein echtes Leihen)
+        order = self.exchange.create_market_sell_order(symbol, amount)
+        if order:
+            self.risk.open_with_signal(signal, amount)
+            logger.info(
+                f"[bold red]SHORT ERÖFFNET [PAPER][/bold red] {symbol} | "
+                f"Strategie: {signal.strategy_name} | "
+                f"Einstieg: {signal.entry:.4f} | Menge: {amount:.6f} | "
+                f"SL: {signal.stop_loss:.4f} (oben) | TP: {signal.take_profit:.4f} (unten) | "
+                f"RR: {signal.rr:.2f} | Konfidenz: {signal.confidence:.0f}/100"
+            )
+            trade_id = self.repo.save_open_trade(
+                symbol=symbol,
+                timeframe=signal.timeframe,
+                strategy_name=signal.strategy_name,
+                side=signal.side.value,
+                entry_price=signal.entry,
+                stop_loss=signal.stop_loss,
+                take_profit=signal.take_profit,
+                position_size=amount,
+                rr_planned=signal.rr,
+                confidence=signal.confidence,
+                regime=signal.regime,
+                reason_open=signal.reason,
+                order_id=str(order.get("id", "")),
+            )
+            if trade_id:
+                self._open_trade_ids[symbol] = trade_id
 
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""

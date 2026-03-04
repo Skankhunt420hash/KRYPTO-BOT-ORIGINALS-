@@ -84,8 +84,8 @@ class RiskEngine(RiskManager):
                     f"noch {remaining:.0f}min gesperrt"
                 )
 
-        # 4. Duplicate-Signal-Schutz
-        dup_key = f"{signal.strategy_name}_{signal.symbol}"
+        # 4. Duplicate-Signal-Schutz (richtungsbewusst: long/short unabhängig)
+        dup_key = f"{signal.strategy_name}_{signal.symbol}_{signal.side.value}"
         dup_ts = self._recent_signals.get(dup_key)
         if dup_ts:
             elapsed_min = (now - dup_ts).total_seconds() / 60
@@ -107,8 +107,8 @@ class RiskEngine(RiskManager):
         return True, "OK"
 
     def register_signal(self, signal: EnhancedSignal):
-        """Registriert ein Signal zur Duplikats-Erkennung."""
-        dup_key = f"{signal.strategy_name}_{signal.symbol}"
+        """Registriert ein Signal zur Duplikats-Erkennung (richtungsbewusst)."""
+        dup_key = f"{signal.strategy_name}_{signal.symbol}_{signal.side.value}"
         self._recent_signals[dup_key] = datetime.utcnow()
 
     # ------------------------------------------------------------------

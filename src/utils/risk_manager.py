@@ -17,16 +17,29 @@ class Position:
     highest_price: float = field(default=0.0)
     strategy_name: str = ""  # welche Strategie diese Position eröffnet hat
 
+    def __post_init__(self):
+        # lowest_price für SHORT-Trailing-Stop
+        if not hasattr(self, "_lowest_price"):
+            object.__setattr__(self, "_lowest_price", self.entry_price)
+
     @property
     def value(self) -> float:
         return self.entry_price * self.amount
 
     def update_trailing_stop(self, current_price: float, trail_pct: float):
-        if current_price > self.highest_price:
-            self.highest_price = current_price
-            new_stop = current_price * (1 - trail_pct / 100)
-            if new_stop > self.stop_loss:
-                self.stop_loss = new_stop
+        """Passt den Trailing-Stop je nach Positionsrichtung an."""
+        if self.side == "long":
+            if current_price > self.highest_price:
+                self.highest_price = current_price
+                new_stop = current_price * (1 - trail_pct / 100)
+                if new_stop > self.stop_loss:
+                    self.stop_loss = new_stop
+        else:  # short: SL bewegt sich nach unten mit dem Preis
+            if current_price < self.highest_price:  # highest_price als lowest-Proxy
+                self.highest_price = current_price
+                new_stop = current_price * (1 + trail_pct / 100)
+                if new_stop < self.stop_loss:
+                    self.stop_loss = new_stop
 
 
 class RiskManager:
@@ -93,8 +106,17 @@ class RiskManager:
         if position is None:
             return None
 
-        pnl = (current_price - position.entry_price) * position.amount
-        self.balance += current_price * position.amount
+        # PnL-Berechnung je nach Seite:
+        # LONG:  Gewinn wenn exit > entry  → (exit - entry) * amount
+        # SHORT: Gewinn wenn exit < entry  → (entry - exit) * amount
+        if position.side == "long":
+            pnl = (current_price - position.entry_price) * position.amount
+            self.balance += current_price * position.amount
+        else:  # short
+            pnl = (position.entry_price - current_price) * position.amount
+            # Margin (entry * amount) zurück + PnL (kann negativ sein)
+            self.balance += position.entry_price * position.amount + pnl
+
         self.total_pnl += pnl
         self.total_trades += 1
 
@@ -104,8 +126,9 @@ class RiskManager:
         else:
             color = "red"
 
+        side_label = "[LONG]" if position.side == "long" else "[SHORT]"
         logger.info(
-            f"[{color}]Position geschlossen:[/{color}] {symbol} | "
+            f"[{color}]Position geschlossen {side_label}:[/{color}] {symbol} | "
             f"Einstieg: {position.entry_price:.4f} | Ausstieg: {current_price:.4f} | "
             f"PnL: {pnl:+.4f} USDT | Balance: {self.balance:.2f} USDT"
         )
@@ -119,13 +142,34 @@ class RiskManager:
         if self.trailing_stop:
             position.update_trailing_stop(current_price, self.stop_loss_pct)
 
-        if current_price <= position.stop_loss:
-            logger.warning(f"[red]STOP-LOSS ausgelöst[/red] für {symbol} @ {current_price:.4f}")
-            return "stop_loss"
-
-        if current_price >= position.take_profit:
-            logger.info(f"[green]TAKE-PROFIT erreicht[/green] für {symbol} @ {current_price:.4f}")
-            return "take_profit"
+        if position.side == "long":
+            # LONG: SL wenn Preis fällt, TP wenn Preis steigt
+            if current_price <= position.stop_loss:
+                logger.warning(
+                    f"[red]STOP-LOSS [LONG][/red] {symbol} @ {current_price:.4f} "
+                    f"(SL={position.stop_loss:.4f})"
+                )
+                return "stop_loss"
+            if current_price >= position.take_profit:
+                logger.info(
+                    f"[green]TAKE-PROFIT [LONG][/green] {symbol} @ {current_price:.4f} "
+                    f"(TP={position.take_profit:.4f})"
+                )
+                return "take_profit"
+        else:  # short
+            # SHORT: SL wenn Preis steigt, TP wenn Preis fällt
+            if current_price >= position.stop_loss:
+                logger.warning(
+                    f"[red]STOP-LOSS [SHORT][/red] {symbol} @ {current_price:.4f} "
+                    f"(SL={position.stop_loss:.4f})"
+                )
+                return "stop_loss"
+            if current_price <= position.take_profit:
+                logger.info(
+                    f"[green]TAKE-PROFIT [SHORT][/green] {symbol} @ {current_price:.4f} "
+                    f"(TP={position.take_profit:.4f})"
+                )
+                return "take_profit"
 
         return None
 

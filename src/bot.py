@@ -7,6 +7,8 @@ from src.strategies.signal import Side
 from src.engine.regime import RegimeEngine
 from src.engine.meta_selector import MetaSelector
 from src.engine.risk_engine import RiskEngine
+from src.engine.performance_tracker import PerformanceTracker
+from src.engine.strategy_scorer import StrategyScorer
 from src.storage.trade_repository import TradeRepository
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager
@@ -252,7 +254,6 @@ class MultiStrategyBot:
         self.exchange = ExchangeConnector()
         self.strategies = get_all_enhanced_strategies()
         self.regime_engine = RegimeEngine()
-        self.selector = MetaSelector()
         self.risk = RiskEngine()
         self.repo = TradeRepository()
         self.tg = TelegramNotifier()
@@ -260,8 +261,23 @@ class MultiStrategyBot:
         self.running = False
         self._open_trade_ids: Dict[str, int] = {}  # symbol → DB-trade-id
 
+        # Performance-Tracking und adaptives Scoring
+        self.perf_tracker = PerformanceTracker()
+        self.scorer = StrategyScorer(self.perf_tracker)
+        self.selector = MetaSelector(scorer=self.scorer)
+
         strat_names = [s.name for s in self.strategies]
         logger.info(f"Aktive Strategien: {strat_names}")
+        if self.perf_tracker.available:
+            known = self.perf_tracker.known_strategies()
+            if known:
+                logger.info(f"Performance-Daten geladen für: {known}")
+            else:
+                logger.info(
+                    "Performance-Tracker aktiv – noch keine Trade-Daten "
+                    "(neutrale Scores bis min. "
+                    f"{settings.PERF_TRACKER_MIN_TRADES} Trades)"
+                )
 
         self.tg.notify_bot_start(
             mode=settings.TRADING_MODE,
@@ -507,6 +523,12 @@ class MultiStrategyBot:
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
+        # Scorer zu Beginn jedes Zyklus aktualisieren (liest neue Trades aus DB)
+        try:
+            self.scorer.refresh()
+        except Exception as e:
+            logger.warning(f"Scorer-Refresh fehlgeschlagen (nicht kritisch): {e}")
+
         for symbol in self.pairs:
             try:
                 self._process_pair(symbol)

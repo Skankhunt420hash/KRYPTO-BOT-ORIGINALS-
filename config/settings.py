@@ -98,5 +98,28 @@ class Settings:
     # False = Spot-Konto (SHORT nur im Paper-Modus simulierbar)
     FUTURES_MODE: bool = os.getenv("FUTURES_MODE", "false").lower() == "true"
 
+    # ------------------------------------------------------------------
+    # Strategy Performance Tracker & Scorer
+    # ------------------------------------------------------------------
+
+    # Anzahl der letzten Trades für Rolling-Window-Metriken
+    PERF_TRACKER_ROLLING_WINDOW: int = int(os.getenv("PERF_TRACKER_ROLLING_WINDOW", 20))
+
+    # Abklingfaktor für recency-gewichtete Win-Rate (0.90 = ältere Trades werden
+    # mit 0.90^n gewichtet → neuere Trades wichtiger)
+    PERF_TRACKER_RECENCY_DECAY: float = float(os.getenv("PERF_TRACKER_RECENCY_DECAY", 0.90))
+
+    # Minimale Anzahl globaler Trades bevor ein Score angewendet wird
+    # (unter diesem Schwellwert: neutraler Score 0.5)
+    PERF_TRACKER_MIN_TRADES: int = int(os.getenv("PERF_TRACKER_MIN_TRADES", 10))
+
+    # Minimale Anzahl regime-spezifischer Trades für Regime-Adjustment
+    PERF_TRACKER_MIN_REGIME_TRADES: int = int(os.getenv("PERF_TRACKER_MIN_REGIME_TRADES", 5))
+
+    # Gewicht des Performance-Scores im Meta-Selector (0.0 = deaktiviert)
+    # final_score = signal_score + (perf_score - 0.5) * PERF_SELECTOR_WEIGHT
+    # Bei 0.15: maximale Anpassung = ±0.075 (konservativ)
+    PERF_SELECTOR_WEIGHT: float = float(os.getenv("PERF_SELECTOR_WEIGHT", 0.15))
+
 
 settings = Settings()

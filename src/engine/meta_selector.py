@@ -1,9 +1,19 @@
-from typing import Dict, List, Optional
+from typing import TYPE_CHECKING, Dict, List, Optional
+
+from config.settings import settings
 from src.strategies.signal import EnhancedSignal, Side
 from src.engine.regime import Regime
 from src.utils.logger import setup_logger
 
+if TYPE_CHECKING:
+    from src.engine.strategy_scorer import StrategyScorer
+
 logger = setup_logger("meta_selector")
+
+# Gewicht des Performance-Scores im Gesamt-Score.
+# final = signal_score + (perf_score - 0.5) * PERF_WEIGHT
+# Bei PERF_WEIGHT=0.15: max Anpassung = ±0.075 (konservativ)
+_PERF_WEIGHT: float = settings.PERF_SELECTOR_WEIGHT
 
 # Richtungs-Multiplikator: penalisiert Signale die gegen das Regime laufen.
 # SHORT im TREND_UP = kontra-zyklisch = 0.55 Abzug auf den Fit-Score.
@@ -76,10 +86,22 @@ class MetaSelector:
     Bewertet alle eingehenden Signale und wählt das beste für den aktuellen
     Markt aus.
 
-    Score-Formel:
-        score = regime_fit * 0.35 + confidence_norm * 0.35
-                + rr_score * 0.20 + volume_bonus * 0.10
+    Basis-Score-Formel:
+        signal_score = regime_fit * 0.35 + confidence_norm * 0.35
+                     + rr_score * 0.20 + volume_bonus * 0.10
+
+    Optionale Performance-Anpassung (wenn StrategyScorer übergeben):
+        final_score = signal_score + (perf_score - 0.5) * PERF_WEIGHT
+        → max ±0.075 bei PERF_WEIGHT=0.15 (konservativ)
+        → nur aktiv wenn genug historische Trades vorhanden
     """
+
+    def __init__(self, scorer: Optional["StrategyScorer"] = None):
+        self._scorer = scorer
+
+    def set_scorer(self, scorer: "StrategyScorer") -> None:
+        """Setzt oder ersetzt den StrategyScorer (nach Initialisierung)."""
+        self._scorer = scorer
 
     def select(
         self,
@@ -121,18 +143,30 @@ class MetaSelector:
             rr_score = min(sig.rr / 5.0, 1.0)
             vol_bonus = 0.10 if sig.volume_confirmed else 0.0
 
-            total = (
+            signal_score = (
                 fit * 0.35
                 + conf_score * 0.35
                 + rr_score * 0.20
                 + vol_bonus * 0.10
             )
+
+            # Performance-Anpassung (optional, konservativ)
+            perf_score = 0.5   # neutral default
+            perf_adj = 0.0
+            if self._scorer is not None and _PERF_WEIGHT > 0:
+                perf_score = self._scorer.get_score(
+                    sig.strategy_name, regime.value
+                )
+                perf_adj = (perf_score - 0.5) * _PERF_WEIGHT
+
+            total = signal_score + perf_adj
             scored.append((total, sig))
             logger.debug(
                 f"  {sig.strategy_name:<22} [{sig.side.value.upper():<5}] | "
                 f"fit={fit:.2f} conf={sig.confidence:.0f} rr={sig.rr:.2f} "
                 f"vol={'✓' if sig.volume_confirmed else '✗'} "
-                f"→ score={total:.3f}"
+                f"sig={signal_score:.3f} perf={perf_score:.2f} adj={perf_adj:+.3f} "
+                f"→ final={total:.3f}"
             )
 
         if not scored:
@@ -145,11 +179,23 @@ class MetaSelector:
         scored.sort(key=lambda x: x[0], reverse=True)
         best_score, best = scored[0]
 
+        # Performance-Score für den Gewinner (nur für Logging)
+        perf_score_best = 0.5
+        if self._scorer is not None and _PERF_WEIGHT > 0:
+            perf_score_best = self._scorer.get_score(
+                best.strategy_name, regime.value
+            )
+        perf_tag = (
+            f" | perf={perf_score_best:.2f}"
+            if self._scorer is not None
+            else ""
+        )
+
         logger.info(
             f"[cyan]META-SELECTOR[/cyan] {symbol} | "
             f"Gewinner: [bold]{best.strategy_name}[/bold] | "
-            f"Score={best_score:.3f} | Regime={regime.value} | "
-            f"Seite={best.side.value.upper()} | "
+            f"final={best_score:.3f}{perf_tag} | "
+            f"Regime={regime.value} | Seite={best.side.value.upper()} | "
             f"conf={best.confidence:.0f} | RR={best.rr:.2f} | "
             f"{best.reason}"
         )

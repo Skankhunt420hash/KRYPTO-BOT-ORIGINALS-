@@ -20,6 +20,7 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+from rich import box
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
@@ -100,6 +101,120 @@ def show_status(bot):
         console.print(rt)
 
 
+def _show_strategy_stats() -> None:
+    """
+    Gibt eine formatierte Übersicht der Strategie-Performance aus der DB aus.
+    Aufgerufen durch: python3 main.py --strategy-stats
+    """
+    from src.engine.performance_tracker import PerformanceTracker
+    from src.engine.strategy_scorer import StrategyScorer
+
+    console.print()
+    console.print(Panel.fit(
+        "[bold cyan]STRATEGIE-PERFORMANCE-ÜBERSICHT[/bold cyan]\n"
+        f"[dim]Modus: {settings.TRADING_MODE.upper()} | "
+        f"DB: {settings.DATABASE_URL}[/dim]",
+        border_style="cyan",
+    ))
+
+    tracker = PerformanceTracker()
+    scorer = StrategyScorer(tracker)
+
+    if not tracker.available:
+        console.print("[red]Datenbank nicht verfügbar.[/red]")
+        return
+
+    all_global = tracker.all_global()
+    if not all_global:
+        console.print(
+            f"[yellow]Noch keine abgeschlossenen Trades in der DB.\n"
+            f"Starte den Bot und führe Trades durch, um Performance-Daten zu sammeln.[/yellow]"
+        )
+        return
+
+    # ── Globale Übersicht ──────────────────────────────────────────────────
+    gt = Table(
+        title="📊 Globale Performance (alle Regimes)",
+        box=box.ROUNDED, border_style="cyan",
+    )
+    gt.add_column("Strategie", style="bold", min_width=22)
+    gt.add_column("Trades", justify="right")
+    gt.add_column("Win-%", justify="right")
+    gt.add_column("PnL (USDT)", justify="right", min_width=12)
+    gt.add_column("PF", justify="right")
+    gt.add_column("Ø Win", justify="right")
+    gt.add_column("Ø Loss", justify="right")
+    gt.add_column("Max DD%", justify="right")
+    gt.add_column("Streak", justify="right")
+    gt.add_column("Recency", justify="right")
+    gt.add_column("Score", justify="right", min_width=7)
+
+    for name, m in sorted(all_global.items()):
+        score = scorer.get_score(name, "GLOBAL")
+        pnl_c = "green" if m.pnl_abs_sum >= 0 else "red"
+        dd_c = "red" if m.max_drawdown_pct > 20 else "yellow" if m.max_drawdown_pct > 10 else "green"
+        score_c = "green" if score > 0.55 else "red" if score < 0.45 else "yellow"
+        streak_c = "red" if m.losing_streak >= 3 else "white"
+        gt.add_row(
+            name,
+            str(m.trade_count),
+            f"{m.win_rate:.1f}%",
+            f"[{pnl_c}]{m.pnl_abs_sum:+,.4f}[/{pnl_c}]",
+            f"{m.profit_factor:.2f}",
+            f"+{m.avg_win:.4f}",
+            f"-{m.avg_loss:.4f}",
+            f"[{dd_c}]{m.max_drawdown_pct:.1f}%[/{dd_c}]",
+            f"[{streak_c}]{m.losing_streak}[/{streak_c}]",
+            f"{m.recency_win_rate:.0%}",
+            f"[{score_c}]{score:.2f}[/{score_c}]",
+        )
+    console.print(gt)
+
+    # ── Per-Regime-Aufschlüsselung ─────────────────────────────────────────
+    all_regime = tracker.all_regime()
+    if all_regime:
+        rt = Table(
+            title="🔭 Performance pro Strategie × Regime",
+            box=box.ROUNDED, border_style="blue",
+        )
+        rt.add_column("Strategie", style="bold", min_width=22)
+        rt.add_column("Regime", min_width=16)
+        rt.add_column("Trades", justify="right")
+        rt.add_column("Win-%", justify="right")
+        rt.add_column("PnL (USDT)", justify="right", min_width=12)
+        rt.add_column("PF", justify="right")
+        rt.add_column("Score(reg)", justify="right")
+
+        for name in sorted(all_regime.keys()):
+            for regime, m in sorted(all_regime[name].items()):
+                reg_score = scorer.get_score(name, regime)
+                pnl_c = "green" if m.pnl_abs_sum >= 0 else "red"
+                sc_c = "green" if reg_score > 0.55 else "red" if reg_score < 0.45 else "yellow"
+                rt.add_row(
+                    name,
+                    regime,
+                    str(m.trade_count),
+                    f"{m.win_rate:.1f}%",
+                    f"[{pnl_c}]{m.pnl_abs_sum:+,.4f}[/{pnl_c}]",
+                    f"{m.profit_factor:.2f}",
+                    f"[{sc_c}]{reg_score:.2f}[/{sc_c}]",
+                )
+        console.print(rt)
+
+    # ── Score-Legende ──────────────────────────────────────────────────────
+    console.print(
+        f"\n[dim]Score-Legende: "
+        f"[green]> 0.55[/green] = überdurchschnittlich | "
+        f"[yellow]0.45–0.55[/yellow] = neutral | "
+        f"[red]< 0.45[/red] = unterdurchschnittlich\n"
+        f"Neutral-Score 0.50 = weniger als {settings.PERF_TRACKER_MIN_TRADES} Trades "
+        f"(kein ausreichender Datensatz)\n"
+        f"Performance-Gewicht im Meta-Selector: {settings.PERF_SELECTOR_WEIGHT} "
+        f"(max ±{settings.PERF_SELECTOR_WEIGHT * 0.5:.3f} Anpassung)[/dim]"
+    )
+    console.print()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Krypto Trading Bot + Backtester",
@@ -119,6 +234,10 @@ def main():
     parser.add_argument(
         "--multi", action="store_true",
         help="Multi-Strategy-Modus (Meta-Selector) – gilt für Trading UND Backtest",
+    )
+    parser.add_argument(
+        "--strategy-stats", action="store_true", dest="strategy_stats",
+        help="Strategie-Performance-Übersicht aus DB anzeigen und beenden",
     )
 
     # ── Backtest-Args ─────────────────────────────────────────────────────
@@ -167,6 +286,11 @@ def main():
     )
 
     args = parser.parse_args()
+
+    # ── Strategy-Stats-Modus ──────────────────────────────────────────────
+    if args.strategy_stats:
+        _show_strategy_stats()
+        return
 
     # ── Backtest-Modus ────────────────────────────────────────────────────
     if args.backtest:

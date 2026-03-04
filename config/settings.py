@@ -31,8 +31,13 @@ class Settings:
 
     STRATEGY: str = os.getenv("STRATEGY", "rsi_ema")
 
+    # Telegram: automatisch aktiv wenn TOKEN + CHAT_ID gesetzt sind.
+    # TELEGRAM_ENABLED=false deaktiviert explizit (z.B. für Tests).
+    TELEGRAM_ENABLED: bool = os.getenv("TELEGRAM_ENABLED", "true").lower() == "true"
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    # Mindest-Konfidenz (0-100) damit ein Signal eine Telegram-Meldung auslöst
+    TELEGRAM_MIN_CONFIDENCE: float = float(os.getenv("TELEGRAM_MIN_CONFIDENCE", 50.0))
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///data/trades.db")
 

@@ -10,6 +10,7 @@ from src.engine.risk_engine import RiskEngine
 from src.storage.trade_repository import TradeRepository
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager
+from src.utils.telegram_notifier import TelegramNotifier
 
 logger = setup_logger("bot", settings.LOG_LEVEL)
 
@@ -28,9 +29,17 @@ class TradingBot:
         self.strategy = get_strategy(settings.STRATEGY)
         self.risk = RiskManager()
         self.repo = TradeRepository()
+        self.tg = TelegramNotifier()
         self.pairs: List[str] = settings.TRADING_PAIRS
         self.running = False
         self._open_trade_ids: Dict[str, int] = {}  # symbol → DB-trade-id
+
+        self.tg.notify_bot_start(
+            mode=settings.TRADING_MODE,
+            strategy=settings.STRATEGY,
+            pairs=settings.TRADING_PAIRS,
+            timeframe=settings.TIMEFRAME,
+        )
 
     def _process_pair(self, symbol: str):
         """Analysiert ein Handelspaar und führt ggf. eine Order aus."""
@@ -59,6 +68,17 @@ class TradingBot:
                     cost = entry_price * pos_size
                     pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
                     self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
+                    self.tg.notify_trade_closed(
+                        symbol=symbol,
+                        side="long",
+                        entry=entry_price,
+                        exit_price=current_price,
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
+                        reason=exit_reason,
+                        strategy=self.strategy.name,
+                        is_paper=settings.TRADING_MODE == "paper",
+                    )
             return
 
         # Kaufsignal
@@ -93,6 +113,20 @@ class TradingBot:
                     )
                     if trade_id:
                         self._open_trade_ids[symbol] = trade_id
+                    if pos:
+                        self.tg.notify_trade_opened(
+                            symbol=symbol,
+                            side="long",
+                            entry=current_price,
+                            sl=pos.stop_loss,
+                            tp=pos.take_profit,
+                            rr=round(rr, 2),
+                            amount=amount,
+                            strategy=self.strategy.name,
+                            confidence=round(signal.confidence * 100, 1),
+                            regime="UNKNOWN",
+                            is_paper=settings.TRADING_MODE == "paper",
+                        )
 
         # Verkaufssignal
         elif signal.is_sell() and symbol in self.risk.open_positions:
@@ -113,6 +147,17 @@ class TradingBot:
                     pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
                     self.repo.close_trade(
                         trade_id, current_price, pnl, pnl_pct, signal.reason
+                    )
+                    self.tg.notify_trade_closed(
+                        symbol=symbol,
+                        side="long",
+                        entry=entry_price,
+                        exit_price=current_price,
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
+                        reason=signal.reason,
+                        strategy=self.strategy.name,
+                        is_paper=settings.TRADING_MODE == "paper",
                     )
         else:
             logger.debug(f"HOLD {symbol} | {signal.reason}")
@@ -171,6 +216,12 @@ class TradingBot:
             f"  Gewinner:       {stats['winning_trades']}\n"
             f"  Win-Rate:       {stats['winrate_pct']:.1f}%"
         )
+        self.tg.notify_bot_stop(
+            balance=stats["balance"],
+            total_pnl=stats["total_pnl"],
+            total_trades=stats["total_trades"],
+            winrate=stats["winrate_pct"],
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -204,12 +255,20 @@ class MultiStrategyBot:
         self.selector = MetaSelector()
         self.risk = RiskEngine()
         self.repo = TradeRepository()
+        self.tg = TelegramNotifier()
         self.pairs: List[str] = settings.TRADING_PAIRS
         self.running = False
         self._open_trade_ids: Dict[str, int] = {}  # symbol → DB-trade-id
 
         strat_names = [s.name for s in self.strategies]
         logger.info(f"Aktive Strategien: {strat_names}")
+
+        self.tg.notify_bot_start(
+            mode=settings.TRADING_MODE,
+            strategy="AUTO (Meta-Selector)",
+            pairs=settings.TRADING_PAIRS,
+            timeframe=settings.TIMEFRAME,
+        )
 
     def _process_pair(self, symbol: str):
         """Führt den vollständigen Analyse- und Ausführungszyklus für ein Pair durch."""
@@ -250,6 +309,17 @@ class MultiStrategyBot:
                     cost = entry_price * pos_size
                     pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
                     self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
+                    self.tg.notify_trade_closed(
+                        symbol=symbol,
+                        side=pos_side,
+                        entry=entry_price,
+                        exit_price=current_price,
+                        pnl=pnl,
+                        pnl_pct=pnl_pct,
+                        reason=exit_reason,
+                        strategy=position.strategy_name,
+                        is_paper=settings.TRADING_MODE == "paper",
+                    )
             return
 
         # Offene Position: kein neuer Einstieg
@@ -305,6 +375,13 @@ class MultiStrategyBot:
                 regime=best.regime,
                 reason_rejected=block_reason,
             )
+            # Telegram: nur bei kritischen Block-Gründen (Daily-Loss, Max-Trades)
+            self.tg.notify_trade_blocked(
+                symbol=symbol,
+                strategy=best.strategy_name,
+                side=best.side.value,
+                reason=block_reason,
+            )
             return
 
         # 6. Signal registrieren (Duplikatschutz)
@@ -340,6 +417,19 @@ class MultiStrategyBot:
                 )
                 if trade_id:
                     self._open_trade_ids[symbol] = trade_id
+                self.tg.notify_trade_opened(
+                    symbol=symbol,
+                    side="long",
+                    entry=best.entry,
+                    sl=best.stop_loss,
+                    tp=best.take_profit,
+                    rr=best.rr,
+                    amount=amount,
+                    strategy=best.strategy_name,
+                    confidence=best.confidence,
+                    regime=best.regime,
+                    is_paper=settings.TRADING_MODE == "paper",
+                )
 
         elif best.side == Side.SHORT:
             self._execute_short(symbol, best)
@@ -398,6 +488,19 @@ class MultiStrategyBot:
             )
             if trade_id:
                 self._open_trade_ids[symbol] = trade_id
+            self.tg.notify_trade_opened(
+                symbol=symbol,
+                side="short",
+                entry=signal.entry,
+                sl=signal.stop_loss,
+                tp=signal.take_profit,
+                rr=signal.rr,
+                amount=amount,
+                strategy=signal.strategy_name,
+                confidence=signal.confidence,
+                regime=signal.regime,
+                is_paper=settings.TRADING_MODE == "paper",
+            )
 
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
@@ -454,4 +557,10 @@ class MultiStrategyBot:
             f"  Gewinner:       {stats['winning_trades']}\n"
             f"  Win-Rate:       {stats['winrate_pct']:.1f}%\n"
             f"  Daily Loss:     {stats['daily_loss']:.2f} USDT"
+        )
+        self.tg.notify_bot_stop(
+            balance=stats["balance"],
+            total_pnl=stats["total_pnl"],
+            total_trades=stats["total_trades"],
+            winrate=stats["winrate_pct"],
         )

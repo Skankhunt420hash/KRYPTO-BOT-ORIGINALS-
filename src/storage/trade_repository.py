@@ -155,8 +155,14 @@ class TradeRepository:
             if conn is None:
                 return False
             try:
-                conn.execute(sql, params)
+                cursor = conn.execute(sql, params)
                 conn.commit()
+                if cursor.rowcount == 0:
+                    logger.warning(
+                        f"close_trade: trade_id={trade_id} nicht in DB gefunden "
+                        f"– kein Update durchgeführt"
+                    )
+                    return False
                 color = "green" if pnl_abs >= 0 else "red"
                 logger.info(
                     f"[{color}]DB CLOSE[/{color}] trade_id={trade_id} | "
@@ -196,7 +202,8 @@ class TradeRepository:
             return False
 
         try:
-            risk_amount = round(abs(entry_price - stop_loss), 6)
+            # position_size=0 für rejected (kein Trade ausgeführt) → risk_amount=0.0
+            risk_amount = 0.0
             now = _utcnow()
 
             sql = """
@@ -237,6 +244,43 @@ class TradeRepository:
 
         except Exception as e:
             logger.error(f"[red]DB-Fehler save_rejected_signal ({symbol}):[/red] {e}")
+            return False
+
+    # ------------------------------------------------------------------
+    # Schreiben: Offenen Trade bei Bot-Stop als cancelled markieren
+    # ------------------------------------------------------------------
+
+    def cancel_open_trade(self, trade_id: int, reason: str = "bot_stopped") -> bool:
+        """
+        Markiert einen offenen Trade als 'cancelled' (z.B. beim Bot-Stop).
+        Verhindert dauerhaft verbleibende status='open' Einträge nach Neustart.
+        """
+        if not self.available:
+            return False
+
+        try:
+            now = _utcnow()
+            sql = """
+                UPDATE trades
+                SET status     = 'cancelled',
+                    reason_close = ?,
+                    updated_at = ?
+                WHERE id = ? AND status = 'open'
+            """
+            conn = get_connection()
+            if conn is None:
+                return False
+            try:
+                cursor = conn.execute(sql, (reason, now, trade_id))
+                conn.commit()
+                if cursor.rowcount > 0:
+                    logger.info(f"DB CANCEL trade_id={trade_id} | {reason}")
+                return cursor.rowcount > 0
+            finally:
+                conn.close()
+
+        except Exception as e:
+            logger.error(f"[red]DB-Fehler cancel_open_trade (id={trade_id}):[/red] {e}")
             return False
 
     # ------------------------------------------------------------------

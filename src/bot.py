@@ -155,6 +155,12 @@ class TradingBot:
 
     def stop(self):
         self.running = False
+
+        # Verbleibende offene DB-Einträge als cancelled markieren
+        for symbol, trade_id in list(self._open_trade_ids.items()):
+            self.repo.cancel_open_trade(trade_id, reason="bot_stopped")
+        self._open_trade_ids.clear()
+
         stats = self.risk.get_stats()
         logger.info("\n[bold cyan]Bot wurde gestoppt.[/bold cyan]")
         logger.info(
@@ -377,6 +383,12 @@ class MultiStrategyBot:
 
     def stop(self):
         self.running = False
+
+        # Verbleibende offene DB-Einträge als cancelled markieren
+        for symbol, trade_id in list(self._open_trade_ids.items()):
+            self.repo.cancel_open_trade(trade_id, reason="bot_stopped")
+        self._open_trade_ids.clear()
+
         stats = self.risk.get_stats()
         logger.info("\n[bold cyan]Multi-Bot gestoppt.[/bold cyan]")
         logger.info(

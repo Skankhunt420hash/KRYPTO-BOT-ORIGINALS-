@@ -1,0 +1,55 @@
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+
+class Settings:
+    EXCHANGE: str = os.getenv("EXCHANGE", "binance")
+    API_KEY: str = os.getenv("API_KEY", "")
+    API_SECRET: str = os.getenv("API_SECRET", "")
+
+    TRADING_MODE: str = os.getenv("TRADING_MODE", "paper")
+
+    TRADING_PAIRS: list = os.getenv(
+        "TRADING_PAIRS", "BTC/USDT,ETH/USDT"
+    ).split(",")
+
+    TIMEFRAME: str = os.getenv("TIMEFRAME", "1h")
+
+    MAX_POSITION_SIZE_PERCENT: float = float(
+        os.getenv("MAX_POSITION_SIZE_PERCENT", 2.0)
+    )
+    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 5))
+    STOP_LOSS_PERCENT: float = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
+    TAKE_PROFIT_PERCENT: float = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
+    TRAILING_STOP: bool = os.getenv("TRAILING_STOP", "false").lower() == "true"
+
+    PAPER_TRADING_BALANCE: float = float(
+        os.getenv("PAPER_TRADING_BALANCE", 10000.0)
+    )
+
+    STRATEGY: str = os.getenv("STRATEGY", "rsi_ema")
+
+    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
+    DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///data/trades.db")
+
+    LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+
+    RSI_PERIOD: int = 14
+    RSI_OVERSOLD: float = 30.0
+    RSI_OVERBOUGHT: float = 70.0
+
+    EMA_SHORT: int = 9
+    EMA_LONG: int = 21
+
+    MACD_FAST: int = 12
+    MACD_SLOW: int = 26
+    MACD_SIGNAL: int = 9
+
+    CANDLE_LIMIT: int = 200
+
+
+settings = Settings()

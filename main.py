@@ -18,16 +18,18 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
-from src.bot import TradingBot
+from src.bot import TradingBot, MultiStrategyBot
 from config.settings import settings
 
 console = Console()
 
 
-def print_banner():
+def print_banner(multi: bool = False):
+    mode_str = "[green]Multi-Strategy (Auto)[/green]" if multi else "[yellow]Single-Strategy[/yellow]"
     console.print(Panel.fit(
-        "[bold cyan]KRYPTO-BOT ORIGINALS[/bold cyan]\n"
-        "[dim]Automatisierter Krypto Trading Bot[/dim]",
+        f"[bold cyan]KRYPTO-BOT ORIGINALS[/bold cyan]\n"
+        f"[dim]Automatisierter Krypto Trading Bot[/dim]\n"
+        f"Modus: {mode_str}",
         border_style="cyan",
     ))
 
@@ -54,12 +56,19 @@ def main():
     parser = argparse.ArgumentParser(description="Krypto Trading Bot")
     parser.add_argument("--once", action="store_true", help="Nur einen Zyklus ausführen")
     parser.add_argument("--status", action="store_true", help="Status anzeigen und beenden")
-    parser.add_argument("--interval", type=int, default=None, help="Wartezeit in Sekunden (überschreibt Zeitrahmen)")
+    parser.add_argument("--interval", type=int, default=None, help="Wartezeit in Sekunden")
+    parser.add_argument(
+        "--multi", action="store_true",
+        help="Multi-Strategy-Modus mit automatischer Strategie-Auswahl (Meta-Selector)"
+    )
     args = parser.parse_args()
 
-    print_banner()
+    # Multi-Modus aktiv wenn: --multi Flag gesetzt ODER STRATEGY=auto in .env
+    use_multi = args.multi or settings.STRATEGY.lower() == "auto"
 
-    bot = TradingBot()
+    print_banner(multi=use_multi)
+
+    bot = MultiStrategyBot() if use_multi else TradingBot()
 
     if args.status:
         show_status(bot)

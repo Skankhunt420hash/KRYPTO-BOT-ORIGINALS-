@@ -15,6 +15,7 @@ class Position:
     take_profit: float
     side: str = "long"
     highest_price: float = field(default=0.0)
+    strategy_name: str = ""  # welche Strategie diese Position eröffnet hat
 
     @property
     def value(self) -> float:

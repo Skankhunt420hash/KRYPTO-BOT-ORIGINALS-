@@ -1,0 +1,139 @@
+from typing import Dict, List, Optional
+from src.strategies.signal import EnhancedSignal, Side
+from src.engine.regime import Regime
+from src.utils.logger import setup_logger
+
+logger = setup_logger("meta_selector")
+
+# Regime-Fit-Tabelle: je höher der Wert, desto besser passt die Strategie zum Regime.
+# Neue Strategien haben primäre Werte, Legacy-Strategien werden ebenfalls bewertet.
+REGIME_STRATEGY_FIT: Dict[Regime, Dict[str, float]] = {
+    Regime.TREND_UP: {
+        "TrendContinuation": 1.00,
+        "MomentumPullback": 0.90,
+        "VolatilityBreakout": 0.50,
+        "RangeReversion": 0.10,
+        "RSI_EMA": 0.60,
+        "MACD_Crossover": 0.70,
+        "Combined": 0.65,
+    },
+    Regime.TREND_DOWN: {
+        "TrendContinuation": 0.80,
+        "MomentumPullback": 0.70,
+        "VolatilityBreakout": 0.50,
+        "RangeReversion": 0.10,
+        "RSI_EMA": 0.40,
+        "MACD_Crossover": 0.50,
+        "Combined": 0.45,
+    },
+    Regime.RANGE: {
+        "RangeReversion": 1.00,
+        "MomentumPullback": 0.40,
+        "VolatilityBreakout": 0.30,
+        "TrendContinuation": 0.20,
+        "RSI_EMA": 0.65,
+        "MACD_Crossover": 0.30,
+        "Combined": 0.50,
+    },
+    Regime.HIGH_VOLATILITY: {
+        "VolatilityBreakout": 1.00,
+        "MomentumPullback": 0.70,
+        "TrendContinuation": 0.50,
+        "RangeReversion": 0.10,
+        "RSI_EMA": 0.30,
+        "MACD_Crossover": 0.40,
+        "Combined": 0.35,
+    },
+    Regime.LOW_VOLATILITY: {
+        "RangeReversion": 0.85,
+        "TrendContinuation": 0.30,
+        "MomentumPullback": 0.20,
+        "VolatilityBreakout": 0.10,
+        "RSI_EMA": 0.55,
+        "MACD_Crossover": 0.55,
+        "Combined": 0.55,
+    },
+}
+
+# Mindest-Regime-Fit damit ein Signal überhaupt in die Bewertung kommt
+MIN_REGIME_FIT: float = 0.35
+
+
+class MetaSelector:
+    """
+    Bewertet alle eingehenden Signale und wählt das beste für den aktuellen
+    Markt aus.
+
+    Score-Formel:
+        score = regime_fit * 0.35 + confidence_norm * 0.35
+                + rr_score * 0.20 + volume_bonus * 0.10
+    """
+
+    def select(
+        self,
+        signals: List[EnhancedSignal],
+        regime: Regime,
+        symbol: str,
+    ) -> Optional[EnhancedSignal]:
+        actionable = [
+            s for s in signals
+            if s.symbol == symbol and s.is_actionable()
+        ]
+
+        if not actionable:
+            logger.debug(
+                f"{symbol} | Kein aktionsfähiges Signal "
+                f"({len(signals)} Strategien liefen, Regime: {regime.value})"
+            )
+            return None
+
+        regime_fits = REGIME_STRATEGY_FIT.get(regime, {})
+        scored: List[tuple] = []
+
+        for sig in actionable:
+            fit = regime_fits.get(sig.strategy_name, 0.30)
+
+            if fit < MIN_REGIME_FIT:
+                logger.debug(
+                    f"[REGIME-FILTER] {sig.strategy_name} | {symbol} | "
+                    f"fit={fit:.2f} < {MIN_REGIME_FIT} – blockiert"
+                )
+                continue
+
+            conf_score = sig.confidence / 100.0
+            rr_score = min(sig.rr / 5.0, 1.0)
+            vol_bonus = 0.10 if sig.volume_confirmed else 0.0
+
+            total = (
+                fit * 0.35
+                + conf_score * 0.35
+                + rr_score * 0.20
+                + vol_bonus * 0.10
+            )
+            scored.append((total, sig))
+            logger.debug(
+                f"  {sig.strategy_name:<22} | fit={fit:.2f} "
+                f"conf={sig.confidence:.0f} rr={sig.rr:.2f} "
+                f"vol={'✓' if sig.volume_confirmed else '✗'} "
+                f"→ score={total:.3f}"
+            )
+
+        if not scored:
+            logger.debug(
+                f"{symbol} | Alle Signale durch Regime-Filter blockiert "
+                f"(Regime: {regime.value})"
+            )
+            return None
+
+        scored.sort(key=lambda x: x[0], reverse=True)
+        best_score, best = scored[0]
+
+        logger.info(
+            f"[cyan]META-SELECTOR[/cyan] {symbol} | "
+            f"Gewinner: [bold]{best.strategy_name}[/bold] | "
+            f"Score={best_score:.3f} | Regime={regime.value} | "
+            f"Seite={best.side.value.upper()} | "
+            f"conf={best.confidence:.0f} | RR={best.rr:.2f} | "
+            f"{best.reason}"
+        )
+        return best

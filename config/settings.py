@@ -51,5 +51,35 @@ class Settings:
 
     CANDLE_LIMIT: int = 200
 
+    # ------------------------------------------------------------------
+    # Multi-Strategy / Meta-Selector Einstellungen
+    # ------------------------------------------------------------------
+
+    # STRATEGY=auto aktiviert den Multi-Strategy-Modus mit Meta-Selector
+    # Einzelne Strategien: rsi_ema, macd_crossover, combined
+    # Multi-Modus:         auto
+
+    # Mindest-Konfidenz für aktionsfähige Signale (0-100)
+    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", 40.0))
+
+    # Mindest-RR für aktionsfähige Signale
+    MIN_RR: float = float(os.getenv("MIN_RR", 1.5))
+
+    # ------------------------------------------------------------------
+    # Risk Engine Cooldowns & Limits
+    # ------------------------------------------------------------------
+
+    # Tagesverlust-Limit in % des Startkapitals (danach kein neues Trading)
+    DAILY_LOSS_LIMIT_PCT: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 5.0))
+
+    # Wartezeit nach Schließung einer Position auf demselben Coin (Minuten)
+    COIN_COOLDOWN_MINUTES: int = int(os.getenv("COIN_COOLDOWN_MINUTES", 60))
+
+    # Wartezeit nach einem Verlust-Trade für dieselbe Strategie (Minuten)
+    STRATEGY_COOLDOWN_MINUTES: int = int(os.getenv("STRATEGY_COOLDOWN_MINUTES", 30))
+
+    # Schutz vor doppelten Signalen: gleiche Strategie + Symbol in N Minuten (Minuten)
+    DUPLICATE_SIGNAL_MINUTES: int = int(os.getenv("DUPLICATE_SIGNAL_MINUTES", 15))
+
 
 settings = Settings()

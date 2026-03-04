@@ -7,6 +7,7 @@ from src.strategies.signal import Side
 from src.engine.regime import RegimeEngine
 from src.engine.meta_selector import MetaSelector
 from src.engine.risk_engine import RiskEngine
+from src.storage.trade_repository import TradeRepository
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager
 
@@ -26,8 +27,10 @@ class TradingBot:
         self.exchange = ExchangeConnector()
         self.strategy = get_strategy(settings.STRATEGY)
         self.risk = RiskManager()
+        self.repo = TradeRepository()
         self.pairs: List[str] = settings.TRADING_PAIRS
         self.running = False
+        self._open_trade_ids: Dict[str, int] = {}  # symbol → DB-trade-id
 
     def _process_pair(self, symbol: str):
         """Analysiert ein Handelspaar und führt ggf. eine Order aus."""
@@ -43,8 +46,19 @@ class TradingBot:
         if exit_reason:
             position = self.risk.open_positions.get(symbol)
             if position:
+                # Position-Daten vor dem Schließen sichern (danach aus open_positions entfernt)
+                entry_price = position.entry_price
+                pos_size = position.amount
+
                 self.exchange.create_market_sell_order(symbol, position.amount)
-                self.risk.close_position(symbol, current_price)
+                pnl = self.risk.close_position(symbol, current_price)
+
+                # DB aktualisieren
+                trade_id = self._open_trade_ids.pop(symbol, None)
+                if trade_id is not None and pnl is not None:
+                    cost = entry_price * pos_size
+                    pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+                    self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
             return
 
         # Kaufsignal
@@ -52,22 +66,54 @@ class TradingBot:
             amount = self.risk.calculate_position_size(current_price)
             order = self.exchange.create_market_buy_order(symbol, amount)
             if order:
-                self.risk.open_position(symbol, current_price, amount)
+                pos = self.risk.open_position(symbol, current_price, amount)
                 logger.info(
                     f"[bold green]KAUF[/bold green] {symbol} | "
                     f"Grund: {signal.reason} | Konfidenz: {signal.confidence:.0%}"
                 )
+                # DB speichern
+                if pos:
+                    rr = (pos.take_profit - pos.entry_price) / max(
+                        pos.entry_price - pos.stop_loss, 1e-9
+                    )
+                    trade_id = self.repo.save_open_trade(
+                        symbol=symbol,
+                        timeframe=settings.TIMEFRAME,
+                        strategy_name=self.strategy.name,
+                        side="long",
+                        entry_price=current_price,
+                        stop_loss=pos.stop_loss,
+                        take_profit=pos.take_profit,
+                        position_size=amount,
+                        rr_planned=round(rr, 2),
+                        confidence=round(signal.confidence * 100, 1),
+                        regime="UNKNOWN",
+                        reason_open=signal.reason,
+                        order_id=str(order.get("id", "")),
+                    )
+                    if trade_id:
+                        self._open_trade_ids[symbol] = trade_id
 
         # Verkaufssignal
         elif signal.is_sell() and symbol in self.risk.open_positions:
             position = self.risk.open_positions[symbol]
+            entry_price = position.entry_price
+            pos_size = position.amount
+
             order = self.exchange.create_market_sell_order(symbol, position.amount)
             if order:
-                self.risk.close_position(symbol, current_price)
+                pnl = self.risk.close_position(symbol, current_price)
                 logger.info(
                     f"[bold red]VERKAUF[/bold red] {symbol} | "
                     f"Grund: {signal.reason}"
                 )
+                trade_id = self._open_trade_ids.pop(symbol, None)
+                if trade_id is not None and pnl is not None:
+                    cost = entry_price * pos_size
+                    pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+                    self.repo.close_trade(
+                        trade_id, current_price, pnl, pnl_pct, signal.reason
+                    )
         else:
             logger.debug(f"HOLD {symbol} | {signal.reason}")
 
@@ -151,8 +197,10 @@ class MultiStrategyBot:
         self.regime_engine = RegimeEngine()
         self.selector = MetaSelector()
         self.risk = RiskEngine()
+        self.repo = TradeRepository()
         self.pairs: List[str] = settings.TRADING_PAIRS
         self.running = False
+        self._open_trade_ids: Dict[str, int] = {}  # symbol → DB-trade-id
 
         strat_names = [s.name for s in self.strategies]
         logger.info(f"Aktive Strategien: {strat_names}")
@@ -171,13 +219,26 @@ class MultiStrategyBot:
         if exit_reason:
             position = self.risk.open_positions.get(symbol)
             if position:
+                # Position-Daten vor dem Schließen sichern
+                entry_price = position.entry_price
+                pos_size = position.amount
+
                 self.exchange.create_market_sell_order(symbol, position.amount)
                 pnl = self.risk.close_position(symbol, current_price)
-                logger.info(
+
+                log_msg = (
                     f"[bold]EXIT[/bold] {symbol} | Grund: {exit_reason} | "
                     f"PnL: {pnl:+.4f} USDT" if pnl is not None else
                     f"[bold]EXIT[/bold] {symbol} | Grund: {exit_reason}"
                 )
+                logger.info(log_msg)
+
+                # DB schließen
+                trade_id = self._open_trade_ids.pop(symbol, None)
+                if trade_id is not None and pnl is not None:
+                    cost = entry_price * pos_size
+                    pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+                    self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
             return
 
         # Offene Position: kein neuer Einstieg
@@ -219,6 +280,20 @@ class MultiStrategyBot:
                 f"[yellow]BLOCKIERT[/yellow] {symbol} | "
                 f"Strategie: {best.strategy_name} | Grund: {block_reason}"
             )
+            # Blockiertes Signal optional in DB speichern (für Analyse)
+            self.repo.save_rejected_signal(
+                symbol=symbol,
+                timeframe=best.timeframe,
+                strategy_name=best.strategy_name,
+                side=best.side.value,
+                entry_price=best.entry,
+                stop_loss=best.stop_loss,
+                take_profit=best.take_profit,
+                rr_planned=best.rr,
+                confidence=best.confidence,
+                regime=best.regime,
+                reason_rejected=block_reason,
+            )
             return
 
         # 6. Signal registrieren (Duplikatschutz)
@@ -237,6 +312,25 @@ class MultiStrategyBot:
                     f"SL: {best.stop_loss:.4f} | TP: {best.take_profit:.4f} | "
                     f"RR: {best.rr:.2f} | Konfidenz: {best.confidence:.0f}/100"
                 )
+                # DB speichern
+                trade_id = self.repo.save_open_trade(
+                    symbol=symbol,
+                    timeframe=best.timeframe,
+                    strategy_name=best.strategy_name,
+                    side=best.side.value,
+                    entry_price=best.entry,
+                    stop_loss=best.stop_loss,
+                    take_profit=best.take_profit,
+                    position_size=amount,
+                    rr_planned=best.rr,
+                    confidence=best.confidence,
+                    regime=best.regime,
+                    reason_open=best.reason,
+                    order_id=str(order.get("id", "")),
+                )
+                if trade_id:
+                    self._open_trade_ids[symbol] = trade_id
+
         elif best.side == Side.SHORT:
             # Im Spot-Modus: SHORT wird ignoriert, nur geloggt
             logger.debug(

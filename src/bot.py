@@ -62,12 +62,13 @@ class TradingBot:
                 self.exchange.create_market_sell_order(symbol, position.amount)
                 pnl = self.risk.close_position(symbol, current_price)
 
-                # DB aktualisieren
+                # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
                 trade_id = self._open_trade_ids.pop(symbol, None)
-                if trade_id is not None and pnl is not None:
+                if pnl is not None:
                     cost = entry_price * pos_size
                     pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
-                    self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
+                    if trade_id is not None:
+                        self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
                     self.tg.notify_trade_closed(
                         symbol=symbol,
                         side="long",
@@ -113,20 +114,19 @@ class TradingBot:
                     )
                     if trade_id:
                         self._open_trade_ids[symbol] = trade_id
-                    if pos:
-                        self.tg.notify_trade_opened(
-                            symbol=symbol,
-                            side="long",
-                            entry=current_price,
-                            sl=pos.stop_loss,
-                            tp=pos.take_profit,
-                            rr=round(rr, 2),
-                            amount=amount,
-                            strategy=self.strategy.name,
-                            confidence=round(signal.confidence * 100, 1),
-                            regime="UNKNOWN",
-                            is_paper=settings.TRADING_MODE == "paper",
-                        )
+                    self.tg.notify_trade_opened(
+                        symbol=symbol,
+                        side="long",
+                        entry=current_price,
+                        sl=pos.stop_loss,
+                        tp=pos.take_profit,
+                        rr=round(rr, 2),
+                        amount=amount,
+                        strategy=self.strategy.name,
+                        confidence=round(signal.confidence * 100, 1),
+                        regime="UNKNOWN",
+                        is_paper=settings.TRADING_MODE == "paper",
+                    )
 
         # Verkaufssignal
         elif signal.is_sell() and symbol in self.risk.open_positions:
@@ -304,11 +304,13 @@ class MultiStrategyBot:
                     f"Grund: {exit_reason} | PnL: {pnl_str}"
                 )
 
+                # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
                 trade_id = self._open_trade_ids.pop(symbol, None)
-                if trade_id is not None and pnl is not None:
+                if pnl is not None:
                     cost = entry_price * pos_size
                     pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
-                    self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
+                    if trade_id is not None:
+                        self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
                     self.tg.notify_trade_closed(
                         symbol=symbol,
                         side=pos_side,

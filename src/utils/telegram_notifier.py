@@ -15,7 +15,7 @@ Verhalten:
 import time
 from collections import deque
 from datetime import datetime, timezone
-from typing import List
+from typing import Dict, List
 
 import requests
 
@@ -30,6 +30,10 @@ _MAX_MSGS_PER_MIN: int = 20     # Telegram-API-Schutz
 
 # Block-Gründe, die eine Telegram-Meldung auslösen (Cooldowns nicht)
 _IMPORTANT_BLOCK_PREFIXES = ("DAILY LOSS", "MAX TRADES")
+
+# Mindestabstand zwischen Block-Meldungen desselben Typs (verhindert Spam
+# wenn Daily-Limit über viele Zyklen/Paare hinweg aktiv bleibt)
+_BLOCK_NOTIFY_COOLDOWN_S: int = 30 * 60  # 30 Minuten
 
 
 class TelegramNotifier:
@@ -54,6 +58,9 @@ class TelegramNotifier:
 
         # Timestamps der letzten Sends für Rate-Limiting
         self._send_times: deque = deque(maxlen=_MAX_MSGS_PER_MIN)
+
+        # Cooldown-Tracker für Block-Benachrichtigungen (verhindert Spam)
+        self._last_block_notify: Dict[str, float] = {}
 
         if self.enabled:
             logger.info("Telegram-Benachrichtigungen aktiv")
@@ -235,9 +242,20 @@ class TelegramNotifier:
         """
         Signal blockiert – nur bei kritischen Gründen (Daily-Loss, Max-Trades).
         Cooldowns und Duplikate werden nicht gesendet (zu viel Spam).
+        Gleiche Block-Art wird max. 1× pro 30 Minuten gemeldet (Spam-Schutz).
         """
-        if not any(reason.upper().startswith(p) for p in _IMPORTANT_BLOCK_PREFIXES):
+        matched = next(
+            (p for p in _IMPORTANT_BLOCK_PREFIXES if reason.upper().startswith(p)),
+            None,
+        )
+        if not matched:
             return
+
+        # Spam-Schutz: gleicher Block-Typ nur einmal pro Cooldown-Fenster
+        now = time.monotonic()
+        if now - self._last_block_notify.get(matched, 0) < _BLOCK_NOTIFY_COOLDOWN_S:
+            return
+        self._last_block_notify[matched] = now
 
         text = (
             f"⛔ <b>Signal blockiert</b>\n"

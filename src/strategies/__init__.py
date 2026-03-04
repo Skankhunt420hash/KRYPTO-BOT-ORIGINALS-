@@ -36,6 +36,32 @@ def get_all_enhanced_strategies() -> list:
     ]
 
 
+# Registry für den Backtest-Modus (Namen → Klasse)
+_ENHANCED_STRATEGY_REGISTRY = {
+    "momentum_pullback":    MomentumPullbackStrategy,
+    "range_reversion":      RangeReversionStrategy,
+    "volatility_breakout":  VolatilityBreakoutStrategy,
+    "trend_continuation":   TrendContinuationStrategy,
+}
+
+
+def get_enhanced_strategy(name: str) -> EnhancedBaseStrategy:
+    """
+    Gibt eine Enhanced-Strategie für den Backtest-Modus zurück.
+    Unterstützte Namen: momentum_pullback, range_reversion,
+                        volatility_breakout, trend_continuation
+    """
+    cls = _ENHANCED_STRATEGY_REGISTRY.get(name.lower().replace("-", "_"))
+    if cls is None:
+        available = list(_ENHANCED_STRATEGY_REGISTRY.keys())
+        raise ValueError(
+            f"Unbekannte Enhanced-Strategie '{name}'. "
+            f"Verfügbar: {available}. "
+            f"Für alle Strategien gleichzeitig: --multi"
+        )
+    return cls()
+
+
 __all__ = [
     "BaseStrategy",
     "EnhancedBaseStrategy",
@@ -52,4 +78,5 @@ __all__ = [
     "TrendContinuationStrategy",
     "get_strategy",
     "get_all_enhanced_strategies",
+    "get_enhanced_strategy",
 ]

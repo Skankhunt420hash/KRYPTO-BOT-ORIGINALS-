@@ -2,12 +2,17 @@
 """
 KRYPTO-BOT ORIGINALS
 ====================
-Einstiegspunkt des Trading Bots.
+Einstiegspunkt des Trading Bots und Backtesters.
 
-Verwendung:
-    python main.py              # Bot starten (Loop)
+Trading:
     python main.py --once       # Einmaligen Zyklus ausführen
-    python main.py --status     # Nur Kontostand & Status anzeigen
+    python main.py --status     # Kontostand & DB-Statistik anzeigen
+    python main.py --multi      # Multi-Strategy-Modus (Meta-Selector)
+
+Backtesting:
+    python main.py --backtest --csv data/BTC_1h.csv --strategy trend_continuation
+    python main.py --backtest --csv data/BTC_1h.csv --multi
+    python main.py --backtest --csv data/BTC_1h.csv --multi --export results/
 """
 import argparse
 import sys
@@ -96,16 +101,80 @@ def show_status(bot):
 
 
 def main():
-    parser = argparse.ArgumentParser(description="Krypto Trading Bot")
+    parser = argparse.ArgumentParser(
+        description="Krypto Trading Bot + Backtester",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog=(
+            "Backtest-Beispiele:\n"
+            "  python main.py --backtest --csv data/BTC_1h.csv --strategy trend_continuation\n"
+            "  python main.py --backtest --csv data/BTC_1h.csv --multi\n"
+            "  python main.py --backtest --csv data/BTC_1h.csv --multi --export results/\n"
+        ),
+    )
+
+    # ── Trading-Args ──────────────────────────────────────────────────────
     parser.add_argument("--once", action="store_true", help="Nur einen Zyklus ausführen")
     parser.add_argument("--status", action="store_true", help="Status anzeigen und beenden")
     parser.add_argument("--interval", type=int, default=None, help="Wartezeit in Sekunden")
     parser.add_argument(
         "--multi", action="store_true",
-        help="Multi-Strategy-Modus mit automatischer Strategie-Auswahl (Meta-Selector)"
+        help="Multi-Strategy-Modus (Meta-Selector) – gilt für Trading UND Backtest",
     )
+
+    # ── Backtest-Args ─────────────────────────────────────────────────────
+    parser.add_argument(
+        "--backtest", action="store_true",
+        help="Backtest-Modus aktivieren (kein Live-/Paper-Trading)",
+    )
+    parser.add_argument(
+        "--csv", type=str, default=None,
+        help="Pfad zur OHLCV-CSV-Datei (Pflicht im Backtest-Modus)",
+    )
+    parser.add_argument(
+        "--strategy", type=str, default=None,
+        help=(
+            "Strategie für Backtest: momentum_pullback, range_reversion, "
+            "volatility_breakout, trend_continuation"
+        ),
+    )
+    parser.add_argument(
+        "--timeframe", type=str, default=None,
+        help="Zeitrahmen-Override für Backtest (z.B. 1h, 4h) – sonst aus Dateiname",
+    )
+    parser.add_argument(
+        "--export", type=str, default=None,
+        help="Ausgabeverzeichnis für Backtest-Ergebnisse (CSV + JSON)",
+    )
+    parser.add_argument(
+        "--initial-balance", type=float, default=10_000.0, dest="initial_balance",
+        help="Startkapital für Backtest (Standard: 10000 USDT)",
+    )
+    parser.add_argument(
+        "--fee", type=float, default=0.10,
+        help="Handelsgebühr in %% pro Seite (Standard: 0.10)",
+    )
+    parser.add_argument(
+        "--slippage", type=float, default=0.05,
+        help="Slippage in %% (Standard: 0.05)",
+    )
+    parser.add_argument(
+        "--position-size", type=float, default=2.0, dest="position_size",
+        help="Positionsgröße in %% des Kapitals pro Trade (Standard: 2.0)",
+    )
+    parser.add_argument(
+        "--min-confidence", type=float, default=40.0, dest="min_confidence",
+        help="Mindest-Konfidenz 0-100 für Signale im Backtest (Standard: 40)",
+    )
+
     args = parser.parse_args()
 
+    # ── Backtest-Modus ────────────────────────────────────────────────────
+    if args.backtest:
+        from backtest.cli import run_backtest
+        run_backtest(args)
+        return
+
+    # ── Trading-Modus ─────────────────────────────────────────────────────
     # Multi-Modus aktiv wenn: --multi Flag gesetzt ODER STRATEGY=auto in .env
     use_multi = args.multi or settings.STRATEGY.lower() == "auto"
 

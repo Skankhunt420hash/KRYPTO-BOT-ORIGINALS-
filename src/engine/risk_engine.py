@@ -241,6 +241,11 @@ class RiskEngine(RiskManager):
             logger.error(f"check_and_size Fehler für {signal.symbol}: {e}")
             # Sicherer Fallback: ursprüngliches einfaches Sizing
             fallback_amount = self.calculate_position_size(signal.entry)
+            if fallback_amount <= 0:
+                return False, (
+                    f"FALLBACK-SIZING: Menge 0 nach Fehler ({type(e).__name__}) – "
+                    f"Trade blockiert"
+                ), 0.0
             logger.warning(
                 f"Fallback auf einfaches Sizing: {fallback_amount:.6f} "
                 f"(Portfolio-Check übersprungen)"

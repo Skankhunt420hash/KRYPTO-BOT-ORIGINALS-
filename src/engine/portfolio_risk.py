@@ -173,7 +173,6 @@ class PortfolioRiskEngine:
         # Min/Max-Grenzen (in USDT-Notional)
         notional = amount * entry
         if notional < self.cfg.min_position_notional:
-            old_amount = amount
             amount = self.cfg.min_position_notional / entry
             expl += (
                 f" | Unter Minimum ({notional:.2f} < {self.cfg.min_position_notional:.0f} USD) "

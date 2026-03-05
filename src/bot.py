@@ -372,14 +372,13 @@ class MultiStrategyBot:
         if best is None or best.side == Side.NONE:
             return
 
-        # 5. Risk-Engine prüfen
+        # 5. Risk-Engine prüfen (Cooldowns, Daily-Loss, Duplikat-Schutz)
         allowed, block_reason = self.risk.check_signal(best)
         if not allowed:
             logger.info(
                 f"[yellow]BLOCKIERT[/yellow] {symbol} | "
                 f"Strategie: {best.strategy_name} | Grund: {block_reason}"
             )
-            # Blockiertes Signal optional in DB speichern (für Analyse)
             self.repo.save_rejected_signal(
                 symbol=symbol,
                 timeframe=best.timeframe,
@@ -393,7 +392,6 @@ class MultiStrategyBot:
                 regime=best.regime,
                 reason_rejected=block_reason,
             )
-            # Telegram: nur bei kritischen Block-Gründen (Daily-Loss, Max-Trades)
             self.tg.notify_trade_blocked(
                 symbol=symbol,
                 strategy=best.strategy_name,
@@ -402,12 +400,39 @@ class MultiStrategyBot:
             )
             return
 
+        # 5b. Portfolio Risk Engine: Sizing + Exposure-Limits
+        pf_allowed, pf_reason, amount = self.risk.check_and_size(best)
+        if not pf_allowed:
+            logger.info(
+                f"[yellow]PORTFOLIO BLOCKIERT[/yellow] {symbol} | "
+                f"Strategie: {best.strategy_name} | Grund: {pf_reason}"
+            )
+            self.repo.save_rejected_signal(
+                symbol=symbol,
+                timeframe=best.timeframe,
+                strategy_name=best.strategy_name,
+                side=best.side.value,
+                entry_price=best.entry,
+                stop_loss=best.stop_loss,
+                take_profit=best.take_profit,
+                rr_planned=best.rr,
+                confidence=best.confidence,
+                regime=best.regime,
+                reason_rejected=pf_reason,
+            )
+            self.tg.notify_trade_blocked(
+                symbol=symbol,
+                strategy=best.strategy_name,
+                side=best.side.value,
+                reason=pf_reason,
+            )
+            return
+
         # 6. Signal registrieren (Duplikatschutz)
         self.risk.register_signal(best)
 
-        # 7. Order ausführen
+        # 7. Order ausführen (amount kommt von Portfolio Risk Engine)
         if best.side == Side.LONG:
-            amount = self.risk.calculate_position_size(best.entry)
             order = self.exchange.create_market_buy_order(symbol, amount)
             if order:
                 self.risk.open_with_signal(best, amount)
@@ -450,11 +475,13 @@ class MultiStrategyBot:
                 )
 
         elif best.side == Side.SHORT:
-            self._execute_short(symbol, best)
+            self._execute_short(symbol, best, amount)
 
-    def _execute_short(self, symbol: str, signal: "EnhancedSignal") -> None:
+    def _execute_short(
+        self, symbol: str, signal: "EnhancedSignal", amount: float
+    ) -> None:
         """
-        Führt ein SHORT-Signal aus:
+        Führt ein SHORT-Signal aus (amount bereits von Portfolio Risk Engine berechnet):
         - Live + Spot:    blockiert (Spot kann nicht shorten)
         - Live + Futures: nicht implementiert, Warnung ausgeben
         - Paper-Modus:    SHORT vollständig simulieren
@@ -476,9 +503,7 @@ class MultiStrategyBot:
             )
             # Fällt durch in Paper-Simulation
 
-        # Paper-SHORT-Simulation
-        amount = self.risk.calculate_position_size(signal.entry)
-        # Für SHORT: Exchange-Call simuliert das "Verkaufen" (kein echtes Leihen)
+        # Paper-SHORT-Simulation (amount kommt von Portfolio Risk Engine)
         order = self.exchange.create_market_sell_order(symbol, amount)
         if order:
             self.risk.open_with_signal(signal, amount)
@@ -543,7 +568,8 @@ class MultiStrategyBot:
             f"Trades: {stats['total_trades']} | "
             f"Winrate: {stats['winrate_pct']:.1f}% | "
             f"Offene: {stats['open_positions']} | "
-            f"Daily Loss: {stats['daily_loss']:.2f} USDT"
+            f"Daily Loss: {stats['daily_loss']:.2f} USDT | "
+            f"Portfolio-Risiko: {stats.get('portfolio_risk_pct', 0.0):.2f}%"
         )
 
     def run(self, interval_seconds: int = None):

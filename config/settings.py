@@ -121,5 +121,49 @@ class Settings:
     # Bei 0.15: maximale Anpassung = ±0.075 (konservativ)
     PERF_SELECTOR_WEIGHT: float = float(os.getenv("PERF_SELECTOR_WEIGHT", 0.15))
 
+    # ------------------------------------------------------------------
+    # Portfolio Risk Engine & Position Sizing
+    # ------------------------------------------------------------------
+
+    # Sizing-Modus: fixed_notional | fixed_risk_pct | confidence_scaled
+    #   fixed_notional:    fester USDT-Betrag pro Trade
+    #   fixed_risk_pct:    Risiko-basiert auf SL-Distanz (empfohlen)
+    #   confidence_scaled: wie fixed_risk_pct, aber skaliert mit Signal-Konfidenz
+    POSITION_SIZING_MODE: str = os.getenv("POSITION_SIZING_MODE", "fixed_risk_pct")
+
+    # Fester USDT-Betrag pro Trade (nur für fixed_notional)
+    FIXED_NOTIONAL_USD: float = float(os.getenv("FIXED_NOTIONAL_USD", 200.0))
+
+    # Risiko pro Trade als % des Kontos (Basis für fixed_risk_pct + confidence_scaled)
+    # Beispiel: 1.0% von 10.000 USDT = 100 USDT Risiko pro Trade
+    RISK_PER_TRADE_PCT: float = float(os.getenv("RISK_PER_TRADE_PCT", 1.0))
+
+    # Mindest- / Maximal-Positionswert in USDT
+    MIN_POSITION_NOTIONAL: float = float(os.getenv("MIN_POSITION_NOTIONAL", 10.0))
+    MAX_POSITION_NOTIONAL: float = float(os.getenv("MAX_POSITION_NOTIONAL", 5000.0))
+
+    # Skalierungs-Faktor-Grenzen für confidence_scaled
+    # Bei conf=40 (Minimum): CONFIDENCE_MIN_SCALE × Basisbetrag
+    # Bei conf=100 (Maximum): CONFIDENCE_MAX_SCALE × Basisbetrag
+    CONFIDENCE_MIN_SCALE: float = float(os.getenv("CONFIDENCE_MIN_SCALE", 0.5))
+    CONFIDENCE_MAX_SCALE: float = float(os.getenv("CONFIDENCE_MAX_SCALE", 1.5))
+
+    # Maximales Gesamt-Portfolio-Risiko (Summe aller offenen SL-Risiken, % des Kapitals)
+    MAX_TOTAL_OPEN_RISK_PCT: float = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", 10.0))
+
+    # Max. gleichzeitige Positionen gesamt / pro Symbol / pro Strategie
+    MAX_POSITIONS_TOTAL: int = int(os.getenv("MAX_POSITIONS_TOTAL", 5))
+    MAX_POSITIONS_PER_SYMBOL: int = int(os.getenv("MAX_POSITIONS_PER_SYMBOL", 1))
+    MAX_STRATEGY_POSITIONS: int = int(os.getenv("MAX_STRATEGY_POSITIONS", 2))
+
+    # Max. % der Positionen in gleicher Richtung (LONG oder SHORT)
+    MAX_SAME_DIRECTION_EXPOSURE_PCT: float = float(
+        os.getenv("MAX_SAME_DIRECTION_EXPOSURE_PCT", 80.0)
+    )
+
+    # Max. Risiko (% des Kapitals) innerhalb eines Symbol-Clusters
+    # Cluster: BTC/ETH = "majors", alles andere = "alts" (heuristisch)
+    MAX_CLUSTER_RISK_PCT: float = float(os.getenv("MAX_CLUSTER_RISK_PCT", 6.0))
+
 
 settings = Settings()

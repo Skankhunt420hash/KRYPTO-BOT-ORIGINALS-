@@ -4,6 +4,7 @@ from typing import Dict, Optional, Tuple
 from config.settings import settings
 from src.utils.risk_manager import RiskManager, Position
 from src.strategies.signal import EnhancedSignal, Side
+from src.engine.portfolio_risk import PortfolioRiskEngine, build_config_from_settings
 from src.utils.logger import setup_logger
 
 logger = setup_logger("risk_engine")
@@ -31,6 +32,9 @@ class RiskEngine(RiskManager):
 
         self._daily_loss: float = 0.0
         self._daily_loss_date: date = date.today()
+
+        # Portfolio Risk Engine (Position Sizing + Exposure-Limits)
+        self.portfolio = PortfolioRiskEngine(build_config_from_settings())
 
     # ------------------------------------------------------------------
     # Hilfsmethoden
@@ -185,6 +189,65 @@ class RiskEngine(RiskManager):
         )
 
     # ------------------------------------------------------------------
+    # Portfolio Risk: Sizing + Limits (kombiniert, für bot.py)
+    # ------------------------------------------------------------------
+
+    def check_and_size(
+        self, signal: EnhancedSignal
+    ) -> Tuple[bool, str, float]:
+        """
+        Kombiniert Positionsgröße-Berechnung und Portfolio-Limit-Prüfung.
+
+        Ablauf:
+          1. Positionsgröße berechnen (sizing_mode aus Settings)
+          2. Portfolio-Limits prüfen (Exposure, Cluster, Richtung, ...)
+
+        Returns:
+          (allowed: bool, reason: str, amount: float)
+          allowed=False + amount=0.0 → Trade soll blockiert werden
+          allowed=True  + amount>0.0 → Trade kann mit dieser Menge ausgeführt werden
+
+        Fehler im Portfolio-Check crashen den Main-Loop NICHT (try/except).
+        Bei unerwartetem Fehler: Fallback auf alten einfachen Sizing-Modus.
+        """
+        try:
+            # 1. Positionsgröße berechnen
+            amount, sizing_info = self.portfolio.calculate_size(signal, self.balance)
+
+            if amount <= 0:
+                return False, f"SIZING BLOCKIERT: {sizing_info}", 0.0
+
+            # 2. Portfolio-Limits prüfen (mit berechneter Menge)
+            pf_allowed, pf_reason = self.portfolio.check_portfolio_limits(
+                signal, self.balance, self.open_positions, amount
+            )
+            if not pf_allowed:
+                return False, pf_reason, 0.0
+
+            # Erfolg: Risiko-Kennzahlen für Logging berechnen
+            risk_usd = abs(signal.entry - signal.stop_loss) * amount
+            risk_pct = (risk_usd / self.balance * 100) if self.balance > 0 else 0.0
+            notional = amount * signal.entry
+            logger.info(
+                f"[cyan]SIZING[/cyan] {signal.symbol} | "
+                f"Modus: {self.portfolio.cfg.sizing_mode} | "
+                f"{sizing_info} | "
+                f"Notional: {notional:.2f} USDT | "
+                f"Risiko: {risk_pct:.2f}% ({risk_usd:.2f} USDT)"
+            )
+            return True, "OK", amount
+
+        except Exception as e:
+            logger.error(f"check_and_size Fehler für {signal.symbol}: {e}")
+            # Sicherer Fallback: ursprüngliches einfaches Sizing
+            fallback_amount = self.calculate_position_size(signal.entry)
+            logger.warning(
+                f"Fallback auf einfaches Sizing: {fallback_amount:.6f} "
+                f"(Portfolio-Check übersprungen)"
+            )
+            return True, f"FALLBACK-SIZING (Fehler: {type(e).__name__})", fallback_amount
+
+    # ------------------------------------------------------------------
     # Erweiterte Stats
     # ------------------------------------------------------------------
 
@@ -193,4 +256,10 @@ class RiskEngine(RiskManager):
         stats["daily_loss"] = round(abs(self._daily_loss), 2)
         stats["active_coin_cooldowns"] = len(self._coin_cooldown)
         stats["active_strategy_cooldowns"] = len(self._strategy_cooldown)
+        # Portfolio-Exposure-Snapshot
+        try:
+            snapshot = self.portfolio.get_exposure_snapshot(self.open_positions, self.balance)
+            stats["portfolio_risk_pct"] = snapshot["total_risk_pct"]
+        except Exception:
+            stats["portfolio_risk_pct"] = 0.0
         return stats

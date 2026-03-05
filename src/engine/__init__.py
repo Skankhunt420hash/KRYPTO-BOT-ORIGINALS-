@@ -3,6 +3,7 @@ from .meta_selector import MetaSelector
 from .risk_engine import RiskEngine
 from .performance_tracker import PerformanceTracker, StrategyMetrics
 from .strategy_scorer import StrategyScorer
+from .portfolio_risk import PortfolioRiskEngine, PortfolioRiskConfig, build_config_from_settings
 
 __all__ = [
     "RegimeEngine",
@@ -12,4 +13,7 @@ __all__ = [
     "PerformanceTracker",
     "StrategyMetrics",
     "StrategyScorer",
+    "PortfolioRiskEngine",
+    "PortfolioRiskConfig",
+    "build_config_from_settings",
 ]

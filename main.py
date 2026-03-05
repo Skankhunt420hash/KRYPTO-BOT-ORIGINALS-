@@ -240,10 +240,17 @@ def main():
         help="Strategie-Performance-Übersicht aus DB anzeigen und beenden",
     )
 
-    # ── Backtest-Args ─────────────────────────────────────────────────────
+    # ── Backtest / Walk-Forward Args ──────────────────────────────────────
     parser.add_argument(
         "--backtest", action="store_true",
         help="Backtest-Modus aktivieren (kein Live-/Paper-Trading)",
+    )
+    parser.add_argument(
+        "--walk-forward", action="store_true", dest="walk_forward",
+        help=(
+            "Walk-Forward-Evaluation: IS/OOS-Splits über alle Daten "
+            "(benötigt --csv + --strategy oder --multi)"
+        ),
     )
     parser.add_argument(
         "--csv", type=str, default=None,
@@ -285,11 +292,44 @@ def main():
         help="Mindest-Konfidenz 0-100 für Signale im Backtest (Standard: 40)",
     )
 
+    # ── Walk-Forward-spezifische Args ─────────────────────────────────────
+    parser.add_argument(
+        "--is-candles", type=int, default=600, dest="is_candles",
+        help="In-Sample Fenstergröße in Kerzen für WFO (Standard: 600)",
+    )
+    parser.add_argument(
+        "--oos-candles", type=int, default=200, dest="oos_candles",
+        help="Out-of-Sample Fenstergröße in Kerzen für WFO (Standard: 200)",
+    )
+    parser.add_argument(
+        "--wf-step", type=int, default=None, dest="wf_step",
+        help="Roll-Schritt in Kerzen für WFO (Standard: gleich oos-candles)",
+    )
+    parser.add_argument(
+        "--wf-mode", type=str, default="rolling", dest="wf_mode",
+        choices=["rolling", "anchored"],
+        help="Walk-Forward-Modus: 'rolling' (festes IS) oder 'anchored' (wachsendes IS)",
+    )
+    parser.add_argument(
+        "--min-splits", type=int, default=2, dest="min_splits",
+        help="Mindestanzahl valider Splits für WFO (Standard: 2)",
+    )
+    parser.add_argument(
+        "--min-trades-per-split", type=int, default=3, dest="min_trades_per_split",
+        help="Mindest-OOS-Trades für einen 'validen' Split (Standard: 3)",
+    )
+
     args = parser.parse_args()
 
     # ── Strategy-Stats-Modus ──────────────────────────────────────────────
     if args.strategy_stats:
         _show_strategy_stats()
+        return
+
+    # ── Walk-Forward-Modus ────────────────────────────────────────────────
+    if args.walk_forward:
+        from backtest.cli import run_walk_forward
+        run_walk_forward(args)
         return
 
     # ── Backtest-Modus ────────────────────────────────────────────────────

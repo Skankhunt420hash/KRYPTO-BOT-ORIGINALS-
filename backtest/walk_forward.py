@@ -23,10 +23,9 @@ Wichtige Designentscheidungen:
     - Keine doppelten Strategie-Kopien.
 """
 
-import math
 import statistics
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional, Tuple
+from typing import List, Optional, Tuple
 
 import pandas as pd
 
@@ -259,11 +258,15 @@ class WalkForwardEngine:
         i = 0
         while True:
             if cfg.mode == "rolling":
+                # IS-Fenster hat feste Länge und rollt um 'step' vorwärts
                 is_start = i * step
-            else:  # anchored
+                is_end = is_start + is_c
+            else:
+                # anchored: IS startet immer bei 0, wächst mit jedem Schritt;
+                # OOS-Fenster rückt entsprechend vor (kein Loop-Bug mehr)
                 is_start = 0
+                is_end = is_c + i * step
 
-            is_end = is_start + is_c
             oos_start = is_end
             oos_end = oos_start + oos_c
 
@@ -502,12 +505,18 @@ def _overfitting_assessment(
             f"(< 60% – mäßige Konsistenz)"
         )
 
-    if pnl_ratio < 0:
+    if pnl_ratio == 0.0:
+        # _safe_ratio gibt 0.0 zurück wenn IS-PnL ≈ 0 oder IS-PnL negativ
+        # (negativ/negativ wäre ein täuschend positives Verhältnis – daher explizit blockiert)
+        warnings.append(
+            "IS-PnL ist null oder negativ – PnL-Degradation nicht aussagekräftig berechenbar"
+        )
+    elif pnl_ratio < 0:
         warnings.append(
             f"OOS-PnL negativ obwohl IS-PnL positiv "
             f"(Verhältnis={pnl_ratio:.2f} – starke Verschlechterung)"
         )
-    elif 0 <= pnl_ratio < 0.40:
+    elif 0 < pnl_ratio < 0.40:
         warnings.append(
             f"OOS-PnL = {pnl_ratio:.0%} des IS-PnL "
             f"(< 40% – erhebliche Degradation)"
@@ -545,7 +554,15 @@ def _overfitting_assessment(
 # ─────────────────────────────────────────────────────────────────────────────
 
 def _safe_ratio(numerator: float, denominator: float) -> float:
-    """Berechnet numerator / denominator; gibt 0.0 zurück wenn denominator ≈ 0."""
-    if abs(denominator) < 1e-9:
+    """
+    Berechnet numerator / denominator für PnL-Degradations-Ratios.
+
+    Gibt 0.0 zurück wenn:
+    - denominator ≈ 0 (IS-PnL nahezu null)
+    - denominator < 0 (IS bereits verlierend – Ratio wäre täuschend positiv)
+
+    Beispiel: IS=-5, OOS=-3 → ohne Guard wäre ratio=0.6 (positiv, aber irreführend).
+    """
+    if denominator < 1e-9:   # deckt 0, negativ und nahezu-null ab
         return 0.0
     return numerator / denominator

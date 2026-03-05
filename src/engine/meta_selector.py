@@ -154,13 +154,20 @@ class MetaSelector:
             perf_score = 0.5   # neutral default
             perf_adj = 0.0
             if self._scorer is not None and _PERF_WEIGHT > 0:
-                perf_score = self._scorer.get_score(
-                    sig.strategy_name, regime.value
-                )
-                perf_adj = (perf_score - 0.5) * _PERF_WEIGHT
+                try:
+                    perf_score = self._scorer.get_score(
+                        sig.strategy_name, regime.value
+                    )
+                    perf_adj = (perf_score - 0.5) * _PERF_WEIGHT
+                except Exception as e:
+                    logger.warning(
+                        f"Scorer.get_score fehlgeschlagen für {sig.strategy_name}: "
+                        f"{type(e).__name__} – neutraler Score verwendet"
+                    )
 
             total = signal_score + perf_adj
-            scored.append((total, sig))
+            # Speichere signal_score + perf_adj für Logging des Gewinners
+            scored.append((total, sig, signal_score, perf_adj, perf_score))
             logger.debug(
                 f"  {sig.strategy_name:<22} [{sig.side.value.upper():<5}] | "
                 f"fit={fit:.2f} conf={sig.confidence:.0f} rr={sig.rr:.2f} "
@@ -177,19 +184,16 @@ class MetaSelector:
             return None
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        best_score, best = scored[0]
+        best_score, best, best_sig_score, best_perf_adj, best_perf_score = scored[0]
 
-        # Performance-Score für den Gewinner (nur für Logging)
-        perf_score_best = 0.5
+        # Logging: signal_score + perf_adj + final für den Gewinner
         if self._scorer is not None and _PERF_WEIGHT > 0:
-            perf_score_best = self._scorer.get_score(
-                best.strategy_name, regime.value
+            perf_tag = (
+                f" | sig={best_sig_score:.3f} "
+                f"perf={best_perf_score:.2f} adj={best_perf_adj:+.3f}"
             )
-        perf_tag = (
-            f" | perf={perf_score_best:.2f}"
-            if self._scorer is not None
-            else ""
-        )
+        else:
+            perf_tag = ""
 
         logger.info(
             f"[cyan]META-SELECTOR[/cyan] {symbol} | "

@@ -27,10 +27,10 @@ Guardrails:
 - Kein aggressives Bestrafen bei fehlenden Daten
 """
 
-from typing import Dict, Optional
+from typing import Dict
 
 from config.settings import settings
-from src.engine.performance_tracker import PerformanceTracker, StrategyMetrics
+from src.engine.performance_tracker import PerformanceTracker
 from src.utils.logger import setup_logger
 
 logger = setup_logger("strategy_scorer")

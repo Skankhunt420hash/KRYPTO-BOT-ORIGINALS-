@@ -8,7 +8,7 @@ Keine eigene Tabelle – nutzt die bestehende `trades`-Tabelle.
 DB-Fehler lassen den Bot weiterlaufen (gibt leere/neutrale Metriken zurück).
 """
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from config.settings import settings

@@ -534,46 +534,45 @@ class MultiStrategyBot:
             return
 
         self.risk.open_with_signal(signal, amount)
-        if True:  # Scope-Marker (ersetzt 'if order:')
-            logger.info(
-                f"[bold red]SHORT ERÖFFNET [PAPER][/bold red] {symbol} | "
-                f"Strategie: {signal.strategy_name} | "
-                f"Einstieg: {signal.entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
-                f"Menge: {amount:.6f} | SL: {signal.stop_loss:.4f} (oben) | "
-                f"TP: {signal.take_profit:.4f} (unten) | "
-                f"RR: {signal.rr:.2f} | Konfidenz: {signal.confidence:.0f}/100 | "
-                f"Dev: {exec_result.deviation_pct:.3f}%"
-            )
-            trade_id = self.repo.save_open_trade(
-                symbol=symbol,
-                timeframe=signal.timeframe,
-                strategy_name=signal.strategy_name,
-                side=signal.side.value,
-                entry_price=signal.entry,
-                stop_loss=signal.stop_loss,
-                take_profit=signal.take_profit,
-                position_size=amount,
-                rr_planned=signal.rr,
-                confidence=signal.confidence,
-                regime=signal.regime,
-                reason_open=signal.reason,
-                order_id=str(order.get("id", "")),
-            )
-            if trade_id:
-                self._open_trade_ids[symbol] = trade_id
-            self.tg.notify_trade_opened(
-                symbol=symbol,
-                side="short",
-                entry=signal.entry,
-                sl=signal.stop_loss,
-                tp=signal.take_profit,
-                rr=signal.rr,
-                amount=amount,
-                strategy=signal.strategy_name,
-                confidence=signal.confidence,
-                regime=signal.regime,
-                is_paper=settings.TRADING_MODE == "paper",
-            )
+        logger.info(
+            f"[bold red]SHORT ERÖFFNET [PAPER][/bold red] {symbol} | "
+            f"Strategie: {signal.strategy_name} | "
+            f"Einstieg: {signal.entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
+            f"Menge: {amount:.6f} | SL: {signal.stop_loss:.4f} (oben) | "
+            f"TP: {signal.take_profit:.4f} (unten) | "
+            f"RR: {signal.rr:.2f} | Konfidenz: {signal.confidence:.0f}/100 | "
+            f"Dev: {exec_result.deviation_pct:.3f}%"
+        )
+        trade_id = self.repo.save_open_trade(
+            symbol=symbol,
+            timeframe=signal.timeframe,
+            strategy_name=signal.strategy_name,
+            side=signal.side.value,
+            entry_price=signal.entry,
+            stop_loss=signal.stop_loss,
+            take_profit=signal.take_profit,
+            position_size=amount,
+            rr_planned=signal.rr,
+            confidence=signal.confidence,
+            regime=signal.regime,
+            reason_open=signal.reason,
+            order_id=exec_result.order.get("id", ""),
+        )
+        if trade_id:
+            self._open_trade_ids[symbol] = trade_id
+        self.tg.notify_trade_opened(
+            symbol=symbol,
+            side="short",
+            entry=signal.entry,
+            sl=signal.stop_loss,
+            tp=signal.take_profit,
+            rr=signal.rr,
+            amount=amount,
+            strategy=signal.strategy_name,
+            confidence=signal.confidence,
+            regime=signal.regime,
+            is_paper=settings.TRADING_MODE == "paper",
+        )
 
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""

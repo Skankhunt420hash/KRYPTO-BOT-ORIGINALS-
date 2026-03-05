@@ -200,5 +200,62 @@ class Settings:
     # Erstellen: touch ./KILL_SWITCH | Entfernen: rm ./KILL_SWITCH
     KILL_SWITCH_FILE: str = os.getenv("KILL_SWITCH_FILE", "./KILL_SWITCH")
 
+    # ------------------------------------------------------------------
+    # Health Monitor & Watchdog
+    # ------------------------------------------------------------------
+
+    # Health-Monitoring global aktivieren/deaktivieren
+    HEALTH_MONITOR_ENABLED: bool = (
+        os.getenv("HEALTH_MONITOR_ENABLED", "true").lower() == "true"
+    )
+
+    # Zeit (Sekunden) ohne Heartbeat bevor Warnung / Pause
+    # Ein Heartbeat wird zu Beginn jedes run_cycle() gesetzt
+    HEALTH_HEARTBEAT_TIMEOUT_SEC: int = int(
+        os.getenv("HEALTH_HEARTBEAT_TIMEOUT_SEC", 300)
+    )
+
+    # Wie alt dürfen Marktdaten (OHLCV) maximal sein (Sekunden)
+    # Abhängig vom TIMEFRAME: 1h → 4000s sinnvoll, 5m → 600s
+    DATA_STALE_TIMEOUT_SEC: int = int(os.getenv("DATA_STALE_TIMEOUT_SEC", 600))
+
+    # Wie oft Health-Snapshots geloggt werden (Sekunden)
+    HEALTH_CHECK_INTERVAL_SEC: int = int(os.getenv("HEALTH_CHECK_INTERVAL_SEC", 300))
+
+    # Zeitfenster für Error-Rate-Monitoring (Minuten)
+    ERROR_WINDOW_MINUTES: int = int(os.getenv("ERROR_WINDOW_MINUTES", 30))
+
+    # Maximale Fehler im Zeitfenster bis Status DEGRADED
+    MAX_ERRORS_PER_WINDOW: int = int(os.getenv("MAX_ERRORS_PER_WINDOW", 20))
+
+    # Maximale kritische Fehler im Zeitfenster bis Status ERROR
+    MAX_CRITICAL_ERRORS_PER_WINDOW: int = int(
+        os.getenv("MAX_CRITICAL_ERRORS_PER_WINDOW", 5)
+    )
+
+    # Mindestabstand zwischen gleichen Telegram-Health-Alerts (Sekunden)
+    TELEGRAM_ALERT_COOLDOWN_SEC: int = int(
+        os.getenv("TELEGRAM_ALERT_COOLDOWN_SEC", 300)
+    )
+
+    # Trading pausieren wenn Marktdaten stale sind (konservativ: False)
+    HEALTH_PAUSE_ON_STALE_DATA: bool = (
+        os.getenv("HEALTH_PAUSE_ON_STALE_DATA", "false").lower() == "true"
+    )
+
+    # Trading pausieren wenn Heartbeat-Timeout überschritten (konservativ: False)
+    HEALTH_PAUSE_ON_HEARTBEAT_MISS: bool = (
+        os.getenv("HEALTH_PAUSE_ON_HEARTBEAT_MISS", "false").lower() == "true"
+    )
+
+    # Ressourcenüberwachung via psutil (True = aktiviert wenn psutil installiert)
+    RESOURCE_MONITOR_ENABLED: bool = (
+        os.getenv("RESOURCE_MONITOR_ENABLED", "true").lower() == "true"
+    )
+
+    # Grenzwerte für Ressourcen-Warnungen
+    MAX_MEMORY_PCT: float = float(os.getenv("MAX_MEMORY_PCT", 80.0))
+    MAX_CPU_PCT: float = float(os.getenv("MAX_CPU_PCT", 90.0))
+
 
 settings = Settings()

@@ -10,6 +10,7 @@ from src.engine.risk_engine import RiskEngine
 from src.engine.performance_tracker import PerformanceTracker
 from src.engine.strategy_scorer import StrategyScorer
 from src.engine.execution_engine import ExecutionEngine
+from src.engine.health_monitor import HealthMonitor
 from src.storage.trade_repository import TradeRepository
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager
@@ -270,6 +271,9 @@ class MultiStrategyBot:
         # Execution Quality Layer (Retry, Slippage-Schutz, Circuit Breaker, Fail-Safes)
         self.exec_engine = ExecutionEngine(self.exchange, self.tg)
 
+        # Health Monitor & Watchdog (24/7 Überwachung)
+        self.health = HealthMonitor(exec_engine=self.exec_engine, tg=self.tg)
+
         strat_names = [s.name for s in self.strategies]
         logger.info(f"Aktive Strategien: {strat_names}")
         if self.perf_tracker.available:
@@ -295,8 +299,10 @@ class MultiStrategyBot:
         df = self.exchange.fetch_ohlcv(symbol)
         if df.empty:
             logger.warning(f"{symbol} | Keine OHLCV-Daten erhalten – übersprungen")
+            self.health.record_error("warning", f"{symbol}: Keine OHLCV-Daten")
             return
 
+        self.health.update_data_freshness(symbol)
         current_price = float(df["close"].iloc[-1])
 
         # 1. Exits prüfen (SL, TP, Trailing Stop) – side-aware
@@ -578,6 +584,9 @@ class MultiStrategyBot:
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
 
+        # Heartbeat aktualisieren (Health Monitor Liveness-Tracking)
+        self.health.update_heartbeat()
+
         # Execution Engine Gesundheitscheck (Circuit Breaker, Emergency Pause, Kill-Switch)
         if not self.exec_engine.is_healthy:
             status = self.exec_engine.get_status()
@@ -602,6 +611,7 @@ class MultiStrategyBot:
                 self._process_pair(symbol)
             except Exception as e:
                 logger.error(f"Unerwarteter Fehler bei {symbol}: {e}")
+                self.health.record_error("error", f"{symbol}: {e}")
 
         stats = self.risk.get_stats()
         logger.info(
@@ -614,6 +624,9 @@ class MultiStrategyBot:
             f"Daily Loss: {stats['daily_loss']:.2f} USDT | "
             f"Portfolio-Risiko: {stats.get('portfolio_risk_pct', 0.0):.2f}%"
         )
+
+        # Health-Monitor auswerten (Watchdog-Reaktionen, Snapshots)
+        self.health.check_and_react()
 
     def run(self, interval_seconds: int = None):
         """Startet den Multi-Strategy-Bot in einer Dauerschleife."""

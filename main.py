@@ -215,6 +215,62 @@ def _show_strategy_stats() -> None:
     console.print()
 
 
+def _show_health() -> None:
+    """
+    Zeigt Health-Monitor-Konfiguration und – falls der Bot lief –
+    den letzten gespeicherten Snapshot.
+    Aufgerufen durch: python3 main.py --health
+    """
+    from src.engine.health_monitor import HealthMonitor, HealthStatus
+
+    console.print()
+    console.print(Panel.fit(
+        "[bold cyan]HEALTH MONITOR STATUS[/bold cyan]\n"
+        f"[dim]Modus: {settings.TRADING_MODE.upper()} | "
+        f"Enabled: {settings.HEALTH_MONITOR_ENABLED}[/dim]",
+        border_style="cyan",
+    ))
+
+    # Konfiguration anzeigen
+    cfg_table = Table(title="⚙️  Health-Monitor-Konfiguration", box=box.ROUNDED, border_style="blue")
+    cfg_table.add_column("Parameter", style="bold")
+    cfg_table.add_column("Wert", justify="right")
+    cfg_table.add_row("HEALTH_MONITOR_ENABLED", str(settings.HEALTH_MONITOR_ENABLED))
+    cfg_table.add_row("HEALTH_HEARTBEAT_TIMEOUT_SEC", f"{settings.HEALTH_HEARTBEAT_TIMEOUT_SEC}s")
+    cfg_table.add_row("DATA_STALE_TIMEOUT_SEC", f"{settings.DATA_STALE_TIMEOUT_SEC}s")
+    cfg_table.add_row("HEALTH_CHECK_INTERVAL_SEC", f"{settings.HEALTH_CHECK_INTERVAL_SEC}s")
+    cfg_table.add_row("ERROR_WINDOW_MINUTES", f"{settings.ERROR_WINDOW_MINUTES}min")
+    cfg_table.add_row("MAX_ERRORS_PER_WINDOW", str(settings.MAX_ERRORS_PER_WINDOW))
+    cfg_table.add_row("MAX_CRITICAL_ERRORS_PER_WINDOW", str(settings.MAX_CRITICAL_ERRORS_PER_WINDOW))
+    cfg_table.add_row("HEALTH_PAUSE_ON_STALE_DATA", str(settings.HEALTH_PAUSE_ON_STALE_DATA))
+    cfg_table.add_row("HEALTH_PAUSE_ON_HEARTBEAT_MISS", str(settings.HEALTH_PAUSE_ON_HEARTBEAT_MISS))
+    cfg_table.add_row("RESOURCE_MONITOR_ENABLED", str(settings.RESOURCE_MONITOR_ENABLED))
+    cfg_table.add_row("MAX_MEMORY_PCT", f"{settings.MAX_MEMORY_PCT}%")
+    cfg_table.add_row("MAX_CPU_PCT", f"{settings.MAX_CPU_PCT}%")
+    cfg_table.add_row("TELEGRAM_ALERT_COOLDOWN_SEC", f"{settings.TELEGRAM_ALERT_COOLDOWN_SEC}s")
+    console.print(cfg_table)
+
+    # Kurzer Live-Snapshot (einmaliger Check)
+    if settings.HEALTH_MONITOR_ENABLED:
+        monitor = HealthMonitor()
+        monitor.log_snapshot_now()
+        snap = monitor.get_snapshot()
+        if snap:
+            snap_table = Table(title="📊 Aktueller Snapshot", box=box.ROUNDED, border_style="green")
+            snap_table.add_column("Feld", style="bold")
+            snap_table.add_column("Wert")
+            for k, v in snap.items():
+                if k not in ("settings",):
+                    snap_table.add_row(str(k), str(v)[:80])
+            console.print(snap_table)
+
+    console.print(
+        "\n[dim]Hinweis: Live-Status nur im laufenden Bot verfügbar "
+        "(per Log oder künftig via health-file). "
+        "Starte mit: python3 main.py --multi[/dim]\n"
+    )
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Krypto Trading Bot + Backtester",
@@ -238,6 +294,10 @@ def main():
     parser.add_argument(
         "--strategy-stats", action="store_true", dest="strategy_stats",
         help="Strategie-Performance-Übersicht aus DB anzeigen und beenden",
+    )
+    parser.add_argument(
+        "--health", action="store_true", dest="show_health",
+        help="Health-Monitor-Konfiguration + letzten Snapshot anzeigen und beenden",
     )
 
     # ── Backtest / Walk-Forward Args ──────────────────────────────────────
@@ -324,6 +384,11 @@ def main():
     # ── Strategy-Stats-Modus ──────────────────────────────────────────────
     if args.strategy_stats:
         _show_strategy_stats()
+        return
+
+    # ── Health-Monitor-Modus ──────────────────────────────────────────────
+    if args.show_health:
+        _show_health()
         return
 
     # ── Walk-Forward-Modus ────────────────────────────────────────────────

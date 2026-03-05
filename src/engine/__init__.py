@@ -5,6 +5,7 @@ from .performance_tracker import PerformanceTracker, StrategyMetrics
 from .strategy_scorer import StrategyScorer
 from .portfolio_risk import PortfolioRiskEngine, PortfolioRiskConfig, build_config_from_settings
 from .execution_engine import ExecutionEngine, ExecutionResult, CircuitState
+from .health_monitor import HealthMonitor, HealthStatus
 
 __all__ = [
     "RegimeEngine",
@@ -20,4 +21,6 @@ __all__ = [
     "ExecutionEngine",
     "ExecutionResult",
     "CircuitState",
+    "HealthMonitor",
+    "HealthStatus",
 ]

@@ -9,6 +9,7 @@ from src.engine.meta_selector import MetaSelector
 from src.engine.risk_engine import RiskEngine
 from src.engine.performance_tracker import PerformanceTracker
 from src.engine.strategy_scorer import StrategyScorer
+from src.engine.execution_engine import ExecutionEngine
 from src.storage.trade_repository import TradeRepository
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager
@@ -266,6 +267,9 @@ class MultiStrategyBot:
         self.scorer = StrategyScorer(self.perf_tracker)
         self.selector = MetaSelector(scorer=self.scorer)
 
+        # Execution Quality Layer (Retry, Slippage-Schutz, Circuit Breaker, Fail-Safes)
+        self.exec_engine = ExecutionEngine(self.exchange, self.tg)
+
         strat_names = [s.name for s in self.strategies]
         logger.info(f"Aktive Strategien: {strat_names}")
         if self.perf_tracker.available:
@@ -305,11 +309,16 @@ class MultiStrategyBot:
                 pos_side = position.side
 
                 # LONG schließen: Sell-Order / SHORT schließen: Buy-Order (zurückkaufen)
-                if pos_side == "long":
-                    self.exchange.create_market_sell_order(symbol, position.amount)
-                else:
-                    # Paper-SHORT: simuliertes Zurückkaufen
-                    self.exchange.create_market_buy_order(symbol, position.amount)
+                exit_side = "sell" if pos_side == "long" else "buy"
+                exit_result = self.exec_engine.execute_exit(
+                    symbol, exit_side, position.amount
+                )
+                if not exit_result.success:
+                    logger.error(
+                        f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
+                        f"{exit_result.reason} | "
+                        f"Position wird trotzdem lokal geschlossen"
+                    )
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -431,48 +440,58 @@ class MultiStrategyBot:
         # 6. Signal registrieren (Duplikatschutz)
         self.risk.register_signal(best)
 
-        # 7. Order ausführen (amount kommt von Portfolio Risk Engine)
+        # 7. Order ausführen via Execution Engine (Retry, Slippage, Fail-Safes)
         if best.side == Side.LONG:
-            order = self.exchange.create_market_buy_order(symbol, amount)
-            if order:
-                self.risk.open_with_signal(best, amount)
-                logger.info(
-                    f"[bold green]LONG ERÖFFNET[/bold green] {symbol} | "
-                    f"Strategie: {best.strategy_name} | "
-                    f"Einstieg: {best.entry:.4f} | Menge: {amount:.6f} | "
-                    f"SL: {best.stop_loss:.4f} | TP: {best.take_profit:.4f} | "
-                    f"RR: {best.rr:.2f} | Konfidenz: {best.confidence:.0f}/100"
+            exec_result = self.exec_engine.execute_entry(
+                symbol=symbol, order_side="buy", amount=amount, signal=best
+            )
+            if not exec_result.success:
+                logger.warning(
+                    f"[yellow]EXECUTION BLOCKIERT[/yellow] {symbol} | "
+                    f"Strategie: {best.strategy_name} | Grund: {exec_result.reason}"
                 )
-                trade_id = self.repo.save_open_trade(
-                    symbol=symbol,
-                    timeframe=best.timeframe,
-                    strategy_name=best.strategy_name,
-                    side=best.side.value,
-                    entry_price=best.entry,
-                    stop_loss=best.stop_loss,
-                    take_profit=best.take_profit,
-                    position_size=amount,
-                    rr_planned=best.rr,
-                    confidence=best.confidence,
-                    regime=best.regime,
-                    reason_open=best.reason,
-                    order_id=str(order.get("id", "")),
-                )
-                if trade_id:
-                    self._open_trade_ids[symbol] = trade_id
-                self.tg.notify_trade_opened(
-                    symbol=symbol,
-                    side="long",
-                    entry=best.entry,
-                    sl=best.stop_loss,
-                    tp=best.take_profit,
-                    rr=best.rr,
-                    amount=amount,
-                    strategy=best.strategy_name,
-                    confidence=best.confidence,
-                    regime=best.regime,
-                    is_paper=settings.TRADING_MODE == "paper",
-                )
+                return
+
+            self.risk.open_with_signal(best, amount)
+            logger.info(
+                f"[bold green]LONG ERÖFFNET[/bold green] {symbol} | "
+                f"Strategie: {best.strategy_name} | "
+                f"Einstieg: {best.entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
+                f"Menge: {amount:.6f} | SL: {best.stop_loss:.4f} | "
+                f"TP: {best.take_profit:.4f} | RR: {best.rr:.2f} | "
+                f"Konfidenz: {best.confidence:.0f}/100 | "
+                f"Dev: {exec_result.deviation_pct:.3f}%"
+            )
+            trade_id = self.repo.save_open_trade(
+                symbol=symbol,
+                timeframe=best.timeframe,
+                strategy_name=best.strategy_name,
+                side=best.side.value,
+                entry_price=best.entry,
+                stop_loss=best.stop_loss,
+                take_profit=best.take_profit,
+                position_size=amount,
+                rr_planned=best.rr,
+                confidence=best.confidence,
+                regime=best.regime,
+                reason_open=best.reason,
+                order_id=exec_result.order.get("id", ""),
+            )
+            if trade_id:
+                self._open_trade_ids[symbol] = trade_id
+            self.tg.notify_trade_opened(
+                symbol=symbol,
+                side="long",
+                entry=best.entry,
+                sl=best.stop_loss,
+                tp=best.take_profit,
+                rr=best.rr,
+                amount=amount,
+                strategy=best.strategy_name,
+                confidence=best.confidence,
+                regime=best.regime,
+                is_paper=settings.TRADING_MODE == "paper",
+            )
 
         elif best.side == Side.SHORT:
             self._execute_short(symbol, best, amount)
@@ -503,16 +522,27 @@ class MultiStrategyBot:
             )
             # Fällt durch in Paper-Simulation
 
-        # Paper-SHORT-Simulation (amount kommt von Portfolio Risk Engine)
-        order = self.exchange.create_market_sell_order(symbol, amount)
-        if order:
-            self.risk.open_with_signal(signal, amount)
+        # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
+        exec_result = self.exec_engine.execute_entry(
+            symbol=symbol, order_side="sell", amount=amount, signal=signal
+        )
+        if not exec_result.success:
+            logger.warning(
+                f"[yellow]SHORT EXECUTION BLOCKIERT[/yellow] {symbol} | "
+                f"Strategie: {signal.strategy_name} | Grund: {exec_result.reason}"
+            )
+            return
+
+        self.risk.open_with_signal(signal, amount)
+        if True:  # Scope-Marker (ersetzt 'if order:')
             logger.info(
                 f"[bold red]SHORT ERÖFFNET [PAPER][/bold red] {symbol} | "
                 f"Strategie: {signal.strategy_name} | "
-                f"Einstieg: {signal.entry:.4f} | Menge: {amount:.6f} | "
-                f"SL: {signal.stop_loss:.4f} (oben) | TP: {signal.take_profit:.4f} (unten) | "
-                f"RR: {signal.rr:.2f} | Konfidenz: {signal.confidence:.0f}/100"
+                f"Einstieg: {signal.entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
+                f"Menge: {amount:.6f} | SL: {signal.stop_loss:.4f} (oben) | "
+                f"TP: {signal.take_profit:.4f} (unten) | "
+                f"RR: {signal.rr:.2f} | Konfidenz: {signal.confidence:.0f}/100 | "
+                f"Dev: {exec_result.deviation_pct:.3f}%"
             )
             trade_id = self.repo.save_open_trade(
                 symbol=symbol,
@@ -548,6 +578,20 @@ class MultiStrategyBot:
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
+
+        # Execution Engine Gesundheitscheck (Circuit Breaker, Emergency Pause, Kill-Switch)
+        if not self.exec_engine.is_healthy:
+            status = self.exec_engine.get_status()
+            reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
+            logger.warning(
+                f"[yellow]EXECUTION PAUSIERT[/yellow] – "
+                f"Zyklus übersprungen | Grund: {reason} | "
+                f"Status: CB={status['circuit_state']} "
+                f"Errors={status['consecutive_errors']} "
+                f"KillSwitch={status['kill_switch']}"
+            )
+            return
+
         # Scorer zu Beginn jedes Zyklus aktualisieren (liest neue Trades aus DB)
         try:
             self.scorer.refresh()

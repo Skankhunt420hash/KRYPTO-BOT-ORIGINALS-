@@ -165,5 +165,40 @@ class Settings:
     # Cluster: BTC/ETH = "majors", alles andere = "alts" (heuristisch)
     MAX_CLUSTER_RISK_PCT: float = float(os.getenv("MAX_CLUSTER_RISK_PCT", 6.0))
 
+    # ------------------------------------------------------------------
+    # Execution Quality Layer & Fail-Safes
+    # ------------------------------------------------------------------
+
+    # Anzahl der Retries bei temporären Fehlern (Timeout, Netzwerk, ...)
+    EXECUTION_MAX_RETRIES: int = int(os.getenv("EXECUTION_MAX_RETRIES", 3))
+
+    # Initiale Wartezeit (Sekunden) zwischen Retries – verdoppelt sich exponentiell
+    EXECUTION_RETRY_BACKOFF_SEC: float = float(os.getenv("EXECUTION_RETRY_BACKOFF_SEC", 2.0))
+
+    # Maximale erlaubte Preisabweichung zwischen Signal-Entry und aktuellem Ticker (%)
+    # 0.0 = Prüfung deaktiviert
+    MAX_ENTRY_DEVIATION_PCT: float = float(os.getenv("MAX_ENTRY_DEVIATION_PCT", 0.5))
+
+    # Maximale Slippage-Events in einem Fenster bevor Emergency Pause
+    MAX_SLIPPAGE_EVENTS_WINDOW: int = int(os.getenv("MAX_SLIPPAGE_EVENTS_WINDOW", 5))
+
+    # Anzahl aufeinanderfolgender Execution-Fehler bis Circuit Breaker auslöst
+    MAX_CONSECUTIVE_EXEC_ERRORS: int = int(os.getenv("MAX_CONSECUTIVE_EXEC_ERRORS", 5))
+
+    # Anzahl aufeinanderfolgender Rejections bevor Emergency Pause ausgelöst wird
+    MAX_CONSECUTIVE_REJECTIONS: int = int(os.getenv("MAX_CONSECUTIVE_REJECTIONS", 10))
+
+    # Bei Execution-Fehlern Bot automatisch pausieren (Emergency Pause)
+    EMERGENCY_PAUSE_ON_EXEC_ERRORS: bool = (
+        os.getenv("EMERGENCY_PAUSE_ON_EXEC_ERRORS", "true").lower() == "true"
+    )
+
+    # Cooldown-Zeit des Circuit Breakers in Sekunden
+    CIRCUIT_BREAKER_COOLDOWN_SEC: int = int(os.getenv("CIRCUIT_BREAKER_COOLDOWN_SEC", 300))
+
+    # Pfad zur Kill-Switch-Datei: Bot pausiert wenn diese Datei existiert
+    # Erstellen: touch ./KILL_SWITCH | Entfernen: rm ./KILL_SWITCH
+    KILL_SWITCH_FILE: str = os.getenv("KILL_SWITCH_FILE", "./KILL_SWITCH")
+
 
 settings = Settings()

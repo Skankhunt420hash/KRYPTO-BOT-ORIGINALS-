@@ -30,7 +30,6 @@ TradingBot (Legacy):
 
 import time
 from collections import deque
-from dataclasses import dataclass
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Deque, Dict, List, Optional, Tuple
@@ -58,13 +57,6 @@ class HealthStatus(Enum):
     DEGRADED = "degraded"
     PAUSED   = "paused"
     ERROR    = "error"
-
-
-@dataclass
-class ErrorEvent:
-    timestamp: float
-    level: str     # "warning" | "error" | "critical"
-    message: str
 
 
 # ─────────────────────────────────────────────────────────────────────────────

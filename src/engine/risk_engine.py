@@ -1,10 +1,11 @@
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from typing import Dict, Optional, Tuple
 
 from config.settings import settings
 from src.utils.risk_manager import RiskManager, Position
 from src.strategies.signal import EnhancedSignal, Side
 from src.engine.portfolio_risk import PortfolioRiskEngine, build_config_from_settings
+from src.engine.runtime_control import runtime_control
 from src.utils.logger import setup_logger
 
 logger = setup_logger("risk_engine")
@@ -32,6 +33,9 @@ class RiskEngine(RiskManager):
 
         self._daily_loss: float = 0.0
         self._daily_loss_date: date = date.today()
+        self._last_gate_reason: str = "init"
+        self._last_gate_at: str = datetime.now(timezone.utc).isoformat()
+        self._daily_loss_risk_off_latched: bool = False
 
         # Portfolio Risk Engine (Position Sizing + Exposure-Limits)
         self.portfolio = PortfolioRiskEngine(build_config_from_settings())
@@ -45,7 +49,13 @@ class RiskEngine(RiskManager):
         if self._daily_loss_date != today:
             self._daily_loss = 0.0
             self._daily_loss_date = today
+            self._daily_loss_risk_off_latched = False
             logger.info("Daily Loss Counter zurückgesetzt (neuer Tag).")
+
+    def _reject(self, reason: str) -> Tuple[bool, str]:
+        self._last_gate_reason = reason
+        self._last_gate_at = datetime.now(timezone.utc).isoformat()
+        return False, reason
 
     # ------------------------------------------------------------------
     # Signal-Prüfung (läuft VOR jeder Order)
@@ -57,63 +67,96 @@ class RiskEngine(RiskManager):
         Returns: (erlaubt: bool, grund: str)
         """
         self._reset_daily_loss_if_new_day()
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
+        ctrl = runtime_control.get_snapshot()
+
+        # 0. Runtime-Control-Layer: harte Entry-Sperren
+        # /pause und /riskoff sollen neue Entries blockieren, ohne Exits zu verhindern.
+        if ctrl.get("paused"):
+            return self._reject("CONTROL PAUSE: Neue Entries sind pausiert")
+        if ctrl.get("risk_off"):
+            return self._reject("RISK OFF: Neue Entries sind vorübergehend deaktiviert")
+
+        # 0b. Signal-Integrität (verhindert kaputte Orders frühzeitig)
+        if signal.entry <= 0:
+            return self._reject(f"INVALID SIGNAL: Entry <= 0 ({signal.entry})")
+        if signal.side == Side.LONG and not (signal.stop_loss < signal.entry < signal.take_profit):
+            return self._reject("INVALID SIGNAL: LONG benötigt SL < Entry < TP")
+        if signal.side == Side.SHORT and not (signal.stop_loss > signal.entry > signal.take_profit):
+            return self._reject("INVALID SIGNAL: SHORT benötigt SL > Entry > TP")
 
         # 1. Daily Loss Limit
         daily_limit = self._initial_balance * (settings.DAILY_LOSS_LIMIT_PCT / 100)
         if abs(self._daily_loss) >= daily_limit:
-            return False, (
+            if not self._daily_loss_risk_off_latched:
+                self._daily_loss_risk_off_latched = True
+                logger.warning(
+                    "Daily-Loss-Limit erreicht -> neue Entries werden blockiert "
+                    "(interner Risk-Gate-Latch aktiv)."
+                )
+            return self._reject(
                 f"DAILY LOSS LIMIT: Tagesverlust {abs(self._daily_loss):.2f} USDT "
                 f">= Limit {daily_limit:.2f} USDT – Trading pausiert"
             )
 
-        # 2. Coin-Cooldown
+        # 2. Optionaler Volatilitäts-Stop (Regime HIGH_VOLATILITY)
+        if settings.RISK_BLOCK_HIGH_VOLATILITY:
+            regime = (signal.regime or "").upper()
+            if regime == "HIGH_VOLATILITY":
+                return self._reject(
+                    "VOLATILITY BLOCK: Regime=HIGH_VOLATILITY – "
+                    "Trading in hoher Volatilität deaktiviert"
+                )
+
+        # 3. Coin-Cooldown
         coin_cd = self._coin_cooldown.get(signal.symbol)
         if coin_cd:
             elapsed_min = (now - coin_cd).total_seconds() / 60
             if elapsed_min < settings.COIN_COOLDOWN_MINUTES:
                 remaining = settings.COIN_COOLDOWN_MINUTES - elapsed_min
-                return False, (
+                return self._reject(
                     f"COIN COOLDOWN: {signal.symbol} noch {remaining:.0f}min gesperrt"
                 )
 
-        # 3. Strategy-Cooldown
+        # 4. Strategy-Cooldown
         strat_cd = self._strategy_cooldown.get(signal.strategy_name)
         if strat_cd:
             elapsed_min = (now - strat_cd).total_seconds() / 60
             if elapsed_min < settings.STRATEGY_COOLDOWN_MINUTES:
                 remaining = settings.STRATEGY_COOLDOWN_MINUTES - elapsed_min
-                return False, (
+                return self._reject(
                     f"STRATEGY COOLDOWN: {signal.strategy_name} "
                     f"noch {remaining:.0f}min gesperrt"
                 )
 
-        # 4. Duplicate-Signal-Schutz (richtungsbewusst: long/short unabhängig)
+        # 5. Duplicate-Signal-Schutz (richtungsbewusst: long/short unabhängig)
         dup_key = f"{signal.strategy_name}_{signal.symbol}_{signal.side.value}"
         dup_ts = self._recent_signals.get(dup_key)
         if dup_ts:
             elapsed_min = (now - dup_ts).total_seconds() / 60
             if elapsed_min < settings.DUPLICATE_SIGNAL_MINUTES:
-                return False, (
+                return self._reject(
                     f"DUPLICATE SIGNAL: {dup_key} bereits vor "
                     f"{elapsed_min:.0f}min gesehen"
                 )
 
-        # 5. Position bereits offen / Max-Trades
+        # 6. Position bereits offen / Max-Trades
         if signal.symbol in self.open_positions:
-            return False, f"Position für {signal.symbol} bereits offen"
+            return self._reject(f"Position für {signal.symbol} bereits offen")
         if len(self.open_positions) >= self.max_open_trades:
-            return False, (
+            return self._reject(
                 f"MAX TRADES: {len(self.open_positions)}/{self.max_open_trades} "
                 f"Positionen offen"
             )
 
+        self._last_gate_reason = "OK"
+        self._last_gate_at = datetime.now(timezone.utc).isoformat()
         return True, "OK"
 
     def register_signal(self, signal: EnhancedSignal):
         """Registriert ein Signal zur Duplikats-Erkennung (richtungsbewusst)."""
         dup_key = f"{signal.strategy_name}_{signal.symbol}_{signal.side.value}"
-        self._recent_signals[dup_key] = datetime.utcnow()
+        self._recent_signals[dup_key] = datetime.now(timezone.utc)
 
     # ------------------------------------------------------------------
     # Position eröffnen mit Signal-Levels (SL/TP aus EnhancedSignal)
@@ -169,7 +212,7 @@ class RiskEngine(RiskManager):
 
     def _on_position_closed(self, symbol: str, pnl: float, strategy_name: str):
         """Setzt Cooldowns und aktualisiert Daily Loss nach Trade-Schließung."""
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         self._coin_cooldown[symbol] = now
 
@@ -267,4 +310,26 @@ class RiskEngine(RiskManager):
             stats["portfolio_risk_pct"] = snapshot["total_risk_pct"]
         except Exception:
             stats["portfolio_risk_pct"] = 0.0
+        stats["risk_gate_last_reason"] = self._last_gate_reason
+        stats["risk_gate_last_at"] = self._last_gate_at
         return stats
+
+    def get_gate_status(self) -> dict:
+        self._reset_daily_loss_if_new_day()
+        daily_limit = self._initial_balance * (settings.DAILY_LOSS_LIMIT_PCT / 100)
+        ctrl = runtime_control.get_snapshot()
+        return {
+            "paused": bool(ctrl.get("paused")),
+            "risk_off": bool(ctrl.get("risk_off")),
+            "daily_loss_usdt": round(abs(self._daily_loss), 2),
+            "daily_loss_limit_usdt": round(daily_limit, 2),
+            "daily_loss_limit_pct": float(settings.DAILY_LOSS_LIMIT_PCT),
+            "open_positions": len(self.open_positions),
+            "max_open_positions": self.max_open_trades,
+            "active_coin_cooldowns": len(self._coin_cooldown),
+            "active_strategy_cooldowns": len(self._strategy_cooldown),
+            "last_gate_reason": self._last_gate_reason,
+            "last_gate_at": self._last_gate_at,
+            "risk_per_trade_pct": float(settings.RISK_PER_TRADE_PCT),
+            "sizing_mode": self.portfolio.cfg.sizing_mode,
+        }

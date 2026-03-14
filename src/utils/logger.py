@@ -1,10 +1,23 @@
 import logging
 import os
+import sys
 from datetime import datetime
 from rich.logging import RichHandler
 from rich.console import Console
 
-console = Console()
+# Windows: CP1252 stdout can crash on Unicode log lines (box drawing, symbols).
+# Best effort: reconfigure std streams to UTF-8 with replacement fallback.
+try:
+    if hasattr(sys.stdout, "reconfigure"):
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    if hasattr(sys.stderr, "reconfigure"):
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except Exception:
+    # Logging must never fail because stream reconfiguration is unavailable.
+    pass
+
+# Force modern terminal handling to keep rich output stable.
+console = Console(file=sys.stdout, legacy_windows=False)
 
 
 def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
@@ -15,6 +28,7 @@ def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
 
     logger = logging.getLogger(name)
     logger.setLevel(log_level)
+    logger.propagate = False
 
     if not logger.handlers:
         rich_handler = RichHandler(

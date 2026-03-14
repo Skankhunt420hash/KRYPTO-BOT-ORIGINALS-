@@ -126,7 +126,7 @@ class HealthMonitor:
             return
 
         psutil_info = (
-            "verfügbar ✓" if _PSUTIL_AVAILABLE
+            "verfuegbar" if _PSUTIL_AVAILABLE
             else "nicht installiert (pip install psutil)"
         )
         logger.info(

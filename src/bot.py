@@ -1,17 +1,21 @@
 import time
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 from config.settings import settings
 from src.exchange.connector import ExchangeConnector
 from src.strategies import get_strategy, get_all_enhanced_strategies, Signal
 from src.strategies.signal import Side
 from src.engine.regime import RegimeEngine
 from src.engine.meta_selector import MetaSelector
+from src.engine.brain import IntelligenceBrain
 from src.engine.risk_engine import RiskEngine
 from src.engine.performance_tracker import PerformanceTracker
 from src.engine.strategy_scorer import StrategyScorer
 from src.engine.execution_engine import ExecutionEngine
 from src.engine.health_monitor import HealthMonitor
+from src.engine.runtime_control import runtime_control
+from src.engine.runtime_state import runtime_state
 from src.storage.trade_repository import TradeRepository
+from src.telegram.control_panel import TelegramControlPanel, PanelCallbacks
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager
 from src.utils.telegram_notifier import TelegramNotifier
@@ -22,7 +26,7 @@ logger = setup_logger("bot", settings.LOG_LEVEL)
 class TradingBot:
     """Haupt-Trading-Bot: Verbindet Exchange, Strategie und Risikomanagement."""
 
-    def __init__(self):
+    def __init__(self, autostart_services: bool = True):
         logger.info("[bold cyan]KRYPTO-BOT ORIGINALS startet...[/bold cyan]")
         logger.info(f"Modus: [yellow]{settings.TRADING_MODE.upper()}[/yellow]")
         logger.info(f"Strategie: [cyan]{settings.STRATEGY}[/cyan]")
@@ -34,25 +38,63 @@ class TradingBot:
         self.risk = RiskManager()
         self.repo = TradeRepository()
         self.tg = TelegramNotifier()
+        self.panel = TelegramControlPanel(
+            notifier=self.tg,
+            callbacks=PanelCallbacks(
+                get_runtime_status=self._runtime_status,
+                request_bot_stop=self.stop,
+                request_bot_start=self._request_start_from_panel,
+            ),
+        )
         self.pairs: List[str] = settings.TRADING_PAIRS
         self.running = False
         self._open_trade_ids: Dict[str, int] = {}  # symbol → DB-trade-id
+        self._last_prices: Dict[str, float] = {}
+        self._active_strategy_runtime: str = getattr(self.strategy, "name", settings.STRATEGY)
+        self._last_selector_snapshot: Dict = {}
+        self._last_brain_snapshot: Dict = {}
+        self._sync_runtime_state()
 
-        self.tg.notify_bot_start(
-            mode=settings.TRADING_MODE,
-            strategy=settings.STRATEGY,
-            pairs=settings.TRADING_PAIRS,
-            timeframe=settings.TIMEFRAME,
+        logger.info(
+            "Telegram Bootstrap | enabled=%s | panel_enabled=%s | token=%s | chat_id=%s",
+            settings.TELEGRAM_ENABLED,
+            settings.TELEGRAM_PANEL_ENABLED,
+            "set" if bool(settings.TELEGRAM_BOT_TOKEN) else "missing",
+            "set" if bool(settings.TELEGRAM_CHAT_ID) else "missing",
         )
+        if autostart_services:
+            self.panel.start_in_background()
+            if self.panel.enabled:
+                logger.info("Telegram Polling gestartet.")
+            else:
+                logger.info("Telegram Polling nicht gestartet (deaktiviert).")
+            self.tg.notify_bot_start(
+                mode=settings.TRADING_MODE,
+                strategy=settings.STRATEGY,
+                pairs=settings.TRADING_PAIRS,
+                timeframe=settings.TIMEFRAME,
+            )
+        logger.info("Bot bereit.")
 
     def _process_pair(self, symbol: str):
         """Analysiert ein Handelspaar und führt ggf. eine Order aus."""
         df = self.exchange.fetch_ohlcv(symbol)
         if df.empty:
+            self._record_last_decision(symbol=symbol, decision="skip", reason="no_data")
             return
 
         signal = self.strategy.analyze(df, symbol)
         current_price = float(df["close"].iloc[-1])
+        self._last_prices[symbol] = current_price
+        self._record_last_signal(
+            symbol=symbol,
+            strategy=self._active_strategy_runtime,
+            side="buy" if signal.is_buy() else "sell" if signal.is_sell() else "none",
+            confidence=round(float(signal.confidence) * 100, 1),
+            reason=signal.reason,
+            entry=current_price,
+            timeframe=settings.TIMEFRAME,
+        )
 
         # Prüfe Exit-Bedingungen für offene Positionen
         exit_reason = self.risk.check_exit_conditions(symbol, current_price)
@@ -83,6 +125,20 @@ class TradingBot:
                         reason=exit_reason,
                         strategy=self.strategy.name,
                         is_paper=settings.TRADING_MODE == "paper",
+                    )
+                    self._record_trade_event(
+                        event="closed",
+                        symbol=symbol,
+                        side="long",
+                        strategy=self.strategy.name,
+                        pnl=pnl,
+                        reason=exit_reason,
+                    )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_closed",
+                        reason=exit_reason,
+                        strategy=self.strategy.name,
                     )
             return
 
@@ -131,6 +187,42 @@ class TradingBot:
                         regime="UNKNOWN",
                         is_paper=settings.TRADING_MODE == "paper",
                     )
+                    self._record_trade_event(
+                        event="opened",
+                        symbol=symbol,
+                        side="long",
+                        strategy=self.strategy.name,
+                        pnl=None,
+                        reason=signal.reason,
+                    )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="entry_opened",
+                        reason=signal.reason,
+                        strategy=self.strategy.name,
+                    )
+            else:
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="entry_failed",
+                    reason="exchange_order_failed",
+                    strategy=self.strategy.name,
+                )
+        elif signal.is_buy() and not self.risk.can_open_trade(symbol):
+            self._record_trade_event(
+                event="blocked",
+                symbol=symbol,
+                side="long",
+                strategy=self.strategy.name,
+                pnl=None,
+                reason="risk_gate_single",
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="entry_blocked",
+                reason="risk_gate_single",
+                strategy=self.strategy.name,
+            )
 
         # Verkaufssignal
         elif signal.is_sell() and symbol in self.risk.open_positions:
@@ -163,7 +255,27 @@ class TradingBot:
                         strategy=self.strategy.name,
                         is_paper=settings.TRADING_MODE == "paper",
                     )
+                    self._record_trade_event(
+                        event="closed",
+                        symbol=symbol,
+                        side="long",
+                        strategy=self.strategy.name,
+                        pnl=pnl,
+                        reason=signal.reason,
+                    )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="manual_exit_closed",
+                        reason=signal.reason,
+                        strategy=self.strategy.name,
+                    )
         else:
+            self._record_last_decision(
+                symbol=symbol,
+                decision="hold",
+                reason=signal.reason,
+                strategy=self.strategy.name,
+            )
             logger.debug(f"HOLD {symbol} | {signal.reason}")
 
     def run_cycle(self):
@@ -174,6 +286,7 @@ class TradingBot:
                 self._process_pair(symbol)
             except Exception as e:
                 logger.error(f"Fehler bei {symbol}: {e}")
+                self.tg.notify_error(f"TradingBot:{symbol}", str(e))
 
         stats = self.risk.get_stats()
         logger.info(
@@ -183,6 +296,7 @@ class TradingBot:
             f"Winrate: {stats['winrate_pct']:.1f}% | "
             f"Offene Pos.: {stats['open_positions']}"
         )
+        self._sync_runtime_state()
 
     def run(self, interval_seconds: int = None):
         """Startet den Bot in einer Dauerschleife."""
@@ -191,6 +305,7 @@ class TradingBot:
         wait = interval_seconds or tf_map.get(settings.TIMEFRAME, 3600)
 
         self.running = True
+        self._sync_runtime_state()
         logger.info(f"[bold]Bot läuft. Interval: {wait}s ({settings.TIMEFRAME})[/bold]")
         logger.info("Drücke [bold]Ctrl+C[/bold] zum Beenden.\n")
 
@@ -202,8 +317,166 @@ class TradingBot:
         except KeyboardInterrupt:
             self.stop()
 
+    def _runtime_status(self) -> Dict:
+        stats = self.risk.get_stats()
+        snap = runtime_state.snapshot()
+        return {
+            "running": self.running,
+            "engine": "connected",
+            "balance": stats.get("balance"),
+            "equity": snap.get("equity", stats.get("balance")),
+            "available_capital": snap.get("available_capital", stats.get("balance")),
+            "total_trades": stats.get("total_trades"),
+            "open_positions": stats.get("open_positions"),
+            "open_positions_detail": snap.get("open_positions", []),
+            "recent_trades": snap.get("recent_trades", []),
+            "recent_logs": snap.get("recent_logs", []),
+            "active_strategy": self._active_strategy_runtime,
+            "enabled_strategies": snap.get("enabled_strategies", [self._active_strategy_runtime]),
+            "last_signal": snap.get("last_signal", {}),
+            "last_decision": snap.get("last_decision", {}),
+            "health_status": "n/a",
+            "daily_loss": stats.get("daily_loss", 0.0),
+            "portfolio_risk_pct": stats.get("portfolio_risk_pct", 0.0),
+            "selector": self._last_selector_snapshot,
+            "risk_gate": {},
+            "brain": snap.get("brain", {}),
+            "app_context": snap.get("app_context", {}),
+        }
+
+    def _build_open_positions_snapshot(self) -> List[Dict]:
+        rows: List[Dict] = []
+        for sym, pos in self.risk.open_positions.items():
+            rows.append(
+                {
+                    "symbol": sym,
+                    "side": getattr(pos, "side", "long"),
+                    "strategy": getattr(pos, "strategy_name", self._active_strategy_runtime),
+                    "entry_price": getattr(pos, "entry_price", 0.0),
+                    "stop_loss": getattr(pos, "stop_loss", 0.0),
+                    "take_profit": getattr(pos, "take_profit", 0.0),
+                    "amount": getattr(pos, "amount", 0.0),
+                }
+            )
+        return rows
+
+    def _sync_runtime_state(self) -> None:
+        stats = self.risk.get_stats()
+        ctrl = runtime_control.get_snapshot()
+        equity = self._calculate_equity()
+        runtime_state.update_engine(
+            running=self.running,
+            mode=settings.TRADING_MODE,
+            paused=ctrl.get("paused", False),
+            risk_off=ctrl.get("risk_off", False),
+            active_strategy=self._active_strategy_runtime,
+            enabled_strategies=[self._active_strategy_runtime],
+            balance=stats.get("balance", 0.0),
+            equity=equity,
+            available_capital=stats.get("balance", 0.0),
+            health_status="n/a",
+            total_trades=stats.get("total_trades", 0),
+            open_positions=self._build_open_positions_snapshot(),
+        )
+        runtime_state.update_brain(self._last_brain_snapshot)
+
+    def _calculate_equity(self) -> float:
+        base_balance = float(self.risk.balance)
+        for sym, pos in self.risk.open_positions.items():
+            mark = self._last_prices.get(sym, pos.entry_price)
+            reserved = pos.entry_price * pos.amount
+            if getattr(pos, "side", "long") == "short":
+                unrealized = (pos.entry_price - mark) * pos.amount
+            else:
+                unrealized = (mark - pos.entry_price) * pos.amount
+            base_balance += reserved + unrealized
+        return round(base_balance, 4)
+
+    def _record_trade_event(
+        self,
+        *,
+        event: str,
+        symbol: str,
+        side: str,
+        strategy: str,
+        pnl: Optional[float],
+        reason: str,
+    ) -> None:
+        runtime_state.append_trade(
+            {
+                "event": event,
+                "symbol": symbol,
+                "side": side,
+                "strategy": strategy,
+                "pnl": pnl,
+                "reason": reason,
+            }
+        )
+        runtime_state.append_log(
+            f"{event.upper()} {symbol} [{side}] {strategy} "
+            f"{f'PnL={pnl:+.4f}' if pnl is not None else ''} {reason}".strip()
+        )
+
+    def _record_last_signal(
+        self,
+        *,
+        symbol: str,
+        strategy: str,
+        side: str,
+        confidence: float,
+        reason: str,
+        entry: float,
+        timeframe: str,
+    ) -> None:
+        runtime_state.set_last_signal(
+            {
+                "symbol": symbol,
+                "strategy": strategy,
+                "side": side,
+                "confidence": confidence,
+                "reason": reason,
+                "entry": entry,
+                "timeframe": timeframe,
+            }
+        )
+
+    def _record_last_decision(
+        self,
+        *,
+        symbol: str,
+        decision: str,
+        reason: str,
+        strategy: Optional[str] = None,
+    ) -> None:
+        runtime_state.set_last_decision(
+            {
+                "symbol": symbol,
+                "decision": decision,
+                "reason": reason,
+                "strategy": strategy or self._active_strategy_runtime,
+            }
+        )
+
+    def _request_start_from_panel(self) -> Tuple[bool, str]:
+        """
+        Telegram-Start im bestehenden Prozess:
+        - Wenn Loop läuft: nur Runtime-Sperren lösen.
+        - Kein Cold-Start einer neuen Hauptschleife aus dem Panel-Thread.
+        """
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+        if self.running:
+            return True, "Bot läuft bereits. Entry-Pause/Risk-Off wurden aufgehoben."
+        return False, (
+            "Engine läuft aktuell nicht. Bitte Bot-Prozess lokal starten "
+            "(Telegram kann keinen sicheren Cold-Start auslösen)."
+        )
+
     def stop(self):
         self.running = False
+        if self.panel:
+            self.panel.stop()
 
         # Verbleibende offene DB-Einträge als cancelled markieren
         for symbol, trade_id in list(self._open_trade_ids.items()):
@@ -211,6 +484,7 @@ class TradingBot:
         self._open_trade_ids.clear()
 
         stats = self.risk.get_stats()
+        self._sync_runtime_state()
         logger.info("\n[bold cyan]Bot wurde gestoppt.[/bold cyan]")
         logger.info(
             f"[bold]ABSCHLUSS-STATISTIK[/bold]\n"
@@ -246,7 +520,7 @@ class MultiStrategyBot:
       7. Order ausführen (Paper oder Live)
     """
 
-    def __init__(self):
+    def __init__(self, autostart_services: bool = True):
         logger.info("[bold cyan]KRYPTO-BOT ORIGINALS – Multi-Strategy-Modus[/bold cyan]")
         logger.info(f"Modus: [yellow]{settings.TRADING_MODE.upper()}[/yellow]")
         logger.info(f"Strategie: [cyan]AUTO (Meta-Selector)[/cyan]")
@@ -262,20 +536,38 @@ class MultiStrategyBot:
         self.pairs: List[str] = settings.TRADING_PAIRS
         self.running = False
         self._open_trade_ids: Dict[str, int] = {}  # symbol → DB-trade-id
+        self._last_prices: Dict[str, float] = {}
+        self._active_strategy_runtime: str = "AUTO"
+        self._last_selector_snapshot: Dict = {}
+        self._last_brain_snapshot: Dict = {}
 
         # Performance-Tracking und adaptives Scoring
         self.perf_tracker = PerformanceTracker()
         self.scorer = StrategyScorer(self.perf_tracker)
         self.selector = MetaSelector(scorer=self.scorer)
+        self.brain = IntelligenceBrain(
+            tracker=self.perf_tracker,
+            scorer=self.scorer,
+            selector=self.selector,
+        )
 
         # Execution Quality Layer (Retry, Slippage-Schutz, Circuit Breaker, Fail-Safes)
         self.exec_engine = ExecutionEngine(self.exchange, self.tg)
 
         # Health Monitor & Watchdog (24/7 Überwachung)
         self.health = HealthMonitor(exec_engine=self.exec_engine, tg=self.tg)
+        self.panel = TelegramControlPanel(
+            notifier=self.tg,
+            callbacks=PanelCallbacks(
+                get_runtime_status=self._runtime_status,
+                request_bot_stop=self.stop,
+                request_bot_start=self._request_start_from_panel,
+            ),
+        )
 
         strat_names = [s.name for s in self.strategies]
         logger.info(f"Aktive Strategien: {strat_names}")
+        self._sync_runtime_state()
         if self.perf_tracker.available:
             known = self.perf_tracker.known_strategies()
             if known:
@@ -287,12 +579,26 @@ class MultiStrategyBot:
                     f"{settings.PERF_TRACKER_MIN_TRADES} Trades)"
                 )
 
-        self.tg.notify_bot_start(
-            mode=settings.TRADING_MODE,
-            strategy="AUTO (Meta-Selector)",
-            pairs=settings.TRADING_PAIRS,
-            timeframe=settings.TIMEFRAME,
+        logger.info(
+            "Telegram Bootstrap | enabled=%s | panel_enabled=%s | token=%s | chat_id=%s",
+            settings.TELEGRAM_ENABLED,
+            settings.TELEGRAM_PANEL_ENABLED,
+            "set" if bool(settings.TELEGRAM_BOT_TOKEN) else "missing",
+            "set" if bool(settings.TELEGRAM_CHAT_ID) else "missing",
         )
+        if autostart_services:
+            self.tg.notify_bot_start(
+                mode=settings.TRADING_MODE,
+                strategy="AUTO (Meta-Selector)",
+                pairs=settings.TRADING_PAIRS,
+                timeframe=settings.TIMEFRAME,
+            )
+            self.panel.start_in_background()
+            if self.panel.enabled:
+                logger.info("Telegram Polling gestartet.")
+            else:
+                logger.info("Telegram Polling nicht gestartet (deaktiviert).")
+        logger.info("Multi-Bot bereit.")
 
     def _process_pair(self, symbol: str):
         """Führt den vollständigen Analyse- und Ausführungszyklus für ein Pair durch."""
@@ -300,10 +606,12 @@ class MultiStrategyBot:
         if df.empty:
             logger.warning(f"{symbol} | Keine OHLCV-Daten erhalten – übersprungen")
             self.health.record_error("warning", f"{symbol}: Keine OHLCV-Daten")
+            self._record_last_decision(symbol=symbol, decision="skip", reason="no_data")
             return
 
         self.health.update_data_freshness(symbol)
         current_price = float(df["close"].iloc[-1])
+        self._last_prices[symbol] = current_price
 
         # 1. Exits prüfen (SL, TP, Trailing Stop) – side-aware
         exit_reason = self.risk.check_exit_conditions(symbol, current_price)
@@ -353,6 +661,20 @@ class MultiStrategyBot:
                         strategy=position.strategy_name,
                         is_paper=settings.TRADING_MODE == "paper",
                     )
+                    self._record_trade_event(
+                        event="closed",
+                        symbol=symbol,
+                        side=pos_side,
+                        strategy=position.strategy_name,
+                        pnl=pnl,
+                        reason=exit_reason,
+                    )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_closed",
+                        reason=exit_reason,
+                        strategy=position.strategy_name,
+                    )
             return
 
         # Offene Position: kein neuer Einstieg
@@ -382,10 +704,34 @@ class MultiStrategyBot:
             except Exception as e:
                 logger.error(f"  {strategy.name} | Fehler: {e}")
 
-        # 4. Meta-Selector
-        best = self.selector.select(signals, regime, symbol)
+        # 4. Intelligence-Brain (inkl. Meta-Selector + adaptive Ranking)
+        best, brain_snapshot = self.brain.evaluate(
+            symbol=symbol,
+            regime=regime,
+            signals=signals,
+        )
+        self._last_brain_snapshot = brain_snapshot
+        self._last_selector_snapshot = brain_snapshot.get("selector", {})
+        runtime_state.update_brain(brain_snapshot)
         if best is None or best.side == Side.NONE:
+            self._record_last_decision(
+                symbol=symbol,
+                decision="no_trade",
+                reason=brain_snapshot.get("last_decision_reason", f"no_valid_signal_in_regime:{regime.value}"),
+            )
             return
+        self._active_strategy_runtime = best.strategy_name
+        self._record_last_signal(
+            symbol=symbol,
+            strategy=best.strategy_name,
+            side=best.side.value,
+            confidence=round(float(best.confidence), 1),
+            reason=best.reason,
+            entry=float(best.entry),
+            timeframe=best.timeframe,
+            rr=float(best.rr),
+            regime=best.regime or regime.value,
+        )
 
         # 5. Risk-Engine prüfen (Cooldowns, Daily-Loss, Duplikat-Schutz)
         allowed, block_reason = self.risk.check_signal(best)
@@ -413,6 +759,31 @@ class MultiStrategyBot:
                 side=best.side.value,
                 reason=block_reason,
             )
+            self._record_trade_event(
+                event="blocked",
+                symbol=symbol,
+                side=best.side.value,
+                strategy=best.strategy_name,
+                pnl=None,
+                reason=block_reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_risk_engine",
+                reason=block_reason,
+                strategy=best.strategy_name,
+            )
+            if block_reason.upper().startswith("DAILY LOSS"):
+                gate = self.risk.get_gate_status()
+                self.tg.notify_daily_loss_limit(
+                    daily_loss_usdt=float(gate.get("daily_loss_usdt", 0.0)),
+                    limit_usdt=float(gate.get("daily_loss_limit_usdt", 0.0)),
+                    mode=settings.TRADING_MODE,
+                )
+                runtime_state.append_log(
+                    f"ALERT daily_loss_limit {gate.get('daily_loss_usdt', 0.0)}/"
+                    f"{gate.get('daily_loss_limit_usdt', 0.0)} USDT"
+                )
             return
 
         # 5b. Portfolio Risk Engine: Sizing + Exposure-Limits
@@ -441,6 +812,20 @@ class MultiStrategyBot:
                 side=best.side.value,
                 reason=pf_reason,
             )
+            self._record_trade_event(
+                event="blocked",
+                symbol=symbol,
+                side=best.side.value,
+                strategy=best.strategy_name,
+                pnl=None,
+                reason=pf_reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_portfolio",
+                reason=pf_reason,
+                strategy=best.strategy_name,
+            )
             return
 
         # 6. Signal registrieren (Duplikatschutz)
@@ -455,6 +840,12 @@ class MultiStrategyBot:
                 logger.warning(
                     f"[yellow]EXECUTION BLOCKIERT[/yellow] {symbol} | "
                     f"Strategie: {best.strategy_name} | Grund: {exec_result.reason}"
+                )
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="execution_blocked",
+                    reason=exec_result.reason,
+                    strategy=best.strategy_name,
                 )
                 return
 
@@ -498,6 +889,20 @@ class MultiStrategyBot:
                 regime=best.regime,
                 is_paper=settings.TRADING_MODE == "paper",
             )
+            self._record_trade_event(
+                event="opened",
+                symbol=symbol,
+                side="long",
+                strategy=best.strategy_name,
+                pnl=None,
+                reason=best.reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="entry_opened",
+                reason=best.reason,
+                strategy=best.strategy_name,
+            )
 
         elif best.side == Side.SHORT:
             self._execute_short(symbol, best, amount)
@@ -536,6 +941,12 @@ class MultiStrategyBot:
             logger.warning(
                 f"[yellow]SHORT EXECUTION BLOCKIERT[/yellow] {symbol} | "
                 f"Strategie: {signal.strategy_name} | Grund: {exec_result.reason}"
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="execution_blocked",
+                reason=exec_result.reason,
+                strategy=signal.strategy_name,
             )
             return
 
@@ -579,6 +990,20 @@ class MultiStrategyBot:
             regime=signal.regime,
             is_paper=settings.TRADING_MODE == "paper",
         )
+        self._record_trade_event(
+            event="opened",
+            symbol=symbol,
+            side="short",
+            strategy=signal.strategy_name,
+            pnl=None,
+            reason=signal.reason,
+        )
+        self._record_last_decision(
+            symbol=symbol,
+            decision="entry_opened",
+            reason=signal.reason,
+            strategy=signal.strategy_name,
+        )
 
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
@@ -598,6 +1023,14 @@ class MultiStrategyBot:
                 f"Errors={status['consecutive_errors']} "
                 f"KillSwitch={status['kill_switch']}"
             )
+            runtime_state.set_last_decision(
+                {
+                    "symbol": "SYSTEM",
+                    "decision": "cycle_skipped",
+                    "reason": reason,
+                    "strategy": self._active_strategy_runtime,
+                }
+            )
             return
 
         # Scorer zu Beginn jedes Zyklus aktualisieren (liest neue Trades aus DB)
@@ -612,6 +1045,7 @@ class MultiStrategyBot:
             except Exception as e:
                 logger.error(f"Unerwarteter Fehler bei {symbol}: {e}")
                 self.health.record_error("error", f"{symbol}: {e}")
+                self.tg.notify_error(f"MultiStrategyBot:{symbol}", str(e))
 
         stats = self.risk.get_stats()
         logger.info(
@@ -624,6 +1058,7 @@ class MultiStrategyBot:
             f"Daily Loss: {stats['daily_loss']:.2f} USDT | "
             f"Portfolio-Risiko: {stats.get('portfolio_risk_pct', 0.0):.2f}%"
         )
+        self._sync_runtime_state()
 
         # Health-Monitor auswerten (Watchdog-Reaktionen, Snapshots)
         self.health.check_and_react()
@@ -634,6 +1069,7 @@ class MultiStrategyBot:
         wait = interval_seconds or tf_map.get(settings.TIMEFRAME, 3600)
 
         self.running = True
+        self._sync_runtime_state()
         logger.info(f"[bold]Multi-Bot läuft. Interval: {wait}s ({settings.TIMEFRAME})[/bold]")
         logger.info("Drücke [bold]Ctrl+C[/bold] zum Beenden.\n")
 
@@ -645,8 +1081,185 @@ class MultiStrategyBot:
         except KeyboardInterrupt:
             self.stop()
 
+    def _runtime_status(self) -> Dict:
+        stats = self.risk.get_stats()
+        health_status = "n/a"
+        try:
+            health_status = self.health.status.value
+        except Exception:
+            pass
+        gate_status = {}
+        try:
+            gate_status = self.risk.get_gate_status()
+        except Exception:
+            gate_status = {}
+        snap = runtime_state.snapshot()
+        return {
+            "running": self.running,
+            "engine": "connected",
+            "balance": stats.get("balance"),
+            "equity": snap.get("equity", stats.get("balance")),
+            "available_capital": snap.get("available_capital", stats.get("balance")),
+            "total_trades": stats.get("total_trades"),
+            "open_positions": stats.get("open_positions"),
+            "open_positions_detail": snap.get("open_positions", []),
+            "recent_trades": snap.get("recent_trades", []),
+            "recent_logs": snap.get("recent_logs", []),
+            "active_strategy": self._active_strategy_runtime,
+            "enabled_strategies": snap.get("enabled_strategies", [s.name for s in self.strategies]),
+            "last_signal": snap.get("last_signal", {}),
+            "last_decision": snap.get("last_decision", {}),
+            "health_status": health_status,
+            "daily_loss": stats.get("daily_loss", 0.0),
+            "portfolio_risk_pct": stats.get("portfolio_risk_pct", 0.0),
+            "selector": self._last_selector_snapshot,
+            "risk_gate": gate_status,
+            "brain": self._last_brain_snapshot,
+            "app_context": snap.get("app_context", {}),
+        }
+
+    def _build_open_positions_snapshot(self) -> List[Dict]:
+        rows: List[Dict] = []
+        for sym, pos in self.risk.open_positions.items():
+            rows.append(
+                {
+                    "symbol": sym,
+                    "side": getattr(pos, "side", "long"),
+                    "strategy": getattr(pos, "strategy_name", self._active_strategy_runtime),
+                    "entry_price": getattr(pos, "entry_price", 0.0),
+                    "stop_loss": getattr(pos, "stop_loss", 0.0),
+                    "take_profit": getattr(pos, "take_profit", 0.0),
+                    "amount": getattr(pos, "amount", 0.0),
+                }
+            )
+        return rows
+
+    def _sync_runtime_state(self) -> None:
+        stats = self.risk.get_stats()
+        ctrl = runtime_control.get_snapshot()
+        health_status = "n/a"
+        try:
+            health_status = self.health.status.value
+        except Exception:
+            pass
+        equity = self._calculate_equity()
+        runtime_state.update_engine(
+            running=self.running,
+            mode=settings.TRADING_MODE,
+            paused=ctrl.get("paused", False),
+            risk_off=ctrl.get("risk_off", False),
+            active_strategy=self._active_strategy_runtime,
+            enabled_strategies=[s.name for s in self.strategies],
+            balance=stats.get("balance", 0.0),
+            equity=equity,
+            available_capital=stats.get("balance", 0.0),
+            health_status=health_status,
+            total_trades=stats.get("total_trades", 0),
+            open_positions=self._build_open_positions_snapshot(),
+        )
+        runtime_state.update_brain(self._last_brain_snapshot)
+
+    def _calculate_equity(self) -> float:
+        base_balance = float(self.risk.balance)
+        for sym, pos in self.risk.open_positions.items():
+            mark = self._last_prices.get(sym, pos.entry_price)
+            reserved = pos.entry_price * pos.amount
+            if getattr(pos, "side", "long") == "short":
+                unrealized = (pos.entry_price - mark) * pos.amount
+            else:
+                unrealized = (mark - pos.entry_price) * pos.amount
+            base_balance += reserved + unrealized
+        return round(base_balance, 4)
+
+    def _record_trade_event(
+        self,
+        *,
+        event: str,
+        symbol: str,
+        side: str,
+        strategy: str,
+        pnl: Optional[float],
+        reason: str,
+    ) -> None:
+        runtime_state.append_trade(
+            {
+                "event": event,
+                "symbol": symbol,
+                "side": side,
+                "strategy": strategy,
+                "pnl": pnl,
+                "reason": reason,
+            }
+        )
+        runtime_state.append_log(
+            f"{event.upper()} {symbol} [{side}] {strategy} "
+            f"{f'PnL={pnl:+.4f}' if pnl is not None else ''} {reason}".strip()
+        )
+
+    def _record_last_signal(
+        self,
+        *,
+        symbol: str,
+        strategy: str,
+        side: str,
+        confidence: float,
+        reason: str,
+        entry: float,
+        timeframe: str,
+        rr: float,
+        regime: str,
+    ) -> None:
+        runtime_state.set_last_signal(
+            {
+                "symbol": symbol,
+                "strategy": strategy,
+                "side": side,
+                "confidence": confidence,
+                "reason": reason,
+                "entry": entry,
+                "timeframe": timeframe,
+                "rr": rr,
+                "regime": regime,
+            }
+        )
+
+    def _record_last_decision(
+        self,
+        *,
+        symbol: str,
+        decision: str,
+        reason: str,
+        strategy: Optional[str] = None,
+    ) -> None:
+        runtime_state.set_last_decision(
+            {
+                "symbol": symbol,
+                "decision": decision,
+                "reason": reason,
+                "strategy": strategy or self._active_strategy_runtime,
+            }
+        )
+
+    def _request_start_from_panel(self) -> Tuple[bool, str]:
+        """
+        Telegram-Start im bestehenden Prozess:
+        - Wenn Loop läuft: Runtime-Sperren lösen.
+        - Kein Cold-Start aus Telegram-Thread.
+        """
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+        if self.running:
+            return True, "Multi-Bot läuft bereits. Entry-Pause/Risk-Off wurden aufgehoben."
+        return False, (
+            "Multi-Bot läuft aktuell nicht. Bitte Bot-Prozess lokal starten "
+            "(Telegram kann keinen sicheren Cold-Start auslösen)."
+        )
+
     def stop(self):
         self.running = False
+        if self.panel:
+            self.panel.stop()
 
         # Verbleibende offene DB-Einträge als cancelled markieren
         for symbol, trade_id in list(self._open_trade_ids.items()):
@@ -654,6 +1267,7 @@ class MultiStrategyBot:
         self._open_trade_ids.clear()
 
         stats = self.risk.get_stats()
+        self._sync_runtime_state()
         logger.info("\n[bold cyan]Multi-Bot gestoppt.[/bold cyan]")
         logger.info(
             f"[bold]ABSCHLUSS-STATISTIK[/bold]\n"

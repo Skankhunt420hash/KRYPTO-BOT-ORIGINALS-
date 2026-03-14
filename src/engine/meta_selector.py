@@ -3,6 +3,7 @@ from typing import TYPE_CHECKING, Dict, List, Optional
 from config.settings import settings
 from src.strategies.signal import EnhancedSignal, Side
 from src.engine.regime import Regime
+from src.engine.runtime_control import runtime_control
 from src.utils.logger import setup_logger
 
 if TYPE_CHECKING:
@@ -98,6 +99,7 @@ class MetaSelector:
 
     def __init__(self, scorer: Optional["StrategyScorer"] = None):
         self._scorer = scorer
+        self._last_selection: Dict = {}
 
     def set_scorer(self, scorer: "StrategyScorer") -> None:
         """Setzt oder ersetzt den StrategyScorer (nach Initialisierung)."""
@@ -109,10 +111,22 @@ class MetaSelector:
         regime: Regime,
         symbol: str,
     ) -> Optional[EnhancedSignal]:
+        self._last_selection = {
+            "symbol": symbol,
+            "regime": regime.value,
+            "candidates_total": len(signals),
+            "actionable": 0,
+            "eligible": 0,
+            "blocked_regime": 0,
+            "blocked_perf": 0,
+            "winner": None,
+            "winner_score": None,
+        }
         actionable = [
             s for s in signals
             if s.symbol == symbol and s.is_actionable()
         ]
+        self._last_selection["actionable"] = len(actionable)
 
         if not actionable:
             logger.debug(
@@ -123,6 +137,9 @@ class MetaSelector:
 
         regime_fits = REGIME_STRATEGY_FIT.get(regime, {})
         scored: List[tuple] = []
+        ctrl = runtime_control.get_snapshot()
+        preferred = (ctrl.get("preferred_strategy") or "").strip()
+        pref_bonus = settings.CONTROL_STRATEGY_PRIORITY_BONUS if preferred else 0.0
 
         dir_mults = DIRECTION_MULTIPLIER.get(regime, {})
 
@@ -132,6 +149,7 @@ class MetaSelector:
             fit = base_fit * dir_mult
 
             if fit < MIN_REGIME_FIT:
+                self._last_selection["blocked_regime"] += 1
                 logger.debug(
                     f"[REGIME-FILTER] {sig.strategy_name} [{sig.side.value.upper()}] "
                     f"| {symbol} | fit={fit:.2f} (base={base_fit:.2f} × dir={dir_mult:.2f}) "
@@ -150,29 +168,47 @@ class MetaSelector:
                 + vol_bonus * 0.10
             )
 
-            # Performance-Anpassung (optional, konservativ)
+            # Performance-Anpassung (optional, konservativ) und Eligibility-Gate
             perf_score = 0.5   # neutral default
             perf_adj = 0.0
-            if self._scorer is not None and _PERF_WEIGHT > 0:
+            if self._scorer is not None:
                 try:
                     perf_score = self._scorer.get_score(
                         sig.strategy_name, regime.value
                     )
-                    perf_adj = (perf_score - 0.5) * _PERF_WEIGHT
+                    # Optionaler harter Gate: Strategien mit dauerhaft sehr
+                    # schwacher Performance können komplett ignoriert werden.
+                    # Standard: deaktiviert (STRATEGY_MIN_PERF_SCORE = 0.0).
+                    if settings.STRATEGY_MIN_PERF_SCORE > 0.0 and perf_score < settings.STRATEGY_MIN_PERF_SCORE:
+                        self._last_selection["blocked_perf"] += 1
+                        logger.debug(
+                            f"[PERF-GATE] {sig.strategy_name} | Regime={regime.value} | "
+                            f"perf_score={perf_score:.2f} < "
+                            f"min={settings.STRATEGY_MIN_PERF_SCORE:.2f} – Signal ignoriert"
+                        )
+                        continue
+
+                    if _PERF_WEIGHT > 0:
+                        perf_adj = (perf_score - 0.5) * _PERF_WEIGHT
                 except Exception as e:
                     logger.warning(
                         f"Scorer.get_score fehlgeschlagen für {sig.strategy_name}: "
                         f"{type(e).__name__} – neutraler Score verwendet"
                     )
 
-            total = signal_score + perf_adj
+            priority_adj = 0.0
+            if preferred and sig.strategy_name.lower() == preferred.lower():
+                priority_adj = pref_bonus
+
+            total = signal_score + perf_adj + priority_adj
             # Speichere signal_score + perf_adj für Logging des Gewinners
-            scored.append((total, sig, signal_score, perf_adj, perf_score))
+            scored.append((total, sig, signal_score, perf_adj, perf_score, priority_adj))
             logger.debug(
                 f"  {sig.strategy_name:<22} [{sig.side.value.upper():<5}] | "
                 f"fit={fit:.2f} conf={sig.confidence:.0f} rr={sig.rr:.2f} "
                 f"vol={'✓' if sig.volume_confirmed else '✗'} "
                 f"sig={signal_score:.3f} perf={perf_score:.2f} adj={perf_adj:+.3f} "
+                f"pref={priority_adj:+.3f} "
                 f"→ final={total:.3f}"
             )
 
@@ -182,15 +218,17 @@ class MetaSelector:
                 f"(Regime: {regime.value})"
             )
             return None
+        self._last_selection["eligible"] = len(scored)
 
         scored.sort(key=lambda x: x[0], reverse=True)
-        best_score, best, best_sig_score, best_perf_adj, best_perf_score = scored[0]
+        best_score, best, best_sig_score, best_perf_adj, best_perf_score, best_pref_adj = scored[0]
 
         # Logging: signal_score + perf_adj + final für den Gewinner
         if self._scorer is not None and _PERF_WEIGHT > 0:
             perf_tag = (
                 f" | sig={best_sig_score:.3f} "
-                f"perf={best_perf_score:.2f} adj={best_perf_adj:+.3f}"
+                f"perf={best_perf_score:.2f} adj={best_perf_adj:+.3f} "
+                f"pref={best_pref_adj:+.3f}"
             )
         else:
             perf_tag = ""
@@ -203,4 +241,12 @@ class MetaSelector:
             f"conf={best.confidence:.0f} | RR={best.rr:.2f} | "
             f"{best.reason}"
         )
+        self._last_selection["winner"] = best.strategy_name
+        self._last_selection["winner_score"] = round(best_score, 4)
+        self._last_selection["winner_side"] = best.side.value
+        self._last_selection["winner_confidence"] = round(best.confidence, 1)
+        self._last_selection["winner_rr"] = round(best.rr, 2)
         return best
+
+    def get_last_selection(self) -> Dict:
+        return dict(self._last_selection)

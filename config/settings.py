@@ -4,12 +4,35 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _first_non_empty(*keys: str, default: str = "") -> str:
+    for key in keys:
+        val = os.getenv(key)
+        if val is not None and str(val).strip() != "":
+            return str(val).strip()
+    return default
+
+
+def _env_bool(primary: str, fallback: str = "", default: bool = False) -> bool:
+    raw = os.getenv(primary)
+    if raw is None and fallback:
+        raw = os.getenv(fallback)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
 class Settings:
     EXCHANGE: str = os.getenv("EXCHANGE", "binance")
     API_KEY: str = os.getenv("API_KEY", "")
     API_SECRET: str = os.getenv("API_SECRET", "")
 
-    TRADING_MODE: str = os.getenv("TRADING_MODE", "paper")
+    # BOT_MODE ist der bevorzugte Name; TRADING_MODE bleibt voll kompatibel.
+    BOT_MODE: str = _first_non_empty("BOT_MODE", "TRADING_MODE", default="paper").lower()
+    TRADING_MODE: str = BOT_MODE
+    # Live-Trading muss explizit freigeschaltet werden (Safety-Guard).
+    LIVE_TRADING_ENABLED: bool = _env_bool(
+        "LIVE_TRADING_ENABLED", "ENABLE_LIVE_TRADING", default=False
+    )
 
     TRADING_PAIRS: list = os.getenv(
         "TRADING_PAIRS", "BTC/USDT,ETH/USDT"
@@ -31,17 +54,60 @@ class Settings:
 
     STRATEGY: str = os.getenv("STRATEGY", "rsi_ema")
 
-    # Telegram: automatisch aktiv wenn TOKEN + CHAT_ID gesetzt sind.
-    # TELEGRAM_ENABLED=false deaktiviert explizit (z.B. für Tests).
-    TELEGRAM_ENABLED: bool = os.getenv("TELEGRAM_ENABLED", "true").lower() == "true"
-    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
-    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "")
+    # Telegram Hauptschalter:
+    # - bevorzugt: ENABLE_TELEGRAM
+    # - kompatibel: TELEGRAM_ENABLED
+    ENABLE_TELEGRAM: bool = _env_bool(
+        "ENABLE_TELEGRAM", "TELEGRAM_ENABLED", default=False
+    )
+    TELEGRAM_ENABLED: bool = ENABLE_TELEGRAM
+
+    # Benachrichtigungs-Hauptschalter:
+    # - bevorzugt: ENABLE_NOTIFICATIONS
+    # - wenn false: alle Telegram-Notifications aus (Panel kann weiterhin antworten)
+    ENABLE_NOTIFICATIONS: bool = _env_bool("ENABLE_NOTIFICATIONS", default=True)
+
+    TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
+    TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "").strip()
     # Mindest-Konfidenz (0-100) damit ein Signal eine Telegram-Meldung auslöst
     TELEGRAM_MIN_CONFIDENCE: float = float(os.getenv("TELEGRAM_MIN_CONFIDENCE", 50.0))
+    # Benachrichtigungslevel:
+    # off      -> keine Telegram-Meldungen
+    # critical -> nur kritische Risk-/Error-Events
+    # trading  -> trade-relevante Meldungen (Default)
+    # all      -> inkl. Runtime-/Control-Events (pause, strategy change, ...)
+    TELEGRAM_NOTIFY_LEVEL: str = os.getenv("TELEGRAM_NOTIFY_LEVEL", "trading").lower()
+    if not ENABLE_NOTIFICATIONS:
+        TELEGRAM_NOTIFY_LEVEL = "off"
+    # Cooldown für Error-Alerts (verhindert Spam bei wiederholten Exceptions)
+    TELEGRAM_ERROR_ALERT_COOLDOWN_SEC: int = int(
+        os.getenv("TELEGRAM_ERROR_ALERT_COOLDOWN_SEC", 120)
+    )
+
+    # Telegram-Control-Panel: optionales Bedien-Interface
+    TELEGRAM_PANEL_ENABLED: bool = (
+        os.getenv("TELEGRAM_PANEL_ENABLED", "false").lower() == "true"
+    )
+    TELEGRAM_PANEL_POLL_INTERVAL_SEC: int = int(
+        os.getenv("TELEGRAM_PANEL_POLL_INTERVAL_SEC", 10)
+    )
+    TELEGRAM_PANEL_LOG_LINES: int = int(
+        os.getenv("TELEGRAM_PANEL_LOG_LINES", 20)
+    )
+    # Kommagetrennte Liste von Chat-/User-IDs, die das Panel bedienen dürfen.
+    # Leer = kein Whitelisting (nicht empfohlen in produktiven Umgebungen).
+    TELEGRAM_PANEL_ALLOWED_IDS: str = os.getenv("TELEGRAM_PANEL_ALLOWED_IDS", "")
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///data/trades.db")
 
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
+    # App-Orchestrierung / Prozess-Schutz
+    ENFORCE_SINGLE_INSTANCE: bool = _env_bool(
+        "ENFORCE_SINGLE_INSTANCE", default=True
+    )
+    APP_INSTANCE_LOCKFILE: str = os.getenv(
+        "APP_INSTANCE_LOCKFILE", "data/app.lock"
+    )
 
     RSI_PERIOD: int = 14
     RSI_OVERSOLD: float = 30.0
@@ -76,6 +142,12 @@ class Settings:
 
     # Tagesverlust-Limit in % des Startkapitals (danach kein neues Trading)
     DAILY_LOSS_LIMIT_PCT: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 5.0))
+
+    # Optionaler Volatilitäts-Stop: blockiert neue Trades in HIGH_VOLATILITY-Regimes
+    # (Regime wird von RegimeEngine erkannt und im EnhancedSignal.regime gespeichert)
+    RISK_BLOCK_HIGH_VOLATILITY: bool = (
+        os.getenv("RISK_BLOCK_HIGH_VOLATILITY", "false").lower() == "true"
+    )
 
     # Wartezeit nach Schließung einer Position auf demselben Coin (Minuten)
     COIN_COOLDOWN_MINUTES: int = int(os.getenv("COIN_COOLDOWN_MINUTES", 60))
@@ -120,6 +192,24 @@ class Settings:
     # final_score = signal_score + (perf_score - 0.5) * PERF_SELECTOR_WEIGHT
     # Bei 0.15: maximale Anpassung = ±0.075 (konservativ)
     PERF_SELECTOR_WEIGHT: float = float(os.getenv("PERF_SELECTOR_WEIGHT", 0.15))
+
+    # Optionaler harter Performance-Gate: Strategien mit einem
+    # Performance-Score unterhalb dieses Werts werden im Meta-Selector
+    # komplett ignoriert (Eligibility-Layer). 0.0 = deaktiviert.
+    STRATEGY_MIN_PERF_SCORE: float = float(os.getenv("STRATEGY_MIN_PERF_SCORE", 0.0))
+    # Optionaler Bonus für eine zur Laufzeit gesetzte Strategie-Präferenz
+    # (z.B. via Telegram /setstrategy). 0.0 = deaktiviert.
+    CONTROL_STRATEGY_PRIORITY_BONUS: float = float(
+        os.getenv("CONTROL_STRATEGY_PRIORITY_BONUS", 0.08)
+    )
+    # Brain-Gate: Mindestsignal-Score fuer Entry-Freigabe (0..1)
+    BRAIN_MIN_SCORE_TO_TRADE: float = float(
+        os.getenv("BRAIN_MIN_SCORE_TO_TRADE", 0.45)
+    )
+    # Unterhalb dieses Scores gilt die Marktphase als "riskant/unsauber"
+    BRAIN_RISKY_PHASE_SCORE: float = float(
+        os.getenv("BRAIN_RISKY_PHASE_SCORE", 0.35)
+    )
 
     # ------------------------------------------------------------------
     # Portfolio Risk Engine & Position Sizing

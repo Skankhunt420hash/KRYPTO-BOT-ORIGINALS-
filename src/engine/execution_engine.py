@@ -546,11 +546,14 @@ class ExecutionEngine:
             self._pause_reason = reason
             logger.error(f"[red]EMERGENCY PAUSE AKTIV: {reason}[/red]")
             if self._tg:
-                self._tg.send(
-                    f"🛑 <b>EMERGENCY PAUSE</b>\n"
-                    f"📋 {reason}\n"
-                    f"🔧 Manueller Reset: <code>engine.reset()</code>"
-                )
+                if hasattr(self._tg, "notify_bot_paused"):
+                    self._tg.notify_bot_paused(f"emergency:{reason}")
+                else:
+                    self._tg.send(
+                        f"🛑 <b>EMERGENCY PAUSE</b>\n"
+                        f"📋 {reason}\n"
+                        f"🔧 Manueller Reset: <code>engine.reset()</code>"
+                    )
 
 
 # ─────────────────────────────────────────────────────────────────────────────

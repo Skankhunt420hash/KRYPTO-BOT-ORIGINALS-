@@ -5,14 +5,20 @@ KRYPTO-BOT ORIGINALS
 Einstiegspunkt des Trading Bots und Backtesters.
 
 Trading:
-    python main.py --once       # Einmaligen Zyklus ausführen
-    python main.py --status     # Kontostand & DB-Statistik anzeigen
-    python main.py --multi      # Multi-Strategy-Modus (Meta-Selector)
+    python main.py --once        # Einmaligen Zyklus ausführen
+    python main.py --status      # Kontostand & DB-Statistik anzeigen
+    python main.py --multi       # Multi-Strategy-Modus (Meta-Selector)
 
 Backtesting:
     python main.py --backtest --csv data/BTC_1h.csv --strategy trend_continuation
     python main.py --backtest --csv data/BTC_1h.csv --multi
     python main.py --backtest --csv data/BTC_1h.csv --multi --export results/
+
+Hinweis:
+    Die eigentliche Konfiguration erfolgt über die .env-Datei und
+    wird in config/settings.py zentral geladen. Dieses Skript stellt
+    sicher, dass im Live-Modus notwendige Einstellungen vorhanden sind
+    und gibt im Fehlerfall verständliche Hinweise aus.
 """
 import argparse
 import sys
@@ -25,10 +31,99 @@ from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from src.bot import TradingBot, MultiStrategyBot
+from src.app import TradingApplication
 from src.storage.trade_repository import TradeRepository
 from config.settings import settings
 
 console = Console()
+
+
+def _warn_if_no_env_file() -> None:
+    """
+    Gibt eine deutliche, aber nicht fatale Warnung aus, falls keine .env-Datei
+    im Projektverzeichnis vorhanden ist. In diesem Fall werden alle Defaults
+    aus config/settings.py verwendet.
+    """
+    project_root = os.path.dirname(os.path.abspath(__file__))
+    env_path = os.path.join(project_root, ".env")
+    if not os.path.exists(env_path):
+        console.print(
+            "[yellow]Hinweis:[/yellow] Keine [bold].env[/bold]-Datei gefunden – "
+            "es werden Standardwerte aus [bold]config/settings.py[/bold] verwendet.\n"
+            "Kopiere ggf. [bold].env.example[/bold] nach [bold].env[/bold] und passe sie an."
+        )
+
+
+def _validate_runtime_config(args: argparse.Namespace) -> None:
+    """
+    Prüft die wichtigsten Einstellungen zur Laufzeit und bricht bei
+    kritischen Konfigurationsfehlern mit einer klaren Meldung ab.
+
+    Ziel:
+      - Papiermodus ohne .env funktionsfähig
+      - Live-Modus nur mit gesetzten API-Keys
+      - Plausible Handelskonfiguration (Paare, Timeframe)
+    """
+    errors = []
+
+    mode = (settings.TRADING_MODE or "").lower()
+    if mode not in ("paper", "live"):
+        errors.append(
+            f"BOT_MODE/TRADING_MODE muss 'paper' oder 'live' sein "
+            f"(aktuell: '{settings.TRADING_MODE}')."
+        )
+
+    # Handelskonfiguration – nur relevant, wenn wir wirklich traden
+    is_trading_run = not (args.backtest or args.walk_forward or args.strategy_stats or args.show_health)
+
+    pairs = [p.strip() for p in settings.TRADING_PAIRS if p.strip()]
+    if is_trading_run and not pairs:
+        errors.append(
+            "TRADING_PAIRS ist leer – konfiguriere mindestens ein Handelspaar in .env "
+            "(z.B. TRADING_PAIRS=BTC/USDT,ETH/USDT)."
+        )
+
+    if is_trading_run and not settings.TIMEFRAME:
+        errors.append(
+            "TIMEFRAME ist leer – setze z.B. TIMEFRAME=1h in .env."
+        )
+
+    # Live-Modus: API-Schlüssel sind Pflicht, aber nur wenn wir wirklich traden
+    if is_trading_run and mode == "live":
+        if not settings.LIVE_TRADING_ENABLED:
+            errors.append(
+                "LIVE-Modus ist gesperrt (LIVE_TRADING_ENABLED=false).\n"
+                "Setze LIVE_TRADING_ENABLED=true nur bewusst für einen echten Live-Test."
+            )
+        if not settings.API_KEY or not settings.API_SECRET:
+            errors.append(
+                "LIVE-Modus erfordert gültige API_KEY und API_SECRET in .env.\n"
+                "Setze TRADING_MODE=paper zum Testen ohne echte Orders "
+                "oder hinterlege die Zugangsdaten deines Exchanges."
+            )
+
+    # Telegram-Konfiguration
+    # Wenn Telegram explizit aktiviert ist, müssen Token + Chat-ID gesetzt sein.
+    if settings.ENABLE_TELEGRAM:
+        if not settings.TELEGRAM_BOT_TOKEN:
+            errors.append(
+                "ENABLE_TELEGRAM=true, aber TELEGRAM_BOT_TOKEN fehlt.\n"
+                "Bitte Bot-Token aus BotFather in .env setzen."
+            )
+        if not settings.TELEGRAM_CHAT_ID:
+            errors.append(
+                "ENABLE_TELEGRAM=true, aber TELEGRAM_CHAT_ID fehlt.\n"
+                "Bitte Chat-ID setzen (siehe README: getUpdates)."
+            )
+
+    if errors:
+        console.print("[red]Konfigurationsfehler erkannt – Start abgebrochen.[/red]")
+        for msg in errors:
+            console.print(f"- {msg}")
+        console.print(
+            "\n[dim]Siehe README.md für den Abschnitt 'Lokaler Start (Paper-Modus)'.[/dim]"
+        )
+        sys.exit(1)
 
 
 def print_banner(multi: bool = False):
@@ -39,6 +134,19 @@ def print_banner(multi: bool = False):
         f"Modus: {mode_str}",
         border_style="cyan",
     ))
+
+
+def _log_telegram_startup_state() -> None:
+    telegram_enabled = bool(settings.TELEGRAM_ENABLED)
+    panel_enabled = bool(settings.TELEGRAM_PANEL_ENABLED)
+    token_ok = bool(settings.TELEGRAM_BOT_TOKEN)
+    chat_ok = bool(settings.TELEGRAM_CHAT_ID)
+    console.print(
+        "[cyan]Telegram-Startup:[/cyan] "
+        f"enabled={telegram_enabled} | panel={panel_enabled} | "
+        f"token={'erkannt' if token_ok else 'fehlt'} | "
+        f"chat_id={'erkannt' if chat_ok else 'fehlt'}"
+    )
 
 
 def show_status(bot):
@@ -381,6 +489,10 @@ def main():
 
     args = parser.parse_args()
 
+    # Zentrale Konfigurationsprüfung (benutzerfreundliche Fehlermeldungen)
+    _warn_if_no_env_file()
+    _validate_runtime_config(args)
+
     # ── Strategy-Stats-Modus ──────────────────────────────────────────────
     if args.strategy_stats:
         _show_strategy_stats()
@@ -408,19 +520,31 @@ def main():
     use_multi = args.multi or settings.STRATEGY.lower() == "auto"
 
     print_banner(multi=use_multi)
-
-    bot = MultiStrategyBot() if use_multi else TradingBot()
+    _log_telegram_startup_state()
 
     if args.status:
+        bot = MultiStrategyBot(autostart_services=False) if use_multi else TradingBot(autostart_services=False)
         show_status(bot)
         return
+
+    app = TradingApplication(use_multi=use_multi, interval_seconds=args.interval)
 
     if args.once:
-        bot.run_cycle()
-        show_status(bot)
+        app.run_once(autostart_services=False)
+        show_status(app.bot)
+        app.stop()
         return
 
-    bot.run(interval_seconds=args.interval)
+    try:
+        app.run_forever()
+    except RuntimeError as e:
+        if str(e) == "single_instance_lock_failed":
+            console.print(
+                "[red]Start abgebrochen:[/red] Es läuft bereits eine Instanz "
+                "(oder ein altes Lockfile blockiert den Start)."
+            )
+            sys.exit(1)
+        raise
 
 
 if __name__ == "__main__":

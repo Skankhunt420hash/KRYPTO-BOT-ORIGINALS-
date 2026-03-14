@@ -19,12 +19,17 @@ class ExchangeConnector:
     def _connect(self):
         try:
             exchange_class = getattr(ccxt, self.exchange_id)
-            self._exchange = exchange_class({
-                "apiKey": settings.API_KEY,
-                "secret": settings.API_SECRET,
+            # In PAPER-Modus ausschließlich öffentliche Endpunkte verwenden.
+            # Dadurch schlagen OHLCV/Ticker-Calls nicht wegen ungültiger Keys fehl.
+            config = {
                 "enableRateLimit": True,
                 "options": {"defaultType": "spot"},
-            })
+            }
+            if not self.is_paper and settings.API_KEY and settings.API_SECRET:
+                config["apiKey"] = settings.API_KEY
+                config["secret"] = settings.API_SECRET
+
+            self._exchange = exchange_class(config)
 
             if self.is_paper:
                 logger.info(
@@ -78,8 +83,7 @@ class ExchangeConnector:
 
     def create_market_buy_order(self, symbol: str, amount: float) -> Dict[str, Any]:
         if self.is_paper:
-            ticker = self.fetch_ticker(symbol)
-            price = ticker.get("last", 0)
+            price = self._get_paper_price(symbol)
             logger.info(
                 f"[PAPER] KAUF {amount:.6f} {symbol} @ {price:.4f} USDT"
             )
@@ -95,8 +99,7 @@ class ExchangeConnector:
 
     def create_market_sell_order(self, symbol: str, amount: float) -> Dict[str, Any]:
         if self.is_paper:
-            ticker = self.fetch_ticker(symbol)
-            price = ticker.get("last", 0)
+            price = self._get_paper_price(symbol)
             logger.info(
                 f"[PAPER] VERKAUF {amount:.6f} {symbol} @ {price:.4f} USDT"
             )
@@ -117,3 +120,24 @@ class ExchangeConnector:
         except Exception as e:
             logger.error(f"Fehler beim Laden der Märkte: {e}")
             return []
+
+    def _get_paper_price(self, symbol: str) -> float:
+        """
+        Liefert im Paper-Modus robust einen Preis:
+        1) Ticker.last
+        2) Letzter Close aus OHLCV(limit=1)
+        3) Fallback 1.0 (verhindert Division-/None-Fehler)
+        """
+        ticker = self.fetch_ticker(symbol)
+        last = float(ticker.get("last", 0) or 0)
+        if last > 0:
+            return last
+
+        df = self.fetch_ohlcv(symbol, limit=1)
+        if not df.empty:
+            close = float(df["close"].iloc[-1])
+            if close > 0:
+                return close
+
+        logger.warning(f"PAPER Preis-Fallback aktiv für {symbol} (Ticker/OHLCV nicht verfügbar).")
+        return 1.0

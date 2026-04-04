@@ -1,10 +1,11 @@
 from datetime import datetime, date, timezone
-from typing import Dict, Optional, Tuple
+from typing import Dict, Optional, Tuple, List
 
 from config.settings import settings
-from src.utils.risk_manager import RiskManager, Position
+from src.utils.risk_manager import RiskManager, Position, paper_equity_ledger_enabled
 from src.strategies.signal import EnhancedSignal, Side
 from src.engine.portfolio_risk import PortfolioRiskEngine, build_config_from_settings
+from src.engine.loss_pattern_memory import LossPatternMemory
 from src.engine.runtime_control import runtime_control
 from src.utils.logger import setup_logger
 
@@ -36,9 +37,53 @@ class RiskEngine(RiskManager):
         self._last_gate_reason: str = "init"
         self._last_gate_at: str = datetime.now(timezone.utc).isoformat()
         self._daily_loss_risk_off_latched: bool = False
+        self._global_losing_streak: int = 0
+        self._last_live_gate_reason: str = "n/a"
+        self._last_live_gate_at: str = datetime.now(timezone.utc).isoformat()
 
         # Portfolio Risk Engine (Position Sizing + Exposure-Limits)
         self.portfolio = PortfolioRiskEngine(build_config_from_settings())
+        self._loss_pattern_memory = LossPatternMemory()
+
+    # ------------------------------------------------------------------
+    # Paper-Konto: Equity vs. freie Kasse
+    # ------------------------------------------------------------------
+
+    def _paper_heal_legacy_empty_cash(self) -> None:
+        """
+        Nach Umstellung auf Equity-Konto: alte Läufe hatten Kasse 0 bei vollem Kapital in Positionen.
+        Einmalige Anhebung der Balance auf Kasse + gebundenes Notional.
+        """
+        if not paper_equity_ledger_enabled():
+            return
+        if float(self.balance) > 0.01:
+            return
+        invested = sum(
+            float(p.entry_price) * float(p.amount) for p in self.open_positions.values()
+        )
+        if invested < 1.0:
+            return
+        healed = float(self.balance) + invested
+        logger.warning(
+            "Paper-Equity-Konto: Balance %.2f → %.2f USDT (gebundenes Kapital aus offenen Positionen übernommen).",
+            self.balance,
+            healed,
+        )
+        self.balance = healed
+
+    def paper_account_equity(self) -> float:
+        """
+        Kontokapital für Sizing / Exposure.
+
+        - Paper + PAPER_EQUITY_ACCOUNT: `balance` ist bereits die Equity (kein Doppelzählen).
+        - Sonst (Spot-Paper / Live-Fallback): Kasse + gebundenes Entry-Notional.
+        """
+        if paper_equity_ledger_enabled():
+            return float(self.balance)
+        invested = 0.0
+        for p in self.open_positions.values():
+            invested += float(p.entry_price) * float(p.amount)
+        return float(self.balance) + invested
 
     # ------------------------------------------------------------------
     # Hilfsmethoden
@@ -76,6 +121,12 @@ class RiskEngine(RiskManager):
             return self._reject("CONTROL PAUSE: Neue Entries sind pausiert")
         if ctrl.get("risk_off"):
             return self._reject("RISK OFF: Neue Entries sind vorübergehend deaktiviert")
+
+        blocked_lp, lp_reason = self._loss_pattern_memory.is_blocked(
+            signal.strategy_name, signal.symbol
+        )
+        if blocked_lp:
+            return self._reject(lp_reason)
 
         # 0b. Signal-Integrität (verhindert kaputte Orders frühzeitig)
         if signal.entry <= 0:
@@ -180,7 +231,8 @@ class RiskEngine(RiskManager):
             strategy_name=signal.strategy_name,
         )
         self.open_positions[signal.symbol] = position
-        self.balance -= signal.entry * amount
+        if not paper_equity_ledger_enabled():
+            self.balance -= signal.entry * amount
 
         side_label = "[LONG]" if position.side == "long" else "[SHORT]"
         logger.info(
@@ -218,18 +270,155 @@ class RiskEngine(RiskManager):
 
         if pnl < 0:
             self._daily_loss += pnl  # pnl ist negativ
+            self._global_losing_streak += 1
             if strategy_name:
                 self._strategy_cooldown[strategy_name] = now
+                self._loss_pattern_memory.record_loss(strategy_name, symbol)
                 logger.warning(
                     f"[yellow]STRATEGY COOLDOWN gesetzt:[/yellow] "
                     f"{strategy_name} für {settings.STRATEGY_COOLDOWN_MINUTES}min "
                     f"gesperrt nach Verlust ({pnl:.4f} USDT)"
                 )
+        else:
+            self._global_losing_streak = 0
 
         logger.debug(
             f"Coin-Cooldown: {symbol} für {settings.COIN_COOLDOWN_MINUTES}min | "
-            f"Daily Loss heute: {abs(self._daily_loss):.2f} USDT"
+            f"Daily Loss heute: {abs(self._daily_loss):.2f} USDT | "
+            f"Global Losing Streak: {self._global_losing_streak}"
         )
+
+    def check_live_hard_gate(
+        self,
+        signal: EnhancedSignal,
+        amount: float,
+        *,
+        free_capital_usdt: float,
+        account_equity_usdt: float,
+        allowed_symbols: Optional[List[str]] = None,
+    ) -> Tuple[bool, str]:
+        """
+        Harte Live-Schutzschicht: blockiert Entry sobald eine Regel verletzt ist.
+        Paper-Modus wird hiervon bewusst nicht eingeschränkt.
+        """
+        if settings.TRADING_MODE != "live":
+            self._last_live_gate_reason = "SKIP_NON_LIVE"
+            self._last_live_gate_at = datetime.now(timezone.utc).isoformat()
+            return True, "SKIP_NON_LIVE"
+        if not settings.LIVE_HARD_RISK_GATE_ENABLED:
+            self._last_live_gate_reason = "SKIP_GATE_DISABLED"
+            self._last_live_gate_at = datetime.now(timezone.utc).isoformat()
+            return True, "SKIP_GATE_DISABLED"
+
+        self._reset_daily_loss_if_new_day()
+        ctrl = runtime_control.get_snapshot()
+
+        def _deny(reason: str) -> Tuple[bool, str]:
+            self._last_live_gate_reason = reason
+            self._last_live_gate_at = datetime.now(timezone.utc).isoformat()
+            self._last_gate_reason = reason
+            self._last_gate_at = self._last_live_gate_at
+            return False, reason
+
+        # 1) Risk-Off / Pause
+        if ctrl.get("paused"):
+            return _deny("LIVE HARD GATE: CONTROL PAUSE")
+        if ctrl.get("risk_off"):
+            return _deny("LIVE HARD GATE: RISK OFF")
+
+        # 2) Symbol-Freigabe
+        symbols = [s.strip().upper() for s in (allowed_symbols or []) if str(s).strip()]
+        if symbols and signal.symbol.upper() not in symbols:
+            return _deny(f"LIVE HARD GATE: SYMBOL NOT ALLOWED ({signal.symbol})")
+        if settings.LIVE_TEST_MODE and not symbols:
+            # Mini-Live ohne explizite Symbolfreigabe ist zu offen.
+            return _deny("LIVE TEST GATE: NO SYMBOL WHITELIST CONFIGURED")
+
+        # 2b) Strategie-Freigabe (optional, im Mini-Live empfohlen)
+        allowed_strats = [
+            s.strip().lower()
+            for s in str(getattr(settings, "LIVE_ALLOWED_STRATEGIES", "") or "").split(",")
+            if s.strip()
+        ]
+        if allowed_strats and str(signal.strategy_name or "").strip().lower() not in allowed_strats:
+            return _deny(f"LIVE HARD GATE: STRATEGY NOT ALLOWED ({signal.strategy_name})")
+
+        # 3) Min. Konto-/Freikapital
+        if account_equity_usdt < float(settings.LIVE_MIN_ACCOUNT_EQUITY_USDT):
+            return _deny(
+                f"LIVE HARD GATE: EQUITY TOO LOW ({account_equity_usdt:.2f} < "
+                f"{settings.LIVE_MIN_ACCOUNT_EQUITY_USDT:.2f} USDT)"
+            )
+        if free_capital_usdt < float(settings.LIVE_MIN_FREE_CAPITAL_USDT):
+            return _deny(
+                f"LIVE HARD GATE: FREE CAPITAL TOO LOW ({free_capital_usdt:.2f} < "
+                f"{settings.LIVE_MIN_FREE_CAPITAL_USDT:.2f} USDT)"
+            )
+
+        # 4) Max offene Positionen
+        hard_max_open = self.max_open_trades
+        if settings.LIVE_TEST_MODE:
+            hard_max_open = min(hard_max_open, 1)
+        if len(self.open_positions) >= hard_max_open:
+            return _deny(
+                f"LIVE HARD GATE: MAX OPEN POSITIONS "
+                f"{len(self.open_positions)}/{hard_max_open}"
+            )
+
+        # 5) Daily Loss Limit
+        daily_limit_pct = float(settings.DAILY_LOSS_LIMIT_PCT)
+        if settings.LIVE_TEST_MODE:
+            daily_limit_pct = float(getattr(settings, "LIVE_TEST_DAILY_LOSS_LIMIT_PCT", daily_limit_pct))
+        daily_limit = self._initial_balance * (daily_limit_pct / 100)
+        if abs(self._daily_loss) >= daily_limit:
+            return _deny(
+                f"LIVE HARD GATE: DAILY LOSS LIMIT "
+                f"{abs(self._daily_loss):.2f}/{daily_limit:.2f} USDT"
+            )
+
+        # 6) Verlustserie
+        if self._global_losing_streak >= int(settings.LIVE_MAX_LOSING_STREAK):
+            return _deny(
+                f"LIVE HARD GATE: LOSING STREAK "
+                f"{self._global_losing_streak}/{settings.LIVE_MAX_LOSING_STREAK}"
+            )
+
+        # 7) Risiko je Trade / Positionsgröße
+        if amount <= 0:
+            return _deny("LIVE HARD GATE: INVALID POSITION SIZE <= 0")
+        if signal.entry <= 0:
+            return _deny("LIVE HARD GATE: INVALID ENTRY <= 0")
+        risk_usdt = abs(signal.entry - signal.stop_loss) * amount
+        risk_pct = (risk_usdt / max(account_equity_usdt, 1e-9)) * 100.0
+        if risk_pct > float(settings.RISK_PER_TRADE_PCT):
+            return _deny(
+                f"LIVE HARD GATE: RISK PER TRADE {risk_pct:.2f}% > "
+                f"{settings.RISK_PER_TRADE_PCT:.2f}%"
+            )
+        notional = amount * signal.entry
+        if notional > float(settings.MAX_POSITION_NOTIONAL):
+            return _deny(
+                f"LIVE HARD GATE: POSITION NOTIONAL {notional:.2f} > "
+                f"{settings.MAX_POSITION_NOTIONAL:.2f} USDT"
+            )
+        if notional < float(settings.MIN_POSITION_NOTIONAL):
+            return _deny(
+                f"LIVE HARD GATE: POSITION NOTIONAL {notional:.2f} < "
+                f"{settings.MIN_POSITION_NOTIONAL:.2f} USDT"
+            )
+        if settings.LIVE_TEST_MODE:
+            test_cap = float(getattr(settings, "LIVE_MAX_POSITION_SIZE", 0.0) or 0.0)
+            if test_cap <= 0:
+                return _deny("LIVE TEST GATE: LIVE_MAX_POSITION_SIZE INVALID")
+            if notional > test_cap:
+                return _deny(
+                    f"LIVE TEST GATE: POSITION NOTIONAL {notional:.2f} > "
+                    f"LIVE_MAX_POSITION_SIZE {test_cap:.2f}"
+                )
+
+        self._last_live_gate_reason = "LIVE_HARD_GATE_OK"
+        self._last_live_gate_at = datetime.now(timezone.utc).isoformat()
+        return True, "LIVE_HARD_GATE_OK"
 
     # ------------------------------------------------------------------
     # Portfolio Risk: Sizing + Limits (kombiniert, für bot.py)
@@ -254,29 +443,76 @@ class RiskEngine(RiskManager):
         Bei unerwartetem Fehler: Fallback auf alten einfachen Sizing-Modus.
         """
         try:
-            # 1. Positionsgröße berechnen
-            amount, sizing_info = self.portfolio.calculate_size(signal, self.balance)
+            self._paper_heal_legacy_empty_cash()
+            # 1. Positionsgröße auf Basis Equity (nicht nur freie Kasse)
+            equity = self.paper_account_equity()
+            if equity <= 0:
+                return (
+                    False,
+                    f"SIZING BLOCKIERT: Equity ≤ 0 (Equity={equity:.2f}, Kasse={self.balance:.2f})",
+                    0.0,
+                )
+
+            amount, sizing_info = self.portfolio.calculate_size(signal, equity)
 
             if amount <= 0:
                 return False, f"SIZING BLOCKIERT: {sizing_info}", 0.0
 
-            # 2. Portfolio-Limits prüfen (mit berechneter Menge)
+            entry = float(signal.entry)
+            if entry <= 0:
+                return False, "SIZING BLOCKIERT: ungültiger Entry", 0.0
+
+            cash = float(self.balance)
+            # 2. Spot-Paper / Live: Notional durch freie Kasse deckeln.
+            # Paper-Equity-Konto: keine Kassen-Deckelung (Limits über Portfolio-Risk).
+            if not paper_equity_ledger_enabled():
+                max_amount_by_cash = cash / entry
+                if amount > max_amount_by_cash:
+                    if max_amount_by_cash <= 0:
+                        return (
+                            False,
+                            (
+                                "SIZING BLOCKIERT: Keine freie Kasse für weiteren Entry "
+                                f"(Kasse={cash:.2f} USDT, Equity={equity:.2f} USDT). "
+                                "Positionen schließen oder PAPER_TRADING_BALANCE erhöhen."
+                            ),
+                            0.0,
+                        )
+                    amount = max_amount_by_cash
+                    sizing_info += f" | auf freie Kasse gedeckelt ({amount:.8f})"
+
+            notional = amount * entry
+            min_n = float(self.portfolio.cfg.min_position_notional)
+            if notional + 1e-9 < min_n:
+                return (
+                    False,
+                    (
+                        f"SIZING BLOCKIERT: Nach Kassen-Deckel Notional {notional:.2f} < "
+                        f"MIN_POSITION_NOTIONAL {min_n:.0f} – zu wenig freie Kasse für Mindestsize"
+                    ),
+                    0.0,
+                )
+
+            amount = round(amount, 8)
+
+            # 3. Portfolio-Limits (% beziehen sich auf Equity)
             pf_allowed, pf_reason = self.portfolio.check_portfolio_limits(
-                signal, self.balance, self.open_positions, amount
+                signal, equity, self.open_positions, amount
             )
             if not pf_allowed:
                 return False, pf_reason, 0.0
 
             # Erfolg: Risiko-Kennzahlen für Logging berechnen
             risk_usd = abs(signal.entry - signal.stop_loss) * amount
-            risk_pct = (risk_usd / self.balance * 100) if self.balance > 0 else 0.0
-            notional = amount * signal.entry
+            risk_pct = (risk_usd / equity * 100) if equity > 0 else 0.0
             logger.info(
                 f"[cyan]SIZING[/cyan] {signal.symbol} | "
                 f"Modus: {self.portfolio.cfg.sizing_mode} | "
                 f"{sizing_info} | "
                 f"Notional: {notional:.2f} USDT | "
-                f"Risiko: {risk_pct:.2f}% ({risk_usd:.2f} USDT)"
+                f"Risiko: {risk_pct:.2f}% ({risk_usd:.2f} USDT) | "
+                f"Equity={equity:.2f} Kasse={cash:.2f}"
+                + (" [Paper-Equity-Konto]" if paper_equity_ledger_enabled() else "")
             )
             return True, "OK", amount
 
@@ -306,7 +542,9 @@ class RiskEngine(RiskManager):
         stats["active_strategy_cooldowns"] = len(self._strategy_cooldown)
         # Portfolio-Exposure-Snapshot
         try:
-            snapshot = self.portfolio.get_exposure_snapshot(self.open_positions, self.balance)
+            snapshot = self.portfolio.get_exposure_snapshot(
+                self.open_positions, self.paper_account_equity()
+            )
             stats["portfolio_risk_pct"] = snapshot["total_risk_pct"]
         except Exception:
             stats["portfolio_risk_pct"] = 0.0
@@ -330,6 +568,20 @@ class RiskEngine(RiskManager):
             "active_strategy_cooldowns": len(self._strategy_cooldown),
             "last_gate_reason": self._last_gate_reason,
             "last_gate_at": self._last_gate_at,
+            "global_losing_streak": self._global_losing_streak,
+            "live_hard_gate_enabled": bool(settings.LIVE_HARD_RISK_GATE_ENABLED),
+            "live_last_gate_reason": self._last_live_gate_reason,
+            "live_last_gate_at": self._last_live_gate_at,
+            "live_min_equity_usdt": float(settings.LIVE_MIN_ACCOUNT_EQUITY_USDT),
+            "live_min_free_capital_usdt": float(settings.LIVE_MIN_FREE_CAPITAL_USDT),
+            "live_max_losing_streak": int(settings.LIVE_MAX_LOSING_STREAK),
+            "live_test_mode": bool(getattr(settings, "LIVE_TEST_MODE", False)),
+            "live_test_max_position_size": float(getattr(settings, "LIVE_MAX_POSITION_SIZE", 0.0)),
+            "live_test_daily_loss_limit_pct": float(
+                getattr(settings, "LIVE_TEST_DAILY_LOSS_LIMIT_PCT", settings.DAILY_LOSS_LIMIT_PCT)
+            ),
+            "live_allowed_symbols": str(getattr(settings, "LIVE_ALLOWED_SYMBOLS", "") or ""),
+            "live_allowed_strategies": str(getattr(settings, "LIVE_ALLOWED_STRATEGIES", "") or ""),
             "risk_per_trade_pct": float(settings.RISK_PER_TRADE_PCT),
             "sizing_mode": self.portfolio.cfg.sizing_mode,
         }

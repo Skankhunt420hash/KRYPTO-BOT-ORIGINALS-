@@ -1,0 +1,50 @@
+{
+  "mode": "paper",
+  "paused": false,
+  "risk_off": false,
+  "preferred_strategy": "",
+  "mode_request": "",
+  "last_signal": {
+    "symbol": "XMR/USD:USD",
+    "strategy": "RangeReversion",
+    "side": "short",
+    "confidence": 68.1,
+    "reason": "[SHORT] Preis an/\u00fcber BB-Upper (318.7283) | RSI=79.7 (overbought) | TP=BB-Mid (316.8860)",
+    "entry": 318.95,
+    "timeframe": "5m",
+    "rr": 22.34,
+    "regime": "LOW_VOLATILITY"
+  },
+  "last_decision": {
+    "symbol": "ANKR/USD:USD",
+    "decision": "no_trade",
+    "reason": "selector_none:TREND_DOWN",
+    "strategy": "RangeReversion"
+  },
+  "brain": {
+    "last_regime": "TREND_DOWN",
+    "last_signal_score": 0.0,
+    "last_strategy_ranking": [],
+    "last_decision_reason": "selector_none:TREND_DOWN",
+    "risky_phase": true,
+    "selector": {
+      "symbol": "ANKR/USD:USD",
+      "regime": "TREND_DOWN",
+      "candidates_total": 0,
+      "actionable": 0,
+      "eligible": 0,
+      "blocked_regime": 0,
+      "blocked_perf": 0,
+      "winner": null,
+      "winner_score": null
+    },
+    "winner_strategy": null,
+    "winner_side": null,
+    "winner_confidence": null,
+    "winner_rr": null,
+    "ranking_count": 0,
+    "min_trade_score": 0.45,
+    "learning_mode": "controlled_adaptive_weights"
+  },
+  "updated_at": "2026-04-04T16:13:33.005749+00:00"
+}

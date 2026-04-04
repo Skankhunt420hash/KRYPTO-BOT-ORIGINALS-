@@ -39,6 +39,7 @@ class RuntimeState:
         self._last_decision: Dict = {}
         self._brain: Dict = {}
         self._app_context: Dict = {}
+        self._performance: Dict = {}
         self._recent_trades: Deque[Dict] = deque(maxlen=20)
         self._recent_logs: Deque[str] = deque(maxlen=50)
         self._updated_at: str = _utc_now()
@@ -102,6 +103,11 @@ class RuntimeState:
             self._app_context = dict(app_context or {})
             self._updated_at = _utc_now()
 
+    def update_performance(self, performance: Dict) -> None:
+        with self._lock:
+            self._performance = dict(performance or {})
+            self._updated_at = _utc_now()
+
     def set_last_signal(self, signal: Dict) -> None:
         with self._lock:
             self._last_signal = dict(signal or {})
@@ -144,6 +150,7 @@ class RuntimeState:
                 "last_decision": deepcopy(self._last_decision),
                 "brain": deepcopy(self._brain),
                 "app_context": deepcopy(self._app_context),
+                "performance": deepcopy(self._performance),
                 "recent_trades": deepcopy(list(self._recent_trades)),
                 "recent_logs": deepcopy(list(self._recent_logs)),
                 "updated_at": self._updated_at,

@@ -1,0 +1,115 @@
+{
+  "days": [
+    {
+      "day": "2026-04-04",
+      "mode": "paper",
+      "trades_count": 3,
+      "pnl_abs": 653.337387,
+      "winners": 2,
+      "losers": 1,
+      "win_rate": 66.67,
+      "best_strategy": "VolatilityBreakout",
+      "worst_strategy": "TrendContinuation",
+      "reject_reasons_top": []
+    },
+    {
+      "day": "2026-03-23",
+      "mode": "paper",
+      "trades_count": 6,
+      "pnl_abs": -2.74662,
+      "winners": 3,
+      "losers": 3,
+      "win_rate": 50.0,
+      "best_strategy": "RangeReversion",
+      "worst_strategy": "VolatilityBreakout",
+      "reject_reasons_top": [
+        {
+          "reason": "MAX TRADES: 5/5 Positionen offen",
+          "count": 48
+        },
+        {
+          "reason": "PORTFOLIO STRAT-LIMIT: 2/2 Pos. in Strategie TrendContinuation",
+          "count": 42
+        },
+        {
+          "reason": "PORTFOLIO STRAT-LIMIT: 2/2 Pos. in Strategie RangeReversion",
+          "count": 3
+        },
+        {
+          "reason": "MIN_WIN_CHANCE:61.7<70",
+          "count": 3
+        },
+        {
+          "reason": "PORTFOLIO DIR-LIMIT: 100% (1/1) der Positionen sind SHORT (Limit: 80%)",
+          "count": 2
+        }
+      ]
+    },
+    {
+      "day": "2026-03-22",
+      "mode": "paper",
+      "trades_count": 12,
+      "pnl_abs": 262.502456,
+      "winners": 5,
+      "losers": 7,
+      "win_rate": 41.67,
+      "best_strategy": "VolatilityBreakout",
+      "worst_strategy": "RangeReversion",
+      "reject_reasons_top": [
+        {
+          "reason": "MAX TRADES: 5/5 Positionen offen",
+          "count": 134
+        },
+        {
+          "reason": "PORTFOLIO STRAT-LIMIT: 2/2 Pos. in Strategie TrendContinuation",
+          "count": 89
+        },
+        {
+          "reason": "SIZING BLOCKIERT: Keine freie Kasse f\u00fcr weiteren Entry (Kasse=0.00 USDT, Equity=10000.00 USDT). Positionen schlie\u00dfen, PAPER_TRADING_BALANCE erh\u00f6hen oder Bot neu starten.",
+          "count": 9
+        },
+        {
+          "reason": "STRATEGY COOLDOWN: TrendContinuation noch 7min gesperrt",
+          "count": 7
+        },
+        {
+          "reason": "PORTFOLIO DIR-LIMIT: 100% (1/1) der Positionen sind SHORT (Limit: 80%)",
+          "count": 7
+        }
+      ]
+    },
+    {
+      "day": "2026-03-17",
+      "mode": "paper",
+      "trades_count": 3,
+      "pnl_abs": 12.363427,
+      "winners": 1,
+      "losers": 2,
+      "win_rate": 33.33,
+      "best_strategy": "RangeReversion",
+      "worst_strategy": "RangeReversion",
+      "reject_reasons_top": [
+        {
+          "reason": "COIN COOLDOWN: ETH/USDT noch 55min gesperrt",
+          "count": 1
+        },
+        {
+          "reason": "COIN COOLDOWN: ETH/USDT noch 45min gesperrt",
+          "count": 1
+        },
+        {
+          "reason": "STRATEGY COOLDOWN: RangeReversion noch 15min gesperrt",
+          "count": 1
+        },
+        {
+          "reason": "PORTFOLIO DIR-LIMIT: 100% (1/1) der Positionen sind SHORT (Limit: 80%)",
+          "count": 1
+        },
+        {
+          "reason": "COIN COOLDOWN: BTC/USDT noch 55min gesperrt",
+          "count": 1
+        }
+      ]
+    }
+  ]
+}

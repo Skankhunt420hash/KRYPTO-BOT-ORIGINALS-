@@ -77,10 +77,27 @@ def _validate_runtime_config(args: argparse.Namespace) -> None:
     is_trading_run = not (args.backtest or args.walk_forward or args.strategy_stats or args.show_health)
 
     pairs = [p.strip() for p in settings.TRADING_PAIRS if p.strip()]
-    if is_trading_run and not pairs:
+    universe = (getattr(settings, "TRADING_UNIVERSE", "") or "").strip().lower()
+    if is_trading_run and universe == "kraken_perps":
+        if settings.EXCHANGE.strip().lower() != "krakenfutures":
+            errors.append(
+                "TRADING_UNIVERSE=kraken_perps erfordert EXCHANGE=krakenfutures "
+                "(Kraken Perpetuals / Futures API, nicht Spot „kraken“)."
+            )
+    elif is_trading_run and universe == "binance_usdm":
+        if settings.EXCHANGE.strip().lower() != "binance":
+            errors.append(
+                "TRADING_UNIVERSE=binance_usdm erfordert EXCHANGE=binance (USDT-M Perps über ccxt swap)."
+            )
+        if not getattr(settings, "FUTURES_MODE", False):
+            errors.append(
+                "TRADING_UNIVERSE=binance_usdm: FUTURES_MODE=true setzen (Swap/Perp-Märkte)."
+            )
+    elif is_trading_run and not pairs:
         errors.append(
-            "TRADING_PAIRS ist leer – konfiguriere mindestens ein Handelspaar in .env "
-            "(z.B. TRADING_PAIRS=BTC/USDT,ETH/USDT)."
+            "TRADING_PAIRS ist leer – konfiguriere Handelspaare in .env "
+            "oder TRADING_UNIVERSE=kraken_perps (EXCHANGE=krakenfutures) "
+            "bzw. binance_usdm (EXCHANGE=binance, FUTURES_MODE=true)."
         )
 
     if is_trading_run and not settings.TIMEFRAME:
@@ -90,6 +107,13 @@ def _validate_runtime_config(args: argparse.Namespace) -> None:
 
     # Live-Modus: API-Schlüssel sind Pflicht, aber nur wenn wir wirklich traden
     if is_trading_run and mode == "live":
+        live_use_multi = bool(args.multi or settings.STRATEGY.lower() == "auto")
+        if not live_use_multi:
+            errors.append(
+                "LIVE-Modus ist nur im Multi-Strategy-Flow erlaubt "
+                "(--multi oder STRATEGY=auto).\n"
+                "Single-Strategy TradingBot ist für Live absichtlich gesperrt."
+            )
         if not settings.LIVE_TRADING_ENABLED:
             errors.append(
                 "LIVE-Modus ist gesperrt (LIVE_TRADING_ENABLED=false).\n"
@@ -101,6 +125,21 @@ def _validate_runtime_config(args: argparse.Namespace) -> None:
                 "Setze TRADING_MODE=paper zum Testen ohne echte Orders "
                 "oder hinterlege die Zugangsdaten deines Exchanges."
             )
+        if settings.LIVE_TEST_MODE:
+            if settings.LIVE_MAX_POSITION_SIZE <= 0:
+                errors.append(
+                    "LIVE_TEST_MODE=true, aber LIVE_MAX_POSITION_SIZE ist <= 0.\n"
+                    "Bitte einen kleinen positiven Wert setzen (z. B. 25)."
+                )
+            if settings.LIVE_TEST_DAILY_LOSS_LIMIT_PCT <= 0:
+                errors.append(
+                    "LIVE_TEST_MODE=true, aber LIVE_TEST_DAILY_LOSS_LIMIT_PCT ist <= 0."
+                )
+            if not settings.LIVE_ALLOWED_SYMBOLS.strip():
+                errors.append(
+                    "LIVE_TEST_MODE=true, aber LIVE_ALLOWED_SYMBOLS ist leer.\n"
+                    "Bitte mindestens ein Symbol setzen (z. B. BTC/USDT)."
+                )
 
     # Telegram-Konfiguration
     # Wenn Telegram explizit aktiviert ist, müssen Token + Chat-ID gesetzt sein.
@@ -521,6 +560,14 @@ def main():
 
     print_banner(multi=use_multi)
     _log_telegram_startup_state()
+    if settings.TRADING_MODE == "live" and settings.LIVE_TEST_MODE:
+        console.print(
+            "[yellow]WARNUNG: MINI-LIVE TESTMODE aktiv[/yellow] | "
+            f"max_pos={settings.LIVE_MAX_POSITION_SIZE} | "
+            f"symbols={settings.LIVE_ALLOWED_SYMBOLS or 'n/a'} | "
+            f"strategies={settings.LIVE_ALLOWED_STRATEGIES or 'all'} | "
+            f"daily_loss={settings.LIVE_TEST_DAILY_LOSS_LIMIT_PCT}%"
+        )
 
     if args.status:
         bot = MultiStrategyBot(autostart_services=False) if use_multi else TradingBot(autostart_services=False)

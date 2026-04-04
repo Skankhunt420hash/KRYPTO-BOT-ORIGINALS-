@@ -6,6 +6,16 @@ from src.utils.logger import setup_logger
 logger = setup_logger("risk_manager")
 
 
+def paper_equity_ledger_enabled() -> bool:
+    """
+    Paper-Modus mit Equity-Konto: kein Spot-„Kauf zieht ganze Kasse ab“.
+    Balance bleibt die Gesamt-Equity; bei Close nur PnL-Zubuchung.
+    """
+    return str(getattr(settings, "TRADING_MODE", "paper")).lower() == "paper" and bool(
+        getattr(settings, "PAPER_EQUITY_ACCOUNT", True)
+    )
+
+
 @dataclass
 class Position:
     symbol: str
@@ -45,6 +55,8 @@ class RiskManager:
         self.open_positions: Dict[str, Position] = {}
         self.max_position_pct = settings.MAX_POSITION_SIZE_PERCENT
         self.max_open_trades = settings.MAX_OPEN_TRADES
+        if settings.TRADING_MODE == "live" and getattr(settings, "LIVE_TEST_MODE", False):
+            self.max_open_trades = min(self.max_open_trades, 1)
         self.stop_loss_pct = settings.STOP_LOSS_PERCENT
         self.take_profit_pct = settings.TAKE_PROFIT_PERCENT
         self.trailing_stop = settings.TRAILING_STOP
@@ -106,10 +118,16 @@ class RiskManager:
         # SHORT: Gewinn wenn exit < entry  → (entry - exit) * amount
         if position.side == "long":
             pnl = (current_price - position.entry_price) * position.amount
-            self.balance += current_price * position.amount
         else:  # short
             pnl = (position.entry_price - current_price) * position.amount
-            # Margin (entry * amount) zurück + PnL (kann negativ sein)
+
+        if paper_equity_ledger_enabled():
+            # Equity-Konto: nur realisiertes PnL bewegt die Balance
+            self.balance += pnl
+        elif position.side == "long":
+            self.balance += current_price * position.amount
+        else:
+            # Spot-Short-Paper: Margin zurück + PnL
             self.balance += position.entry_price * position.amount + pnl
 
         self.total_pnl += pnl

@@ -39,12 +39,71 @@ CREATE TABLE IF NOT EXISTS trades (
     status           TEXT NOT NULL DEFAULT 'open',
     reason_open      TEXT,
     reason_close     TEXT,
+    exit_reason      TEXT,
     confidence       REAL,
+    signal_score     REAL,
     regime           TEXT,
+    risk_state_at_entry TEXT,
     paper_mode       INTEGER NOT NULL DEFAULT 1,
     order_id         TEXT,
     created_at       TEXT NOT NULL,
     updated_at       TEXT NOT NULL
+);
+"""
+
+CREATE_DECISIONS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS decisions (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp            TEXT NOT NULL,
+    mode                 TEXT NOT NULL,
+    symbol               TEXT NOT NULL,
+    timeframe            TEXT NOT NULL,
+    detected_regime      TEXT,
+    eligible_strategies  TEXT,
+    strategy_ranking     TEXT,
+    chosen_strategy      TEXT,
+    signal_score         REAL,
+    risk_decision        TEXT,
+    allow_trade          INTEGER NOT NULL DEFAULT 0,
+    reject_reason        TEXT,
+    last_decision_reason TEXT,
+    market_context       TEXT,
+    created_at           TEXT NOT NULL
+);
+"""
+
+CREATE_PERFORMANCE_SNAPSHOTS_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS performance_snapshots (
+    id                   INTEGER PRIMARY KEY AUTOINCREMENT,
+    timestamp            TEXT NOT NULL,
+    mode                 TEXT NOT NULL,
+    current_balance      REAL NOT NULL,
+    current_equity       REAL NOT NULL,
+    open_positions_count INTEGER NOT NULL,
+    realized_pnl_total   REAL NOT NULL,
+    unrealized_pnl_total REAL NOT NULL,
+    day_pnl              REAL NOT NULL,
+    total_trades         INTEGER NOT NULL,
+    win_rate             REAL NOT NULL,
+    peak_equity          REAL NOT NULL,
+    max_drawdown_pct     REAL NOT NULL,
+    created_at           TEXT NOT NULL
+);
+"""
+
+CREATE_DAILY_PERFORMANCE_TABLE_SQL = """
+CREATE TABLE IF NOT EXISTS daily_performance (
+    day                   TEXT PRIMARY KEY,
+    mode                  TEXT NOT NULL,
+    trades_count          INTEGER NOT NULL,
+    pnl_abs               REAL NOT NULL,
+    winners               INTEGER NOT NULL,
+    losers                INTEGER NOT NULL,
+    win_rate              REAL NOT NULL,
+    best_strategy         TEXT,
+    worst_strategy        TEXT,
+    reject_reasons_top    TEXT,
+    updated_at            TEXT NOT NULL
 );
 """
 
@@ -55,6 +114,23 @@ CREATE_INDEXES_SQL = [
     "CREATE INDEX IF NOT EXISTS idx_trades_strategy ON trades (strategy_name);",
     "CREATE INDEX IF NOT EXISTS idx_trades_ts_open  ON trades (timestamp_open);",
 ]
+
+CREATE_DECISION_INDEXES_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_decisions_ts ON decisions (timestamp);",
+    "CREATE INDEX IF NOT EXISTS idx_decisions_symbol ON decisions (symbol);",
+    "CREATE INDEX IF NOT EXISTS idx_decisions_allow ON decisions (allow_trade);",
+]
+
+CREATE_PERFORMANCE_INDEXES_SQL = [
+    "CREATE INDEX IF NOT EXISTS idx_perf_ts ON performance_snapshots (timestamp);",
+    "CREATE INDEX IF NOT EXISTS idx_perf_mode ON performance_snapshots (mode);",
+]
+
+_REQUIRED_COLUMNS = {
+    "exit_reason": "TEXT",
+    "signal_score": "REAL",
+    "risk_state_at_entry": "TEXT",
+}
 
 
 def get_db_path() -> str:
@@ -82,7 +158,15 @@ def init_db() -> bool:
         conn = sqlite3.connect(db_path)
         try:
             conn.execute(CREATE_TRADES_TABLE_SQL)
+            conn.execute(CREATE_DECISIONS_TABLE_SQL)
+            conn.execute(CREATE_PERFORMANCE_SNAPSHOTS_TABLE_SQL)
+            conn.execute(CREATE_DAILY_PERFORMANCE_TABLE_SQL)
+            _ensure_schema_migrations(conn)
             for idx_sql in CREATE_INDEXES_SQL:
+                conn.execute(idx_sql)
+            for idx_sql in CREATE_DECISION_INDEXES_SQL:
+                conn.execute(idx_sql)
+            for idx_sql in CREATE_PERFORMANCE_INDEXES_SQL:
                 conn.execute(idx_sql)
             conn.commit()
             logger.info(f"[green]Datenbank bereit:[/green] {db_path}")
@@ -93,6 +177,20 @@ def init_db() -> bool:
     except Exception as e:
         logger.error(f"[red]DB-Initialisierung fehlgeschlagen:[/red] {e}")
         return False
+
+
+def _ensure_schema_migrations(conn: sqlite3.Connection) -> None:
+    """
+    Additive Migration für bestehende DB-Dateien.
+    Fehlende Spalten werden via ALTER TABLE ergänzt.
+    """
+    cur = conn.execute("PRAGMA table_info(trades)")
+    cols = {str(r[1]).strip().lower() for r in cur.fetchall()}
+    for col, col_type in _REQUIRED_COLUMNS.items():
+        if col.lower() in cols:
+            continue
+        conn.execute(f"ALTER TABLE trades ADD COLUMN {col} {col_type}")
+        logger.info("DB-Migration: Spalte ergänzt -> trades.%s (%s)", col, col_type)
 
 
 def get_connection() -> Optional[sqlite3.Connection]:

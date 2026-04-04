@@ -33,10 +33,45 @@ class Settings:
     LIVE_TRADING_ENABLED: bool = _env_bool(
         "LIVE_TRADING_ENABLED", "ENABLE_LIVE_TRADING", default=False
     )
+    # Mini-Live Vorstufe: zusätzliche harte Begrenzungen für kontrollierte Live-Tests
+    LIVE_TEST_MODE: bool = _env_bool("LIVE_TEST_MODE", default=False)
+    # Maximales Notional (Quote, z.B. USDT) pro Live-Test-Order
+    LIVE_MAX_POSITION_SIZE: float = float(os.getenv("LIVE_MAX_POSITION_SIZE", 25.0))
+    # Optional: nur diese Strategien im Mini-Live zulassen (kommagetrennt, leer = alle)
+    LIVE_ALLOWED_STRATEGIES: str = os.getenv("LIVE_ALLOWED_STRATEGIES", "")
+    # Strengeres Daily-Loss-Limit nur für Mini-Live
+    LIVE_TEST_DAILY_LOSS_LIMIT_PCT: float = float(
+        os.getenv("LIVE_TEST_DAILY_LOSS_LIMIT_PCT", 1.0)
+    )
+    # Harte Live-Risk-Prüfung vor echten Orders
+    LIVE_HARD_RISK_GATE_ENABLED: bool = _env_bool(
+        "LIVE_HARD_RISK_GATE_ENABLED", default=True
+    )
+    # Mindestanforderungen für Live-Kapital
+    LIVE_MIN_ACCOUNT_EQUITY_USDT: float = float(
+        os.getenv("LIVE_MIN_ACCOUNT_EQUITY_USDT", 100.0)
+    )
+    LIVE_MIN_FREE_CAPITAL_USDT: float = float(
+        os.getenv("LIVE_MIN_FREE_CAPITAL_USDT", 25.0)
+    )
+    # Maximal erlaubte Verlustserie (global) bevor neue Entries blockiert werden
+    LIVE_MAX_LOSING_STREAK: int = int(os.getenv("LIVE_MAX_LOSING_STREAK", 3))
+    # Leere Liste = keine zusätzliche Symbol-Whitelist
+    LIVE_ALLOWED_SYMBOLS: str = os.getenv("LIVE_ALLOWED_SYMBOLS", "")
 
     TRADING_PAIRS: list = os.getenv(
         "TRADING_PAIRS", "BTC/USDT,ETH/USDT"
     ).split(",")
+
+    # Dynamisches Universum statt fester TRADING_PAIRS (z.B. alle Kraken-Linear-Perps).
+    # Leer = nur manuelle TRADING_PAIRS.
+    # kraken_perps: Kraken Futures linear USD (EXCHANGE=krakenfutures)
+    # binance_usdm: Binance USDT-M linear Perps (EXCHANGE=binance, FUTURES_MODE=true)
+    TRADING_UNIVERSE: str = os.getenv("TRADING_UNIVERSE", "").strip()
+    # Optional: Obergrenze für Scan-Umfang (0 = alle Symbole des Universums, alphabetisch sortiert)
+    TRADING_UNIVERSE_MAX_SYMBOLS: int = int(
+        os.getenv("TRADING_UNIVERSE_MAX_SYMBOLS", "0")
+    )
 
     TIMEFRAME: str = os.getenv("TIMEFRAME", "1h")
 
@@ -48,9 +83,15 @@ class Settings:
     TAKE_PROFIT_PERCENT: float = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
     TRAILING_STOP: bool = os.getenv("TRAILING_STOP", "false").lower() == "true"
 
+    # Heuristische Mindest-„Gewinnchance“ (0–100, siehe src/utils/win_chance.py).
+    # Trades mit niedrigerer Kennzahl werden nicht eröffnet. 0 = Filter deaktiviert.
+    MIN_WIN_CHANCE_PCT: float = float(os.getenv("MIN_WIN_CHANCE_PCT", "80"))
+
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)
     )
+    # Paper: Balance = Equity; kein Abzug des vollen Notionals beim Open (nur PnL beim Close).
+    PAPER_EQUITY_ACCOUNT: bool = _env_bool("PAPER_EQUITY_ACCOUNT", default=True)
 
     STRATEGY: str = os.getenv("STRATEGY", "rsi_ema")
 
@@ -108,6 +149,33 @@ class Settings:
     APP_INSTANCE_LOCKFILE: str = os.getenv(
         "APP_INSTANCE_LOCKFILE", "data/app.lock"
     )
+    # Recovery-/Restart-Schutz: persistierter Control-State + Positions-Rekonstruktion
+    STATE_RECOVERY_ENABLED: bool = _env_bool("STATE_RECOVERY_ENABLED", default=True)
+    STATE_RECOVERY_FILE: str = os.getenv(
+        "STATE_RECOVERY_FILE", "data/runtime_recovery.json"
+    )
+    RECOVERY_MAX_OPEN_TRADES_RESTORE: int = int(
+        os.getenv("RECOVERY_MAX_OPEN_TRADES_RESTORE", 100)
+    )
+    # Exchange-Read-Retry (nur read-only Calls, keine Mehrfachorders)
+    EXCHANGE_READ_RETRY_MAX: int = int(os.getenv("EXCHANGE_READ_RETRY_MAX", 2))
+    EXCHANGE_READ_RETRY_BACKOFF_SEC: float = float(
+        os.getenv("EXCHANGE_READ_RETRY_BACKOFF_SEC", 1.5)
+    )
+    # Duplicate-Order-Schutzfenster (Sekunden)
+    EXCHANGE_DUPLICATE_WINDOW_SEC: int = int(
+        os.getenv("EXCHANGE_DUPLICATE_WINDOW_SEC", 15)
+    )
+    # Supervisor/Controller: Startparameter für den separaten Bot-Prozess
+    SUPERVISOR_BOT_ARGS: str = os.getenv(
+        "SUPERVISOR_BOT_ARGS", "--multi --interval 60"
+    )
+    SUPERVISOR_PIDFILE: str = os.getenv(
+        "SUPERVISOR_PIDFILE", "data/bot_process.pid"
+    )
+    SUPERVISOR_BOT_LOGFILE: str = os.getenv(
+        "SUPERVISOR_BOT_LOGFILE", "logs/bot_process.log"
+    )
 
     RSI_PERIOD: int = 14
     RSI_OVERSOLD: float = 30.0
@@ -158,6 +226,15 @@ class Settings:
     # Schutz vor doppelten Signalen: gleiche Strategie + Symbol in N Minuten (Minuten)
     DUPLICATE_SIGNAL_MINUTES: int = int(os.getenv("DUPLICATE_SIGNAL_MINUTES", 15))
 
+    # Wiederholte Verluste gleiche Strategie + Symbol: Entry sperren (Lernschicht)
+    LOSS_PATTERN_MEMORY_ENABLED: bool = _env_bool("LOSS_PATTERN_MEMORY_ENABLED", default=True)
+    LOSS_PATTERN_MEMORY_FILE: str = os.getenv(
+        "LOSS_PATTERN_MEMORY_FILE", "data/loss_pattern_memory.json"
+    )
+    LOSS_PATTERN_WINDOW_HOURS: float = float(os.getenv("LOSS_PATTERN_WINDOW_HOURS", "72"))
+    # Ab so vielen Verlusten im Fenster wird neu eröffnet blockiert (z. B. 2 = ab dem 3. Versuch)
+    LOSS_PATTERN_MAX_LOSSES: int = int(os.getenv("LOSS_PATTERN_MAX_LOSSES", "2"))
+
     # ------------------------------------------------------------------
     # SHORT-Trading Einstellungen
     # ------------------------------------------------------------------
@@ -169,6 +246,10 @@ class Settings:
     # True = Futures-/Margin-Konto (SHORT live ausführbar)
     # False = Spot-Konto (SHORT nur im Paper-Modus simulierbar)
     FUTURES_MODE: bool = os.getenv("FUTURES_MODE", "false").lower() == "true"
+
+    # Nur SHORT-Entries (Multi-Strategie-Modus: Meta-Selector wählt nur unter SHORT-Signalen).
+    # Single-Strategy-Bot (z.B. rsi_ema) unterstützt keine Short-Eröffnung → Zyklus wird übersprungen.
+    SHORT_ONLY_TRADING: bool = _env_bool("SHORT_ONLY_TRADING", default=False)
 
     # ------------------------------------------------------------------
     # Strategy Performance Tracker & Scorer
@@ -191,7 +272,7 @@ class Settings:
     # Gewicht des Performance-Scores im Meta-Selector (0.0 = deaktiviert)
     # final_score = signal_score + (perf_score - 0.5) * PERF_SELECTOR_WEIGHT
     # Bei 0.15: maximale Anpassung = ±0.075 (konservativ)
-    PERF_SELECTOR_WEIGHT: float = float(os.getenv("PERF_SELECTOR_WEIGHT", 0.15))
+    PERF_SELECTOR_WEIGHT: float = float(os.getenv("PERF_SELECTOR_WEIGHT", 0.22))
 
     # Optionaler harter Performance-Gate: Strategien mit einem
     # Performance-Score unterhalb dieses Werts werden im Meta-Selector

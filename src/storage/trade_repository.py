@@ -5,8 +5,9 @@ Alle public Methoden fangen Exceptions intern ab und loggen sie –
 ein DB-Fehler crasht niemals den Main-Loop.
 """
 
+import json
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from src.storage.database import init_db, get_connection
 from src.utils.logger import setup_logger
@@ -60,6 +61,8 @@ class TradeRepository:
         confidence: float,
         regime: str,
         reason_open: str,
+        signal_score: Optional[float] = None,
+        risk_state_at_entry: Optional[Dict] = None,
         order_id: str = "",
     ) -> Optional[int]:
         """
@@ -77,21 +80,26 @@ class TradeRepository:
                 INSERT INTO trades (
                     timestamp_open, symbol, timeframe, strategy_name, side,
                     entry_price, stop_loss, take_profit, position_size,
-                    risk_amount, rr_planned, confidence, regime,
+                    risk_amount, rr_planned, confidence, signal_score, regime, risk_state_at_entry,
                     status, reason_open, paper_mode, order_id,
                     created_at, updated_at
                 ) VALUES (
                     ?, ?, ?, ?, ?,
                     ?, ?, ?, ?,
-                    ?, ?, ?, ?,
+                    ?, ?, ?, ?, ?, ?,
                     'open', ?, ?, ?,
                     ?, ?
                 )
             """
+            risk_state_json = (
+                json.dumps(risk_state_at_entry, ensure_ascii=True)
+                if isinstance(risk_state_at_entry, dict)
+                else None
+            )
             params = (
                 now, symbol, timeframe, strategy_name, side,
                 entry_price, stop_loss, take_profit, position_size,
-                risk_amount, rr_planned, confidence, regime,
+                risk_amount, rr_planned, confidence, signal_score, regime, risk_state_json,
                 reason_open, int(_IS_PAPER), order_id or "",
                 now, now,
             )
@@ -146,10 +154,21 @@ class TradeRepository:
                     pnl_pct         = ?,
                     status          = ?,
                     reason_close    = ?,
+                    exit_reason     = ?,
                     updated_at      = ?
                 WHERE id = ?
             """
-            params = (now, exit_price, pnl_abs, pnl_pct, status, reason_close, now, trade_id)
+            params = (
+                now,
+                exit_price,
+                pnl_abs,
+                pnl_pct,
+                status,
+                reason_close,
+                reason_close,
+                now,
+                trade_id,
+            )
 
             conn = get_connection()
             if conn is None:
@@ -287,7 +306,12 @@ class TradeRepository:
     # Lesen: Letzte Trades abfragen
     # ------------------------------------------------------------------
 
-    def get_recent_trades(self, limit: int = 20, status: str = None) -> List[dict]:
+    def get_recent_trades(
+        self,
+        limit: int = 20,
+        status: str = None,
+        current_mode_only: bool = True,
+    ) -> List[dict]:
         """
         Gibt die letzten N Trades als Liste von Dicts zurück.
         Optional nach Status filtern: 'open', 'closed', 'rejected'.
@@ -296,7 +320,15 @@ class TradeRepository:
             return []
 
         try:
-            if status:
+            if status and current_mode_only:
+                sql = """
+                    SELECT * FROM trades
+                    WHERE status = ? AND paper_mode = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                """
+                params = (status, int(_IS_PAPER), limit)
+            elif status:
                 sql = """
                     SELECT * FROM trades
                     WHERE status = ?
@@ -304,6 +336,14 @@ class TradeRepository:
                     LIMIT ?
                 """
                 params = (status, limit)
+            elif current_mode_only:
+                sql = """
+                    SELECT * FROM trades
+                    WHERE paper_mode = ?
+                    ORDER BY created_at DESC
+                    LIMIT ?
+                """
+                params = (int(_IS_PAPER), limit)
             else:
                 sql = "SELECT * FROM trades ORDER BY created_at DESC LIMIT ?"
                 params = (limit,)
@@ -319,6 +359,32 @@ class TradeRepository:
 
         except Exception as e:
             logger.error(f"[red]DB-Fehler get_recent_trades:[/red] {e}")
+            return []
+
+    def get_open_trades(self, limit: int = 200) -> List[dict]:
+        """
+        Liefert aktuell offene Trades (status='open') für den aktuellen Modus
+        (paper_mode passend zu Settings) – neueste zuerst.
+        """
+        if not self.available:
+            return []
+        try:
+            sql = """
+                SELECT * FROM trades
+                WHERE status = 'open' AND paper_mode = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+            """
+            conn = get_connection()
+            if conn is None:
+                return []
+            try:
+                rows = conn.execute(sql, (int(_IS_PAPER), limit)).fetchall()
+                return [dict(row) for row in rows]
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"[red]DB-Fehler get_open_trades:[/red] {e}")
             return []
 
     # ------------------------------------------------------------------

@@ -15,12 +15,13 @@ Verhalten:
 import time
 from collections import deque
 from datetime import datetime, timezone
-from typing import Dict, List
+from typing import Dict, List, Optional
 
 import requests
 
 from config.settings import settings
 from src.utils.logger import setup_logger
+from src.utils.win_chance import compute_trade_win_chance_pct
 
 logger = setup_logger("telegram")
 
@@ -29,7 +30,7 @@ _REQUEST_TIMEOUT: int = 8       # Sekunden bis Timeout
 _MAX_MSGS_PER_MIN: int = 20     # Telegram-API-Schutz
 
 # Block-Gründe, die eine Telegram-Meldung auslösen (Cooldowns nicht)
-_IMPORTANT_BLOCK_PREFIXES = ("DAILY LOSS", "MAX TRADES")
+_IMPORTANT_BLOCK_PREFIXES = ("DAILY LOSS", "MAX TRADES", "LIVE HARD GATE")
 
 # Mindestabstand zwischen Block-Meldungen desselben Typs (verhindert Spam
 # wenn Daily-Limit über viele Zyklen/Paare hinweg aktiv bleibt)
@@ -180,11 +181,16 @@ class TelegramNotifier:
         if not self._should_notify("runtime"):
             return
         mode_icon = "📄" if mode == "paper" else "🔴"
+        max_pairs = 12
+        if len(pairs) <= max_pairs:
+            pairs_txt = ", ".join(pairs)
+        else:
+            pairs_txt = ", ".join(pairs[:max_pairs]) + f" … (+{len(pairs) - max_pairs} weitere)"
         text = (
             f"🤖 <b>KRYPTO-BOT ORIGINALS gestartet</b>\n"
             f"{mode_icon} Modus: <b>{mode.upper()}</b>\n"
             f"📊 Strategie: {strategy}\n"
-            f"💱 Paare: {', '.join(pairs)}\n"
+            f"💱 Paare ({len(pairs)}): {pairs_txt}\n"
             f"⏱ Zeitrahmen: {timeframe}\n"
             f"🕐 {self._ts()}"
         )
@@ -223,6 +229,7 @@ class TelegramNotifier:
         confidence: float,
         regime: str,
         is_paper: bool,
+        brain_score: Optional[float] = None,
     ) -> None:
         """Trade eröffnet – nur wenn confidence >= TELEGRAM_MIN_CONFIDENCE."""
         if not self._should_notify("trading"):
@@ -230,6 +237,9 @@ class TelegramNotifier:
         if confidence < self._min_conf:
             return
 
+        win_pct, win_lbl = compute_trade_win_chance_pct(
+            confidence, brain_score=brain_score, rr=rr
+        )
         arrow = "🟢 LONG" if side == "long" else "🔴 SHORT"
         paper_tag = " <i>[PAPER]</i>" if is_paper else ""
         text = (
@@ -238,7 +248,10 @@ class TelegramNotifier:
             f"📍 Entry: <code>{entry:.4f}</code>\n"
             f"🛑 SL: <code>{sl:.4f}</code> | 🎯 TP: <code>{tp:.4f}</code>\n"
             f"⚖ RR: {rr:.2f} | Menge: {amount:.6f}\n"
-            f"🔭 Regime: {regime} | Konfidenz: {confidence:.0f}/100\n"
+            f"📊 Geschätzte Gewinnchance: <b>{win_pct:.0f}%</b> "
+            f"<i>({win_lbl})</i>\n"
+            f"📈 Signal-Konfidenz: {confidence:.0f}/100 | 🔭 Regime: {regime}\n"
+            f"<i>Hinweis: Kennzahl aus Signal/Score, keine Markt-Garantie.</i>\n"
             f"🕐 {self._ts()}"
         )
         self.send(text)
@@ -286,7 +299,7 @@ class TelegramNotifier:
         reason: str,
     ) -> None:
         """
-        Signal blockiert – nur bei kritischen Gründen (Daily-Loss, Max-Trades).
+        Signal blockiert – nur bei kritischen Gründen (Daily-Loss, Max-Trades, Live-Hard-Gate).
         Cooldowns und Duplikate werden nicht gesendet (zu viel Spam).
         Gleiche Block-Art wird max. 1× pro 30 Minuten gemeldet (Spam-Schutz).
         """
@@ -392,5 +405,50 @@ class TelegramNotifier:
         self.send(
             "🧭 <b>Strategie-Priorität geändert</b>\n"
             f"📊 Neue Priorität: <code>{strategy}</code>\n"
+            f"🕐 {self._ts()}"
+        )
+
+    def notify_recovery_status(
+        self,
+        *,
+        restored_positions: int,
+        open_orders: int,
+        blocked_symbols: List[str],
+        risk_off: bool,
+        notes: str = "",
+    ) -> None:
+        """Statusmeldung nach Restart-Recovery (kompakt, ohne Spam)."""
+        if not (self._should_notify("runtime") or self._should_notify("trading")):
+            return
+        blocked_txt = ", ".join(blocked_symbols[:5]) if blocked_symbols else "-"
+        extra = f"\n📝 {notes[:180]}" if notes else ""
+        self.send(
+            "♻️ <b>Restart-Recovery abgeschlossen</b>\n"
+            f"📌 Restored Positions: <b>{restored_positions}</b>\n"
+            f"📨 Open Orders (Exchange): <b>{open_orders}</b>\n"
+            f"🧱 Blocked Symbols: <code>{blocked_txt}</code>\n"
+            f"🛡 Risk-Off: <b>{risk_off}</b>{extra}\n"
+            f"🕐 {self._ts()}"
+        )
+
+    def notify_live_test_mode_start(self, limits: str) -> None:
+        if not self._should_notify("runtime"):
+            return
+        self.send(
+            "🧪 <b>MINI-LIVE TEST MODE AKTIV</b>\n"
+            f"⚠️ Sicherheitslimits: {limits[:220]}\n"
+            "Kein normaler Live-Betrieb. Safety-Gates bleiben strikt aktiv.\n"
+            f"🕐 {self._ts()}"
+        )
+
+    def notify_live_test_order_warning(
+        self, *, symbol: str, side: str, amount: float, notional: float, cap: float
+    ) -> None:
+        if not self._should_notify("trading"):
+            return
+        self.send(
+            "⚠️ <b>MINI-LIVE Order</b>\n"
+            f"💱 {symbol} [{side.upper()}]\n"
+            f"📦 amount={amount:.6f} | notional={notional:.2f}/{cap:.2f} USDT\n"
             f"🕐 {self._ts()}"
         )

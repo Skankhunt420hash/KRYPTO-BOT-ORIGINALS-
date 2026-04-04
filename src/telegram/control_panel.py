@@ -62,6 +62,8 @@ class PanelCallbacks:
     get_runtime_status: Optional[Callable[[], Dict]] = None
     request_bot_stop: Optional[Callable[[], None]] = None
     request_bot_start: Optional[Callable[[], Tuple[bool, str]]] = None
+    request_bot_restart: Optional[Callable[[], Tuple[bool, str]]] = None
+    get_bot_status: Optional[Callable[[], Dict]] = None
 
 
 class TelegramControlPanel:
@@ -339,6 +341,10 @@ class TelegramControlPanel:
                 self._handle_riskoff(chat_id)
             elif cmd == "/riskon":
                 self._handle_riskon(chat_id)
+            elif cmd == "/killswitch":
+                self._handle_killswitch_on(chat_id)
+            elif cmd == "/killswitchoff":
+                self._handle_killswitch_off(chat_id)
             elif cmd == "/setmode":
                 self._handle_setmode(chat_id, text)
             elif cmd == "/setstrategy":
@@ -347,6 +353,14 @@ class TelegramControlPanel:
                 self._handle_stop_bot(chat_id)
             elif cmd == "/start_bot":
                 self._handle_start_bot(chat_id)
+            elif cmd == "/botstart":
+                self._handle_bot_start(chat_id)
+            elif cmd == "/botstop":
+                self._handle_bot_stop(chat_id)
+            elif cmd == "/botrestart":
+                self._handle_bot_restart(chat_id)
+            elif cmd == "/botstatus":
+                self._send_bot_status(chat_id)
             else:
                 self._send_text(chat_id, "Unbekannter Befehl. Sende /help für eine Übersicht.")
         except Exception as e:
@@ -456,8 +470,9 @@ class TelegramControlPanel:
             chat_id,
             "<b>KRYPTO-BOT Control Center</b>\n"
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
-            "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon\n"
+            "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper\n"
+            "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
         )
 
@@ -467,13 +482,17 @@ class TelegramControlPanel:
         if mode == "paper":
             desc = "Paper-Trading (simuliert, kein Echtgeld)"
         elif mode == "live":
-            desc = "Live-Modus VORBEREITET – nur aktiv, wenn API-Keys gesetzt und Bot explizit im Live-Modus gestartet wird."
+            if bool(getattr(settings, "LIVE_TEST_MODE", False)):
+                desc = "MINI-LIVE TESTMODE (strikt begrenzt, kleine Positionsgröße, Safety-Gates aktiv)."
+            else:
+                desc = "Normaler Live-Modus (nur bei expliziter Freigabe + Risk-Gates)."
         else:
             desc = f"Unbekannter Modus '{mode}' – bitte .env prüfen."
 
         self._send_text(
             chat_id,
             f"🔧 <b>Modus:</b> <code>{mode}</code>\n"
+            f"🧪 Mini-Live: <code>{bool(getattr(settings, 'LIVE_TEST_MODE', False))}</code>\n"
             f"{desc}"
         )
 
@@ -515,12 +534,26 @@ class TelegramControlPanel:
         text = (
             "<b>🛡 Risk-Status</b>\n"
             f"Pause/RiskOff: {ctrl.get('paused')}/{ctrl.get('risk_off')}\n"
+            f"KillSwitch File: {Path(settings.KILL_SWITCH_FILE).exists()}\n"
             f"Risk/Trade: {settings.RISK_PER_TRADE_PCT}% | MaxOpenRisk: {settings.MAX_TOTAL_OPEN_RISK_PCT}%\n"
             f"OpenPos Limit: {settings.MAX_POSITIONS_TOTAL} | DailyLimit: {settings.DAILY_LOSS_LIMIT_PCT}%\n"
             f"DailyLoss Runtime: {runtime_daily_loss} | PortfolioRisk: {runtime_risk_pct}\n"
             f"Gate Last: {gate.get('last_gate_reason', 'n/a')}\n"
+            f"Live Gate: {gate.get('live_last_gate_reason', 'n/a')} "
+            f"(enabled={gate.get('live_hard_gate_enabled', False)})\n"
+            f"Live Limits: minEq={gate.get('live_min_equity_usdt', 'n/a')} "
+            f"minFree={gate.get('live_min_free_capital_usdt', 'n/a')} "
+            f"maxLosingStreak={gate.get('live_max_losing_streak', 'n/a')}\n"
+            f"Mini-Live: {gate.get('live_test_mode', False)} | "
+            f"maxPosSize={gate.get('live_test_max_position_size', 'n/a')} | "
+            f"dailyLimit={gate.get('live_test_daily_loss_limit_pct', 'n/a')}%\n"
+            f"Mini-Live Allow: symbols={gate.get('live_allowed_symbols', '') or 'all'} | "
+            f"strategies={gate.get('live_allowed_strategies', '') or 'all'}\n"
+            f"Recovery: startup_ok={gate.get('recovery_startup_ok', 'n/a')} | "
+            f"blocked_symbols={len(gate.get('recovery_blocked_symbols', []) or [])}\n"
             f"Gate Daily: {gate.get('daily_loss_usdt', 'n/a')} / {gate.get('daily_loss_limit_usdt', 'n/a')} USDT\n"
-            f"Cooldowns: coin={gate.get('active_coin_cooldowns', 'n/a')} strat={gate.get('active_strategy_cooldowns', 'n/a')}\n"
+            f"Cooldowns: coin={gate.get('active_coin_cooldowns', 'n/a')} strat={gate.get('active_strategy_cooldowns', 'n/a')} "
+            f"losingStreak={gate.get('global_losing_streak', 'n/a')}\n"
             f"Brain Risky: {(rt.get('brain') or {}).get('risky_phase', 'n/a')}"
         )
         self._send_text(chat_id, text)
@@ -531,9 +564,11 @@ class TelegramControlPanel:
         parts = [
             "<b>📌 Bot Summary</b>",
             f"• Modus: <code>{rt.get('mode', settings.TRADING_MODE)}</code>",
+            f"• Mini-Live: <code>{bool(getattr(settings, 'LIVE_TEST_MODE', False))}</code>",
             f"• Strategie: <code>{rt.get('active_strategy') or settings.STRATEGY}</code>",
             f"• Pause: {rt.get('paused', ctrl.get('paused'))}",
             f"• RiskOff: {rt.get('risk_off', ctrl.get('risk_off'))}",
+            f"• KillSwitch: {Path(settings.KILL_SWITCH_FILE).exists()}",
             f"• Health: {rt.get('health_status', 'n/a')}",
         ]
         parts.append(
@@ -552,6 +587,16 @@ class TelegramControlPanel:
                 f"risky={brain.get('risky_phase')}"
             )
             parts.append(f"• Brain Decision: {brain.get('last_decision_reason')}")
+        gate = rt.get("risk_gate") or {}
+        if gate:
+            parts.append(
+                f"• Live Gate: {gate.get('live_last_gate_reason', 'n/a')} "
+                f"(enabled={gate.get('live_hard_gate_enabled', False)})"
+            )
+            parts.append(
+                f"• Recovery: startup_ok={gate.get('recovery_startup_ok', 'n/a')} "
+                f"blocked_symbols={len(gate.get('recovery_blocked_symbols', []) or [])}"
+            )
         if self._repo.available:
             stats = self._repo.get_summary_stats()
             if stats:
@@ -560,6 +605,22 @@ class TelegramControlPanel:
                     f"Winrate: {stats.get('winrate_pct', 0.0):.1f}% | "
                     f"Open: {stats.get('open_trades', 0)}"
                 )
+        perf = rt.get("performance") or {}
+        snap = perf.get("snapshot") or {}
+        day = perf.get("daily_summary") or {}
+        if snap:
+            parts.append(
+                f"• Perf: unrealized={float(snap.get('unrealized_pnl_total', 0.0)):+.4f} | "
+                f"realized={float(snap.get('realized_pnl_total', 0.0)):+.4f} | "
+                f"maxDD={float(snap.get('max_drawdown_pct', 0.0)):.2f}%"
+            )
+        if day:
+            parts.append(
+                f"• Today: trades={int(day.get('trades_count', 0))} | "
+                f"pnl={float(day.get('pnl_abs', 0.0)):+.4f} | "
+                f"best={day.get('best_strategy') or 'n/a'} | "
+                f"worst={day.get('worst_strategy') or 'n/a'}"
+            )
         self._send_text(chat_id, "\n".join(parts))
 
     def _send_status(self, chat_id: str) -> None:
@@ -573,6 +634,10 @@ class TelegramControlPanel:
             f"🩺 <b>Runtime:</b> run={rt.get('running', False)} | "
             f"health={rt.get('health_status', 'n/a')} | "
             f"pause/riskoff={rt.get('paused', '?')}/{rt.get('risk_off', '?')}"
+        )
+        parts.append(
+            f"🧪 <b>Mini-Live:</b> {bool(getattr(settings, 'LIVE_TEST_MODE', False))} | "
+            f"maxPos={getattr(settings, 'LIVE_MAX_POSITION_SIZE', 'n/a')}"
         )
         parts.append(
             f"💰 <b>Kapital:</b> bal/eq/avail="
@@ -592,6 +657,10 @@ class TelegramControlPanel:
                 f"🛡 <b>Risk Gate:</b> last={gate.get('last_gate_reason', 'n/a')} | "
                 f"open={gate.get('open_positions', 'n/a')}/{gate.get('max_open_positions', 'n/a')} | "
                 f"daily={gate.get('daily_loss_usdt', 'n/a')}/{gate.get('daily_loss_limit_usdt', 'n/a')} USDT"
+            )
+            parts.append(
+                f"🧯 <b>Live Gate:</b> {gate.get('live_last_gate_reason', 'n/a')} | "
+                f"enabled={gate.get('live_hard_gate_enabled', False)}"
             )
         enabled = rt.get("enabled_strategies") or []
         if enabled:
@@ -643,9 +712,23 @@ class TelegramControlPanel:
 
     def _send_positions(self, chat_id: str) -> None:
         rt = self._safe_runtime_status()
+        if self._repo.available:
+            trades = self._repo.get_open_trades(limit=10)
+            if trades:
+                lines = ["📂 <b>Offene Positionen (DB)</b>"]
+                for t in trades:
+                    lines.append(
+                        f"- {t.get('symbol')} | {t.get('strategy_name')} | "
+                        f"{t.get('side')} @ {t.get('entry_price', 0):.4f} | "
+                        f"SL={t.get('stop_loss', 0):.4f} TP={t.get('take_profit', 0):.4f} | "
+                        f"Size={t.get('position_size', 0):.4f}"
+                    )
+                self._send_text(chat_id, "\n".join(lines))
+                return
+
         runtime_positions = rt.get("open_positions_detail") or []
         if runtime_positions:
-            lines = ["📂 <b>Offene Positionen (Runtime)</b>"]
+            lines = ["📂 <b>Offene Positionen (Runtime-Fallback)</b>"]
             for p in runtime_positions[:10]:
                 lines.append(
                     f"- {p.get('symbol')} | {p.get('strategy')} | "
@@ -656,31 +739,32 @@ class TelegramControlPanel:
                 )
             self._send_text(chat_id, "\n".join(lines))
             return
-
-        if not self._repo.available:
-            self._send_text(chat_id, "Keine DB verfügbar – offene Positionen nicht abrufbar.")
-            return
-
-        trades = self._repo.get_recent_trades(limit=10, status="open")
-        if not trades:
-            self._send_text(chat_id, "Derzeit sind keine offenen Positionen in der DB vermerkt.")
-            return
-
-        lines = ["📂 <b>Offene Positionen (DB)</b>"]
-        for t in trades:
-            lines.append(
-                f"- {t.get('symbol')} | {t.get('strategy_name')} | "
-                f"{t.get('side')} @ {t.get('entry_price', 0):.4f} | "
-                f"SL={t.get('stop_loss', 0):.4f} TP={t.get('take_profit', 0):.4f} | "
-                f"Size={t.get('position_size', 0):.4f}"
-            )
-        self._send_text(chat_id, "\n".join(lines))
+        self._send_text(chat_id, "Derzeit sind keine offenen Positionen vermerkt.")
 
     def _send_trades(self, chat_id: str) -> None:
+        if self._repo.available:
+            trades = self._repo.get_recent_trades(limit=10)
+            if trades:
+                lines = ["📜 <b>Letzte Trades (DB)</b>"]
+                for t in trades:
+                    status = t.get("status", "")
+                    pnl = t.get("pnl_abs")
+                    pnl_str = f"{pnl:+.4f}" if pnl is not None else "-"
+                    score = t.get("signal_score")
+                    score_txt = f"{float(score):.3f}" if score is not None else "n/a"
+                    lines.append(
+                        f"- [{status}] {t.get('symbol')} | {t.get('strategy_name')} | "
+                        f"{t.get('side')} @ {t.get('entry_price', 0):.4f} → "
+                        f"{t.get('exit_price') or '-'} | PnL={pnl_str} | "
+                        f"regime={t.get('regime') or 'n/a'} | score={score_txt}"
+                    )
+                self._send_text(chat_id, "\n".join(lines))
+                return
+
         rt = self._safe_runtime_status()
         runtime_trades = rt.get("recent_trades") or []
         if runtime_trades:
-            lines = ["📜 <b>Letzte Trades (Runtime)</b>"]
+            lines = ["📜 <b>Letzte Trades (Runtime-Fallback)</b>"]
             for t in runtime_trades[:10]:
                 pnl = t.get("pnl")
                 pnl_str = f"{float(pnl):+.4f}" if pnl is not None else "-"
@@ -690,39 +774,24 @@ class TelegramControlPanel:
                 )
             self._send_text(chat_id, "\n".join(lines))
             return
-
-        if not self._repo.available:
-            self._send_text(chat_id, "Keine DB verfügbar – Trades nicht abrufbar.")
-            return
-
-        trades = self._repo.get_recent_trades(limit=10)
-        if not trades:
-            self._send_text(chat_id, "Noch keine Trades in der DB.")
-            return
-
-        lines = ["📜 <b>Letzte Trades (DB)</b>"]
-        for t in trades:
-            status = t.get("status", "")
-            pnl = t.get("pnl_abs")
-            pnl_str = f"{pnl:+.4f}" if pnl is not None else "-"
-            lines.append(
-                f"- [{status}] {t.get('symbol')} | {t.get('strategy_name')} | "
-                f"{t.get('side')} @ {t.get('entry_price', 0):.4f} → "
-                f"{t.get('exit_price') or '-'} | PnL={pnl_str}"
-            )
-        self._send_text(chat_id, "\n".join(lines))
+        self._send_text(chat_id, "Noch keine Trades vorhanden.")
 
     def _send_balance(self, chat_id: str) -> None:
         rt = self._safe_runtime_status()
         balance = float(rt.get("balance", 0.0))
         equity = float(rt.get("equity", balance))
+        perf = rt.get("performance") or {}
+        snap = perf.get("snapshot") or {}
+        day = perf.get("daily_summary") or {}
         if not self._repo.available:
             self._send_text(
                 chat_id,
                 "💰 <b>Runtime-Balance</b>\n"
                 f"Balance: {balance:.2f} USDT\n"
                 f"Equity: {equity:.2f} USDT\n"
-                "Hinweis: DB nicht verfügbar, daher keine historische PnL-Auswertung."
+                f"Unrealized: {float(snap.get('unrealized_pnl_total', 0.0)):+.4f} USDT\n"
+                f"Day PnL: {float(day.get('pnl_abs', 0.0)):+.4f} USDT\n"
+                "Hinweis: DB nicht verfügbar, daher keine Trade-Historie-Auswertung."
             )
             return
 
@@ -741,6 +810,10 @@ class TelegramControlPanel:
             chat_id,
             "💰 <b>Paper-Balance / PnL (DB)</b>\n"
             f"Runtime Balance/Equity: {balance:.2f}/{equity:.2f} USDT\n"
+            f"Unrealized/Realized: {float(snap.get('unrealized_pnl_total', 0.0)):+.4f}/"
+            f"{float(snap.get('realized_pnl_total', 0.0)):+.4f} USDT\n"
+            f"Day PnL: {float(day.get('pnl_abs', 0.0)):+.4f} USDT | "
+            f"Day Trades: {int(day.get('trades_count', 0))}\n"
             f"Closed Trades: {stats.get('closed_trades', 0)}\n"
             f"Winrate: {stats.get('winrate_pct', 0.0):.1f}%\n"
             f"Total PnL: {stats.get('total_pnl', 0.0):+.4f} USDT\n"
@@ -834,6 +907,56 @@ class TelegramControlPanel:
             logger.error(f"Start-Callback-Fehler: {e}")
             self._send_text(chat_id, "Fehler beim Ausführen des Start-Callbacks.")
 
+    def _handle_bot_start(self, chat_id: str) -> None:
+        if self._callbacks.request_bot_start:
+            ok, msg = self._callbacks.request_bot_start()
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Supervisor-Start nicht angebunden.")
+
+    def _handle_bot_stop(self, chat_id: str) -> None:
+        if self._callbacks.request_bot_stop:
+            result = self._callbacks.request_bot_stop()
+            if isinstance(result, tuple) and len(result) == 2:
+                ok, msg = result
+                self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            else:
+                self._send_text(chat_id, "✅ Stop-Anfrage gesendet.")
+            return
+        self._send_text(chat_id, "⚠️ Supervisor-Stop nicht angebunden.")
+
+    def _handle_bot_restart(self, chat_id: str) -> None:
+        if self._callbacks.request_bot_restart:
+            ok, msg = self._callbacks.request_bot_restart()
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Supervisor-Restart nicht angebunden.")
+
+    def _send_bot_status(self, chat_id: str) -> None:
+        status = {}
+        if self._callbacks.get_bot_status:
+            try:
+                status = self._callbacks.get_bot_status() or {}
+            except Exception as e:
+                logger.error("Bot-Status Callback-Fehler: %s", e)
+                self._send_text(chat_id, "⚠️ Konnte Bot-Status nicht lesen.")
+                return
+        if not status:
+            self._send_text(chat_id, "⚠️ Supervisor-Status nicht angebunden.")
+            return
+        running = bool(status.get("running"))
+        pid = status.get("pid")
+        uptime = status.get("uptime_sec")
+        uptime_txt = f"{uptime}s" if uptime is not None else "n/a"
+        self._send_text(
+            chat_id,
+            "🤖 <b>Bot-Prozess Status</b>\n"
+            f"Running: <code>{running}</code>\n"
+            f"PID: <code>{pid if pid is not None else 'n/a'}</code>\n"
+            f"Uptime: <code>{uptime_txt}</code>\n"
+            f"PID-File: <code>{status.get('pidfile', 'n/a')}</code>"
+        )
+
     def _handle_pause(self, chat_id: str) -> None:
         runtime_control.pause_entries()
         runtime_state.update_engine(paused=True)
@@ -871,6 +994,43 @@ class TelegramControlPanel:
             chat_id,
             "🟢 Risk-Off deaktiviert. Neue Entries sind wieder möglich (wenn Risk-Regeln erfüllt)."
         )
+
+    def _handle_killswitch_on(self, chat_id: str) -> None:
+        path = Path(settings.KILL_SWITCH_FILE)
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("KILL_SWITCH=1\n", encoding="utf-8")
+            runtime_control.pause_entries()
+            runtime_control.enable_risk_off()
+            runtime_state.update_engine(paused=True, risk_off=True)
+            runtime_state.append_log("TELEGRAM /killswitch -> kill switch aktiviert")
+            logger.error("Telegram-Aktion: /killswitch -> KILL SWITCH AKTIV")
+            self._notifier.notify_bot_paused("telegram:/killswitch")
+            self._notifier.notify_risk_off(True, "telegram:/killswitch")
+            self._send_text(
+                chat_id,
+                "🛑 Kill-Switch AKTIV. Neue Orders sind hart gesperrt, "
+                "bis /killswitchoff ausgeführt wird."
+            )
+        except Exception as e:
+            logger.error(f"Kill-Switch Aktivierung fehlgeschlagen: {e}")
+            self._send_text(chat_id, "⚠️ Kill-Switch konnte nicht aktiviert werden.")
+
+    def _handle_killswitch_off(self, chat_id: str) -> None:
+        path = Path(settings.KILL_SWITCH_FILE)
+        try:
+            if path.exists():
+                path.unlink()
+            runtime_state.append_log("TELEGRAM /killswitchoff -> kill switch deaktiviert")
+            logger.warning("Telegram-Aktion: /killswitchoff -> Kill-Switch deaktiviert")
+            self._send_text(
+                chat_id,
+                "✅ Kill-Switch deaktiviert. "
+                "Hinweis: /resume und /riskon ggf. separat setzen."
+            )
+        except Exception as e:
+            logger.error(f"Kill-Switch Deaktivierung fehlgeschlagen: {e}")
+            self._send_text(chat_id, "⚠️ Kill-Switch konnte nicht deaktiviert werden.")
 
     def _handle_setmode(self, chat_id: str, text: str) -> None:
         parts = text.split()

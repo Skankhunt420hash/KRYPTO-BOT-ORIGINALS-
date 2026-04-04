@@ -1,0 +1,25 @@
+# DigitalOcean / Linux (systemd) – nach /etc/systemd/system/krypto-bot.service kopieren
+# und Pfade/User anpassen, dann:
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable krypto-bot
+#   sudo systemctl start krypto-bot
+#   sudo journalctl -u krypto-bot -f
+
+[Unit]
+Description=KRYPTO-BOT ORIGINALS (Multi-Strategy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=DEIN_LINUX_USER
+Group=DEIN_LINUX_USER
+WorkingDirectory=/home/DEIN_LINUX_USER/KRYPTO-BOT-ORIGINALS
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/DEIN_LINUX_USER/KRYPTO-BOT-ORIGINALS/.venv/bin/python main.py --multi --interval 60
+Restart=on-failure
+RestartSec=30
+# Bei sehr langen Zyklen ggf. erhöhen (TimeoutStopSec)
+
+[Install]
+WantedBy=multi-user.target

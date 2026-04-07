@@ -1,0 +1,24 @@
+# Fertig für: git clone nach /root/krypto-bot, User root
+# Auf dem Server:
+#   sudo cp /root/krypto-bot/deploy/krypto-bot-root.service /etc/systemd/system/krypto-bot.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable krypto-bot
+#   sudo systemctl start krypto-bot
+
+[Unit]
+Description=KRYPTO-BOT ORIGINALS (Multi-Strategy)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/krypto-bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/krypto-bot/.venv/bin/python main.py --multi --interval 60
+Restart=on-failure
+RestartSec=30
+
+[Install]
+WantedBy=multi-user.target

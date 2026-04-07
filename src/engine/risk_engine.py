@@ -122,8 +122,9 @@ class RiskEngine(RiskManager):
         if ctrl.get("risk_off"):
             return self._reject("RISK OFF: Neue Entries sind vorübergehend deaktiviert")
 
+        _reg = (getattr(signal, "regime", None) or "").strip()
         blocked_lp, lp_reason = self._loss_pattern_memory.is_blocked(
-            signal.strategy_name, signal.symbol
+            signal.strategy_name, signal.symbol, _reg
         )
         if blocked_lp:
             return self._reject(lp_reason)
@@ -229,6 +230,7 @@ class RiskEngine(RiskManager):
             side=signal.side.value,          # "long" oder "short" – PFLICHT für korrekte PnL/SL/TP
             highest_price=signal.entry,
             strategy_name=signal.strategy_name,
+            regime=(getattr(signal, "regime", None) or "").strip(),
         )
         self.open_positions[signal.symbol] = position
         if not paper_equity_ledger_enabled():
@@ -254,15 +256,18 @@ class RiskEngine(RiskManager):
         """Schließt Position und setzt Cooldowns basierend auf PnL."""
         position = self.open_positions.get(symbol)
         strategy_name = position.strategy_name if position else ""
+        regime = (getattr(position, "regime", None) or "").strip() if position else ""
 
         pnl = super().close_position(symbol, current_price)
 
         if pnl is not None:
-            self._on_position_closed(symbol, pnl, strategy_name)
+            self._on_position_closed(symbol, pnl, strategy_name, regime)
 
         return pnl
 
-    def _on_position_closed(self, symbol: str, pnl: float, strategy_name: str):
+    def _on_position_closed(
+        self, symbol: str, pnl: float, strategy_name: str, regime: str = ""
+    ):
         """Setzt Cooldowns und aktualisiert Daily Loss nach Trade-Schließung."""
         now = datetime.now(timezone.utc)
 
@@ -273,7 +278,7 @@ class RiskEngine(RiskManager):
             self._global_losing_streak += 1
             if strategy_name:
                 self._strategy_cooldown[strategy_name] = now
-                self._loss_pattern_memory.record_loss(strategy_name, symbol)
+                self._loss_pattern_memory.record_loss(strategy_name, symbol, regime)
                 logger.warning(
                     f"[yellow]STRATEGY COOLDOWN gesetzt:[/yellow] "
                     f"{strategy_name} für {settings.STRATEGY_COOLDOWN_MINUTES}min "
@@ -281,6 +286,8 @@ class RiskEngine(RiskManager):
                 )
         else:
             self._global_losing_streak = 0
+            if strategy_name and pnl > 0:
+                self._loss_pattern_memory.record_win(strategy_name, symbol, regime)
 
         logger.debug(
             f"Coin-Cooldown: {symbol} für {settings.COIN_COOLDOWN_MINUTES}min | "

@@ -7,6 +7,7 @@ from .momentum_pullback import MomentumPullbackStrategy
 from .range_reversion import RangeReversionStrategy
 from .volatility_breakout import VolatilityBreakoutStrategy
 from .trend_continuation import TrendContinuationStrategy
+from .legacy_adapter import LegacyEnhancedAdapter
 
 
 def get_strategy(name: str) -> BaseStrategy:
@@ -27,13 +28,24 @@ def get_strategy(name: str) -> BaseStrategy:
 
 
 def get_all_enhanced_strategies() -> list:
-    """Gibt alle Strategien für den Multi-Strategy-Modus zurück."""
-    return [
+    """
+    Alle Strategien für den Multi-Strategy-Modus (STRATEGY=auto).
+
+    Enhanced-Strategien + Legacy (RSI/EMA, MACD, Combined) als Adapter —
+    Regime-Engine + Meta-Selector + Brain wählen pro Symbol die passende.
+    """
+    core = [
         MomentumPullbackStrategy(),
         RangeReversionStrategy(),
         VolatilityBreakoutStrategy(),
         TrendContinuationStrategy(),
     ]
+    legacy_wrapped = [
+        LegacyEnhancedAdapter(RsiEmaStrategy()),
+        LegacyEnhancedAdapter(MacdStrategy()),
+        LegacyEnhancedAdapter(CombinedStrategy()),
+    ]
+    return core + legacy_wrapped
 
 
 # Registry für den Backtest-Modus (Namen → Klasse)
@@ -79,4 +91,5 @@ __all__ = [
     "get_strategy",
     "get_all_enhanced_strategies",
     "get_enhanced_strategy",
+    "LegacyEnhancedAdapter",
 ]

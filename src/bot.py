@@ -13,6 +13,8 @@ from src.engine.execution_engine import ExecutionEngine
 from src.engine.health_monitor import HealthMonitor
 from src.engine.pair_scanner import PairScanner
 from src.engine.smart_exit import SmartExitEngine
+from src.engine.rl_signal_weighter import RLSignalWeighter
+from src.engine.market_intelligence import MarketIntelligenceEngine
 from src.storage.trade_repository import TradeRepository
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager
@@ -276,6 +278,13 @@ class MultiStrategyBot:
         # Smart Exit Engine (ATR-Trailing + Momentum-basierter Ausstieg)
         self.smart_exit = SmartExitEngine()
 
+        # RL Signal Weighter (Q-Learning, lernt aus jedem Trade)
+        self.rl = RLSignalWeighter()
+        self.selector.set_rl_weighter(self.rl)
+
+        # Market Intelligence Engine (OB, Funding, MTF, Liq, Sentiment)
+        self.market_intel = MarketIntelligenceEngine(self.exchange)
+
         # Dynamic Pair Scanner (Kraken Perp Pairs nach Volumen)
         self.pair_scanner = PairScanner(self.exchange)
         if settings.DYNAMIC_PAIRS_ENABLED:
@@ -355,6 +364,13 @@ class MultiStrategyBot:
                 pnl = self.risk.close_position(symbol, current_price)
                 self.smart_exit.unregister_trade(symbol)
 
+                # RL: Outcome aufzeichnen damit Agent lernt
+                if hasattr(self, "_rl_episodes") and symbol in self._rl_episodes:
+                    ep_id = self._rl_episodes.pop(symbol)
+                    if pnl is not None and pos_size > 0:
+                        pnl_pct_rl = (pnl / (entry_price * pos_size) * 100)
+                        self.rl.record_outcome(ep_id, pnl_pct_rl)
+
                 side_label = "[LONG]" if pos_side == "long" else "[SHORT]"
                 pnl_str = f"{pnl:+.4f} USDT" if pnl is not None else "?"
                 logger.info(
@@ -409,12 +425,20 @@ class MultiStrategyBot:
             except Exception as e:
                 logger.error(f"  {strategy.name} | Fehler: {e}")
 
-        # 4. Meta-Selector
-        best = self.selector.select(signals, regime, symbol)
+        # 4. Market Intelligence Context (OB, Funding, MTF, Liq, Sentiment)
+        market_ctx = None
+        if settings.MARKET_INTEL_ENABLED:
+            try:
+                market_ctx = self.market_intel.get_context(symbol, df)
+            except Exception as e:
+                logger.debug(f"MarketIntel fehlgeschlagen ({symbol}): {e}")
+
+        # 5. Meta-Selector (jetzt mit RL + MarketIntel)
+        best = self.selector.select(signals, regime, symbol, market_context=market_ctx)
         if best is None or best.side == Side.NONE:
             return
 
-        # 5. Risk-Engine prüfen (Cooldowns, Daily-Loss, Duplikat-Schutz)
+        # 6. Risk-Engine prüfen (Cooldowns, Daily-Loss, Duplikat-Schutz)
         allowed, block_reason = self.risk.check_signal(best)
         if not allowed:
             logger.info(
@@ -442,7 +466,7 @@ class MultiStrategyBot:
             )
             return
 
-        # 5b. Portfolio Risk Engine: Sizing + Exposure-Limits
+        # 6b. Portfolio Risk Engine: Sizing + Exposure-Limits
         pf_allowed, pf_reason, amount = self.risk.check_and_size(best)
         if not pf_allowed:
             logger.info(
@@ -470,10 +494,27 @@ class MultiStrategyBot:
             )
             return
 
-        # 6. Signal registrieren (Duplikatschutz)
+        # 7. Signal registrieren (Duplikatschutz)
         self.risk.register_signal(best)
 
-        # 7. Order ausführen via Execution Engine (Retry, Slippage, Fail-Safes)
+        # RL-Episode starten (wird nach Trade-Abschluss mit PnL abgeschlossen)
+        mkt_bias = getattr(market_ctx, "overall_bias", "neutral") if market_ctx else "neutral"
+        rl_episode_id = f"{symbol}_{int(time.time())}"
+        self.rl.begin_trade(
+            trade_id=rl_episode_id,
+            strategy=best.strategy_name,
+            regime=regime.value,
+            side=best.side.value,
+            confidence=best.confidence,
+            market_bias=mkt_bias,
+        )
+        # Speichere RL-Episode-ID für späteres Outcome-Recording
+        self._rl_episodes: dict
+        if not hasattr(self, "_rl_episodes"):
+            self._rl_episodes = {}
+        self._rl_episodes[symbol] = rl_episode_id
+
+        # 8. Order ausführen via Execution Engine (Retry, Slippage, Fail-Safes)
         if best.side == Side.LONG:
             exec_result = self.exec_engine.execute_entry(
                 symbol=symbol, order_side="buy", amount=amount, signal=best

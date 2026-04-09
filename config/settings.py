@@ -44,6 +44,12 @@ class Settings:
     # Mindest-SL-Distanz in % des Entry-Preises (verhindert Spread-SL)
     MIN_SL_DISTANCE_PCT: float = float(os.getenv("MIN_SL_DISTANCE_PCT", 0.3))
 
+    # ── RL Signal Weighter (Q-Learning) ──────────────────────────────────────
+    RL_ENABLED: bool = os.getenv("RL_ENABLED", "true").lower() == "true"
+
+    # ── Market Intelligence ───────────────────────────────────────────────────
+    MARKET_INTEL_ENABLED: bool = os.getenv("MARKET_INTEL_ENABLED", "true").lower() == "true"
+
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)
     )

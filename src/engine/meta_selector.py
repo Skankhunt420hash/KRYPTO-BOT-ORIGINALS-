@@ -1,4 +1,4 @@
-from typing import TYPE_CHECKING, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from config.settings import settings
 from src.strategies.signal import EnhancedSignal, Side
@@ -90,24 +90,39 @@ class MetaSelector:
         signal_score = regime_fit * 0.35 + confidence_norm * 0.35
                      + rr_score * 0.20 + volume_bonus * 0.10
 
-    Optionale Performance-Anpassung (wenn StrategyScorer übergeben):
-        final_score = signal_score + (perf_score - 0.5) * PERF_WEIGHT
-        → max ±0.075 bei PERF_WEIGHT=0.15 (konservativ)
-        → nur aktiv wenn genug historische Trades vorhanden
+    Optionale Anpassungen:
+        + Performance-Score (Strategy Scorer):  ±0.075
+        + RL-Gewichtung (Q-Learning):            ±0.10
+        + Market Intelligence (OB/Funding/...): ±0.15 (via confidence_boost)
+
+    Blocking-Logik:
+        - MTF nicht ausgerichtet + schwaches Signal → blockieren
+        - Liquidation-Risiko "high" + enger SL → blockieren
+        - Market-Bias gegen Signal-Side bei starkem Kontra-Signal → blockieren
     """
 
-    def __init__(self, scorer: Optional["StrategyScorer"] = None):
+    def __init__(
+        self,
+        scorer: Optional["StrategyScorer"] = None,
+        rl_weighter: Optional[Any] = None,
+    ):
         self._scorer = scorer
+        self._rl: Optional[Any] = rl_weighter   # RLSignalWeighter
 
     def set_scorer(self, scorer: "StrategyScorer") -> None:
         """Setzt oder ersetzt den StrategyScorer (nach Initialisierung)."""
         self._scorer = scorer
+
+    def set_rl_weighter(self, rl: Any) -> None:
+        """Setzt den RL-Weighter (nach Initialisierung)."""
+        self._rl = rl
 
     def select(
         self,
         signals: List[EnhancedSignal],
         regime: Regime,
         symbol: str,
+        market_context: Optional[Any] = None,   # MarketContext (optional)
     ) -> Optional[EnhancedSignal]:
         actionable = [
             s for s in signals
@@ -150,8 +165,47 @@ class MetaSelector:
                 + vol_bonus * 0.10
             )
 
-            # Performance-Anpassung (optional, konservativ)
-            perf_score = 0.5   # neutral default
+            # ── Market Intelligence: Blockieren wenn stark gegen Signal ────
+            mkt_bias = "neutral"
+            conf_boost = 0.0
+            if market_context is not None:
+                mkt_bias = getattr(market_context, "overall_bias", "neutral")
+                conf_boost = getattr(market_context, "confidence_boost", 0.0)
+                liq_risk = getattr(market_context, "liq_risk", "low")
+                mtf_aligned = getattr(market_context, "mtf_aligned", True)
+
+                side_val = sig.side.value  # "long" | "short"
+
+                # MTF nicht ausgerichtet + Signal unter 55 Konfidenz → skip
+                if not mtf_aligned and sig.confidence < 55:
+                    logger.debug(
+                        f"[MTF-FILTER] {sig.strategy_name} [{side_val}] | "
+                        f"MTF nicht ausgerichtet + conf={sig.confidence:.0f} < 55"
+                    )
+                    continue
+
+                # Starker Kontra-Bias → blockieren
+                contra = (
+                    (side_val == "long" and mkt_bias == "strong_short") or
+                    (side_val == "short" and mkt_bias == "strong_long")
+                )
+                if contra and sig.confidence < 70:
+                    logger.debug(
+                        f"[INTEL-FILTER] {sig.strategy_name} [{side_val}] | "
+                        f"Kontra-Bias={mkt_bias} + conf={sig.confidence:.0f} < 70"
+                    )
+                    continue
+
+                # Liquidation-Risiko hoch: nur hochqualitative Signale
+                if liq_risk == "high" and sig.confidence < 75:
+                    logger.debug(
+                        f"[LIQ-FILTER] {sig.strategy_name} | "
+                        f"Liq-Risk=high + conf={sig.confidence:.0f} < 75"
+                    )
+                    continue
+
+            # ── Performance-Anpassung (StrategyScorer) ───────────────────────
+            perf_score = 0.5
             perf_adj = 0.0
             if self._scorer is not None and _PERF_WEIGHT > 0:
                 try:
@@ -165,6 +219,28 @@ class MetaSelector:
                         f"{type(e).__name__} – neutraler Score verwendet"
                     )
 
+            # ── RL-Gewichtung (Q-Learning) ────────────────────────────────────
+            rl_mult = 1.0
+            if self._rl is not None:
+                try:
+                    rl_score = self._rl.get_score(
+                        strategy=sig.strategy_name,
+                        regime=regime.value,
+                        side=sig.side.value,
+                        confidence=sig.confidence,
+                        market_bias=mkt_bias,
+                    )
+                    # RL-Score [0.5, 1.5] → Anpassung ±0.10
+                    rl_adj = (rl_score - 1.0) * 0.10
+                    rl_mult = rl_score
+                    perf_adj += rl_adj
+                except Exception as e:
+                    logger.warning(f"RL.get_score fehlgeschlagen: {type(e).__name__}")
+
+            # ── Market Intel Confidence Boost ─────────────────────────────────
+            # conf_boost ist ±0.15 basierend auf OB/Funding/Sentiment
+            perf_adj += conf_boost
+
             total = signal_score + perf_adj
             # Speichere signal_score + perf_adj für Logging des Gewinners
             scored.append((total, sig, signal_score, perf_adj, perf_score))
@@ -172,7 +248,8 @@ class MetaSelector:
                 f"  {sig.strategy_name:<22} [{sig.side.value.upper():<5}] | "
                 f"fit={fit:.2f} conf={sig.confidence:.0f} rr={sig.rr:.2f} "
                 f"vol={'✓' if sig.volume_confirmed else '✗'} "
-                f"sig={signal_score:.3f} perf={perf_score:.2f} adj={perf_adj:+.3f} "
+                f"sig={signal_score:.3f} perf={perf_score:.2f} "
+                f"rl={rl_mult:.2f} mkt={mkt_bias} adj={perf_adj:+.3f} "
                 f"→ final={total:.3f}"
             )
 

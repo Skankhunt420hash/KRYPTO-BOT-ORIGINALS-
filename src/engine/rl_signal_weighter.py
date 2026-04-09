@@ -165,16 +165,25 @@ class RLSignalWeighter:
         key = self._make_key(strategy, regime, side, confidence, market_bias)
         self._active[trade_id] = (key, time.time())
 
-    def record_outcome(self, trade_id: str, pnl_pct: float) -> None:
+    def record_outcome(
+        self, trade_id: str, pnl_pct: float, confidence: float = 70.0
+    ) -> None:
         """
         Aktualisiert Q-Table nach Trade-Abschluss.
         pnl_pct: tatsächlicher PnL in Prozent.
+        confidence: Signal-Konfidenz (höhere Konfidenz = stärkerer Lerneffekt).
         """
         if trade_id not in self._active:
             return
 
         key, _ = self._active.pop(trade_id)
         reward = _normalize_reward(pnl_pct)
+
+        # Konfidenz-Gewichtung: High-Confidence-Trades lernen stärker
+        # Logik: Ein Trade mit 90% Konfidenz der verliert → starker negativer Lerneffekt
+        # Ein Trade mit 50% Konfidenz der verliert → schwächerer Effekt (war unsicher)
+        conf_weight = 0.7 + (confidence / 100.0) * 0.6  # Range: 0.7 – 1.3
+        reward = reward * conf_weight
 
         # Q-Learning Update: Q(s, "execute") ← Q + α × [R + γ × max_Q − Q]
         q_old = self._q[key]["execute"]

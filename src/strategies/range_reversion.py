@@ -24,9 +24,9 @@ class RangeReversionStrategy(EnhancedBaseStrategy):
 
     BB_WINDOW = 20
     BB_DEV = 2.0
-    RSI_OVERSOLD = 38
-    RSI_OVERBOUGHT = 62
-    ATR_SL_BUFFER = 1.0
+    RSI_OVERSOLD = 32        # Strenger: nur bei echtem Oversold (war 38)
+    RSI_OVERBOUGHT = 68      # Strenger: nur bei echtem Overbought (war 62)
+    ATR_SL_BUFFER = 1.2      # Etwas mehr Puffer (war 1.0)
 
     def __init__(self):
         super().__init__("RangeReversion")
@@ -67,8 +67,9 @@ class RangeReversionStrategy(EnhancedBaseStrategy):
                 if rr >= 1.0:
                     bb_distance = (bb_lower - price) / (atr + 1e-9)
                     rsi_extreme = (self.RSI_OVERSOLD - rsi) / self.RSI_OVERSOLD
-                    confidence = round(40.0 + bb_distance * 20 + rsi_extreme * 30, 1)
-                    confidence = min(confidence, 85.0)
+                    # Basis 50 (war 40): strengere Bedingungen = höhere Basis-Qualität
+                    confidence = round(50.0 + bb_distance * 20 + rsi_extreme * 25, 1)
+                    confidence = min(confidence, 92.0)
 
                     return EnhancedSignal(
                         strategy_name=self.name,
@@ -98,8 +99,8 @@ class RangeReversionStrategy(EnhancedBaseStrategy):
                 if rr >= 1.0:
                     bb_distance = (price - bb_upper) / (atr + 1e-9)
                     rsi_extreme = (rsi - self.RSI_OVERBOUGHT) / (100 - self.RSI_OVERBOUGHT)
-                    confidence = round(40.0 + bb_distance * 20 + rsi_extreme * 30, 1)
-                    confidence = min(confidence, 85.0)
+                    confidence = round(50.0 + bb_distance * 20 + rsi_extreme * 25, 1)
+                    confidence = min(confidence, 92.0)
 
                     return EnhancedSignal(
                         strategy_name=self.name,

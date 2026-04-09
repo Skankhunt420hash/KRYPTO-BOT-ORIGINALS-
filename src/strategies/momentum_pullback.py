@@ -28,12 +28,12 @@ class MomentumPullbackStrategy(EnhancedBaseStrategy):
     EMA_SHORT = 20
     EMA_MID = 50
     EMA_LONG = 100
-    RSI_PULLBACK_MIN = 38
-    RSI_PULLBACK_MAX = 58
-    RSI_SHORT_MIN = 42   # Pullback-Zonen für SHORT (RSI war in Überkauft-Gegend)
-    RSI_SHORT_MAX = 62
+    RSI_PULLBACK_MIN = 35    # Strenger: tieferer Pullback nötig (war 38)
+    RSI_PULLBACK_MAX = 52    # Strenger: RSI darf nicht zu hoch sein (war 58)
+    RSI_SHORT_MIN = 48       # Strenger für SHORT (war 42)
+    RSI_SHORT_MAX = 65       # Strenger (war 62)
     ATR_SL_MULT = 1.5
-    ATR_TP_MULT = 3.0
+    ATR_TP_MULT = 3.5        # Etwas weiter für besseres RR (war 3.0)
 
     def __init__(self):
         super().__init__("MomentumPullback")
@@ -77,8 +77,8 @@ class MomentumPullbackStrategy(EnhancedBaseStrategy):
 
                 trend_strength = min((ema20 - ema50) / ema50 * 100, 5.0) / 5.0
                 rsi_recovery = (rsi_now - self.RSI_PULLBACK_MIN) / (100 - self.RSI_PULLBACK_MIN)
-                confidence = round(trend_strength * 40 + rsi_recovery * 40 + 20, 1)
-                confidence = min(confidence, 88.0)
+                confidence = round(50.0 + trend_strength * 25 + rsi_recovery * 25, 1)
+                confidence = min(confidence, 92.0)
 
                 return EnhancedSignal(
                     strategy_name=self.name,
@@ -111,8 +111,8 @@ class MomentumPullbackStrategy(EnhancedBaseStrategy):
 
                 trend_strength = min((ema50 - ema20) / ema50 * 100, 5.0) / 5.0
                 rsi_rejection = (self.RSI_SHORT_MAX - rsi_now) / self.RSI_SHORT_MAX
-                confidence = round(trend_strength * 40 + rsi_rejection * 40 + 20, 1)
-                confidence = min(confidence, 88.0)
+                confidence = round(50.0 + trend_strength * 25 + rsi_rejection * 25, 1)
+                confidence = min(confidence, 92.0)
 
                 return EnhancedSignal(
                     strategy_name=self.name,

@@ -85,8 +85,8 @@ class TrendContinuationStrategy(EnhancedBaseStrategy):
                 ema_spread = (ema9 - ema50) / (ema50 + 1e-9) * 100
                 trend_conf = min(ema_spread / 5.0, 1.0)
                 macd_conf = min(abs(hist_now) / (abs(hist_prev2) + 1e-9) / 3.0, 1.0)
-                confidence = round(45.0 + trend_conf * 30 + macd_conf * 20, 1)
-                confidence = min(confidence, 90.0)
+                confidence = round(52.0 + trend_conf * 25 + macd_conf * 18, 1)
+                confidence = min(confidence, 93.0)
 
                 return EnhancedSignal(
                     strategy_name=self.name,
@@ -123,8 +123,8 @@ class TrendContinuationStrategy(EnhancedBaseStrategy):
                 ema_spread = (ema50 - ema9) / (ema50 + 1e-9) * 100
                 trend_conf = min(ema_spread / 5.0, 1.0)
                 macd_conf = min(abs(hist_now) / (abs(hist_prev2) + 1e-9) / 3.0, 1.0)
-                confidence = round(45.0 + trend_conf * 30 + macd_conf * 20, 1)
-                confidence = min(confidence, 90.0)
+                confidence = round(52.0 + trend_conf * 25 + macd_conf * 18, 1)
+                confidence = min(confidence, 93.0)
 
                 return EnhancedSignal(
                     strategy_name=self.name,

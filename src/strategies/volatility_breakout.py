@@ -74,8 +74,8 @@ class VolatilityBreakoutStrategy(EnhancedBaseStrategy):
             squeeze_ratio = 1.0 - (
                 float(df["bb_width"].iloc[-1]) / (float(width_sma.iloc[-1]) + 1e-9)
             )
-            base_conf = round(50.0 + squeeze_ratio * 30 + (10 if vol_confirmed else 0), 1)
-            base_conf = min(base_conf, 88.0)
+            base_conf = round(55.0 + squeeze_ratio * 27 + (10 if vol_confirmed else 0), 1)
+            base_conf = min(base_conf, 93.0)
 
             # ── LONG: Ausbruch nach oben ──────────────────────────────────
             if price > recent_high and vol_confirmed:

@@ -44,6 +44,13 @@ class Settings:
     # Mindest-SL-Distanz in % des Entry-Preises (verhindert Spread-SL)
     MIN_SL_DISTANCE_PCT: float = float(os.getenv("MIN_SL_DISTANCE_PCT", 0.3))
 
+    # ── Signal Validator ─────────────────────────────────────────────────────
+    SIGNAL_VALIDATOR_ENABLED: bool = (
+        os.getenv("SIGNAL_VALIDATOR_ENABLED", "true").lower() == "true"
+    )
+    # Mindest-Checks die ein Signal bestehen muss (von 5 total)
+    SIGNAL_VALIDATOR_MIN_CHECKS: int = int(os.getenv("SIGNAL_VALIDATOR_MIN_CHECKS", 3))
+
     # ── RL Signal Weighter (Q-Learning) ──────────────────────────────────────
     RL_ENABLED: bool = os.getenv("RL_ENABLED", "true").lower() == "true"
 

@@ -8,6 +8,8 @@ from src.utils.logger import setup_logger
 if TYPE_CHECKING:
     from src.engine.strategy_scorer import StrategyScorer
 
+from src.engine.signal_validator import SignalValidator
+
 logger = setup_logger("meta_selector")
 
 # Gewicht des Performance-Scores im Gesamt-Score.
@@ -107,7 +109,8 @@ class MetaSelector:
         rl_weighter: Optional[Any] = None,
     ):
         self._scorer = scorer
-        self._rl: Optional[Any] = rl_weighter   # RLSignalWeighter
+        self._rl: Optional[Any] = rl_weighter
+        self._validator = SignalValidator()
 
     def set_scorer(self, scorer: "StrategyScorer") -> None:
         """Setzt oder ersetzt den StrategyScorer (nach Initialisierung)."""
@@ -122,7 +125,8 @@ class MetaSelector:
         signals: List[EnhancedSignal],
         regime: Regime,
         symbol: str,
-        market_context: Optional[Any] = None,   # MarketContext (optional)
+        market_context: Optional[Any] = None,
+        df: Optional[Any] = None,
     ) -> Optional[EnhancedSignal]:
         actionable = [
             s for s in signals
@@ -154,7 +158,30 @@ class MetaSelector:
                 )
                 continue
 
-            conf_score = sig.confidence / 100.0
+            # ── Signal-Validator (ADX, Volumen, Kerze, Spread, Momentum) ──────
+            val_result = None
+            validator_conf_adj = 0.0
+            if df is not None:
+                try:
+                    val_result = self._validator.validate(sig, df)
+                    if not val_result.passed:
+                        logger.debug(
+                            f"[VALIDATOR] {sig.strategy_name} [{sig.side.value.upper()}] "
+                            f"{symbol} | {val_result.checks_passed}/{val_result.checks_total} "
+                            f"Checks | {' | '.join(val_result.failed_reasons[:2])}"
+                        )
+                        # Bei weniger als MIN_CHECKS: Signal überspringen
+                        min_v = getattr(settings, "SIGNAL_VALIDATOR_MIN_CHECKS", 3)
+                        if val_result.checks_passed < min_v:
+                            continue
+                    validator_conf_adj = val_result.confidence_adjustment
+                except Exception as e:
+                    logger.debug(f"Validator-Fehler {sig.strategy_name}: {e}")
+
+            # Konfidenz mit Validator-Anpassung
+            adjusted_confidence = max(0, min(100, sig.confidence + validator_conf_adj))
+
+            conf_score = adjusted_confidence / 100.0
             rr_score = min(sig.rr / 5.0, 1.0)
             vol_bonus = 0.10 if sig.volume_confirmed else 0.0
 

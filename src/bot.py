@@ -441,8 +441,12 @@ class MultiStrategyBot:
             except Exception as e:
                 logger.debug(f"MarketIntel fehlgeschlagen ({symbol}): {e}")
 
-        # 5. Meta-Selector (jetzt mit RL + MarketIntel)
-        best = self.selector.select(signals, regime, symbol, market_context=market_ctx)
+        # 5. Meta-Selector (jetzt mit RL + MarketIntel + Validator)
+        best = self.selector.select(
+            signals, regime, symbol,
+            market_context=market_ctx,
+            df=df,
+        )
         if best is None or best.side == Side.NONE:
             return
 

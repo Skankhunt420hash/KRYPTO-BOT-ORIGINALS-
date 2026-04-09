@@ -5,29 +5,49 @@ load_dotenv()
 
 
 class Settings:
-    EXCHANGE: str = os.getenv("EXCHANGE", "binance")
+    EXCHANGE: str = os.getenv("EXCHANGE", "krakenfutures")
     API_KEY: str = os.getenv("API_KEY", "")
     API_SECRET: str = os.getenv("API_SECRET", "")
 
     TRADING_MODE: str = os.getenv("TRADING_MODE", "paper")
 
     TRADING_PAIRS: list = os.getenv(
-        "TRADING_PAIRS", "BTC/USDT,ETH/USDT"
+        "TRADING_PAIRS", "BTC/USD:USD,ETH/USD:USD,SOL/USD:USD,XRP/USD:USD,ADA/USD:USD"
     ).split(",")
 
-    TIMEFRAME: str = os.getenv("TIMEFRAME", "1h")
+    # Dynamischer Pair-Scanner: wenn True, werden Pairs automatisch von Kraken geladen
+    DYNAMIC_PAIRS_ENABLED: bool = os.getenv("DYNAMIC_PAIRS_ENABLED", "true").lower() == "true"
+    # Max Anzahl Pairs die gleichzeitig gescannt werden
+    DYNAMIC_PAIRS_MAX: int = int(os.getenv("DYNAMIC_PAIRS_MAX", 20))
+    # Mindest-24h-Volumen in USD für Pair-Auswahl
+    DYNAMIC_PAIRS_MIN_VOLUME_USD: float = float(os.getenv("DYNAMIC_PAIRS_MIN_VOLUME_USD", 500000))
+
+    TIMEFRAME: str = os.getenv("TIMEFRAME", "5m")
 
     MAX_POSITION_SIZE_PERCENT: float = float(
         os.getenv("MAX_POSITION_SIZE_PERCENT", 2.0)
     )
-    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 5))
-    STOP_LOSS_PERCENT: float = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
-    TAKE_PROFIT_PERCENT: float = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
-    TRAILING_STOP: bool = os.getenv("TRAILING_STOP", "false").lower() == "true"
+    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 8))
+    STOP_LOSS_PERCENT: float = float(os.getenv("STOP_LOSS_PERCENT", 1.5))
+    TAKE_PROFIT_PERCENT: float = float(os.getenv("TAKE_PROFIT_PERCENT", 3.0))
+    TRAILING_STOP: bool = os.getenv("TRAILING_STOP", "true").lower() == "true"
+
+    # ── Smart Exit Einstellungen ──────────────────────────────────────────────
+    # Smart Exit statt starrem TP: Trailing + Momentum-basierter Ausstieg
+    SMART_EXIT_ENABLED: bool = os.getenv("SMART_EXIT_ENABLED", "true").lower() == "true"
+    # ATR-Multiplikator für Trailing Stop Distance
+    SMART_EXIT_ATR_MULT: float = float(os.getenv("SMART_EXIT_ATR_MULT", 1.5))
+    # Mindest-Gewinn (%) bevor Trailing aktiviert wird (Lock-in Profit)
+    SMART_EXIT_LOCK_IN_PCT: float = float(os.getenv("SMART_EXIT_LOCK_IN_PCT", 0.3))
+    # Max Trade-Dauer in Minuten (danach erzwungener Ausstieg wenn nicht im Gewinn)
+    SMART_EXIT_MAX_DURATION_MIN: int = int(os.getenv("SMART_EXIT_MAX_DURATION_MIN", 180))
+    # Mindest-SL-Distanz in % des Entry-Preises (verhindert Spread-SL)
+    MIN_SL_DISTANCE_PCT: float = float(os.getenv("MIN_SL_DISTANCE_PCT", 0.3))
 
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)
     )
+    FUTURES_MODE: bool = os.getenv("FUTURES_MODE", "true").lower() == "true"
 
     STRATEGY: str = os.getenv("STRATEGY", "rsi_ema")
 

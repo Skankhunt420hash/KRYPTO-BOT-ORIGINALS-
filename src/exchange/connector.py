@@ -19,11 +19,20 @@ class ExchangeConnector:
     def _connect(self):
         try:
             exchange_class = getattr(ccxt, self.exchange_id)
+
+            # Kraken Futures braucht andere Konfiguration als Spot
+            is_kraken_futures = self.exchange_id in ("krakenfutures", "krakenFutures")
+            options = {
+                "defaultType": "swap" if is_kraken_futures else "spot",
+            }
+            if is_kraken_futures:
+                options["defaultSettle"] = "USD"
+
             self._exchange = exchange_class({
                 "apiKey": settings.API_KEY,
                 "secret": settings.API_SECRET,
                 "enableRateLimit": True,
-                "options": {"defaultType": "spot"},
+                "options": options,
             })
 
             if self.is_paper:

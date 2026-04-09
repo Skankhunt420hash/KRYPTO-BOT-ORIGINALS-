@@ -144,11 +144,15 @@ class PortfolioRiskEngine:
 
         # SL-Distanz: immer positiv, unabhängig von Long/Short
         risk_distance = abs(entry - stop_loss)
-        min_sl_distance = entry * 0.0001  # Mindest-Distanz: 0.01% des Preises
+        # Mindest-SL-Distanz: konfigurierbar (verhindert Spread-SL wie bei VELO/USD)
+        # Standard: 0.3% des Entry-Preises (schützt vor sofortigem SL durch Spread)
+        min_sl_pct = getattr(settings, "MIN_SL_DISTANCE_PCT", 0.3)
+        min_sl_distance = entry * (min_sl_pct / 100)
         if risk_distance < min_sl_distance:
             return 0.0, (
-                f"Stop-Loss zu eng: Distanz={risk_distance:.6f} "
-                f"< Minimum={min_sl_distance:.6f} – Trade blockiert"
+                f"Stop-Loss zu eng: Distanz={risk_distance:.6f} ({risk_distance/entry*100:.4f}%) "
+                f"< Minimum={min_sl_distance:.6f} ({min_sl_pct:.2f}%) – "
+                f"Trade blockiert (Spread-SL-Schutz)"
             )
 
         # Modus-basierte Berechnung

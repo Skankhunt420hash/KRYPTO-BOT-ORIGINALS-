@@ -11,6 +11,8 @@ from src.engine.performance_tracker import PerformanceTracker
 from src.engine.strategy_scorer import StrategyScorer
 from src.engine.execution_engine import ExecutionEngine
 from src.engine.health_monitor import HealthMonitor
+from src.engine.pair_scanner import PairScanner
+from src.engine.smart_exit import SmartExitEngine
 from src.storage.trade_repository import TradeRepository
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager
@@ -259,7 +261,7 @@ class MultiStrategyBot:
         self.risk = RiskEngine()
         self.repo = TradeRepository()
         self.tg = TelegramNotifier()
-        self.pairs: List[str] = settings.TRADING_PAIRS
+        self.pairs: List[str] = list(settings.TRADING_PAIRS)
         self.running = False
         self._open_trade_ids: Dict[str, int] = {}  # symbol → DB-trade-id
 
@@ -270,6 +272,21 @@ class MultiStrategyBot:
 
         # Execution Quality Layer (Retry, Slippage-Schutz, Circuit Breaker, Fail-Safes)
         self.exec_engine = ExecutionEngine(self.exchange, self.tg)
+
+        # Smart Exit Engine (ATR-Trailing + Momentum-basierter Ausstieg)
+        self.smart_exit = SmartExitEngine()
+
+        # Dynamic Pair Scanner (Kraken Perp Pairs nach Volumen)
+        self.pair_scanner = PairScanner(self.exchange)
+        if settings.DYNAMIC_PAIRS_ENABLED:
+            try:
+                self.pair_scanner.force_refresh()
+                scanned = self.pair_scanner.get_active_pairs()
+                if scanned:
+                    self.pairs = scanned
+                    logger.info(f"[cyan]Pair-Scanner[/cyan]: {len(self.pairs)} Pairs geladen")
+            except Exception as e:
+                logger.warning(f"Pair-Scanner Init fehlgeschlagen: {e} – nutze Settings-Pairs")
 
         # Health Monitor & Watchdog (24/7 Überwachung)
         self.health = HealthMonitor(exec_engine=self.exec_engine, tg=self.tg)
@@ -305,8 +322,17 @@ class MultiStrategyBot:
         self.health.update_data_freshness(symbol)
         current_price = float(df["close"].iloc[-1])
 
-        # 1. Exits prüfen (SL, TP, Trailing Stop) – side-aware
+        # 1. Exits prüfen (SL, TP, Trailing Stop) – side-aware + Smart Exit
         exit_reason = self.risk.check_exit_conditions(symbol, current_price)
+
+        # Smart Exit Prüfung (ATR-Trailing, Momentum, Time-based)
+        if not exit_reason and symbol in self.risk.open_positions:
+            smart_close, smart_reason = self.smart_exit.check_exit(
+                symbol, current_price, df
+            )
+            if smart_close:
+                exit_reason = smart_reason
+
         if exit_reason:
             position = self.risk.open_positions.get(symbol)
             if position:
@@ -327,6 +353,7 @@ class MultiStrategyBot:
                     )
 
                 pnl = self.risk.close_position(symbol, current_price)
+                self.smart_exit.unregister_trade(symbol)
 
                 side_label = "[LONG]" if pos_side == "long" else "[SHORT]"
                 pnl_str = f"{pnl:+.4f} USDT" if pnl is not None else "?"
@@ -459,6 +486,7 @@ class MultiStrategyBot:
                 return
 
             self.risk.open_with_signal(best, amount)
+            self.smart_exit.register_trade(symbol, "long", best.entry)
             logger.info(
                 f"[bold green]LONG ERÖFFNET[/bold green] {symbol} | "
                 f"Strategie: {best.strategy_name} | "
@@ -540,6 +568,7 @@ class MultiStrategyBot:
             return
 
         self.risk.open_with_signal(signal, amount)
+        self.smart_exit.register_trade(symbol, "short", signal.entry)
         logger.info(
             f"[bold red]SHORT ERÖFFNET [PAPER][/bold red] {symbol} | "
             f"Strategie: {signal.strategy_name} | "
@@ -605,6 +634,17 @@ class MultiStrategyBot:
             self.scorer.refresh()
         except Exception as e:
             logger.warning(f"Scorer-Refresh fehlgeschlagen (nicht kritisch): {e}")
+
+        # Dynamic Pair Scanner: Pairs alle 15 Minuten aktualisieren
+        if settings.DYNAMIC_PAIRS_ENABLED:
+            try:
+                refreshed = self.pair_scanner.refresh_if_needed()
+                if refreshed:
+                    new_pairs = self.pair_scanner.get_active_pairs()
+                    if new_pairs:
+                        self.pairs = new_pairs
+            except Exception as e:
+                logger.debug(f"Pair-Scanner refresh fehlgeschlagen: {e}")
 
         for symbol in self.pairs:
             try:

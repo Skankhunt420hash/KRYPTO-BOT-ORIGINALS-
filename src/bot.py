@@ -486,7 +486,7 @@ class MultiStrategyBot:
                 return
 
             self.risk.open_with_signal(best, amount)
-            self.smart_exit.register_trade(symbol, "long", best.entry)
+            self.smart_exit.register_trade(symbol, "long", best.entry, best.strategy_name)
             logger.info(
                 f"[bold green]LONG ERÖFFNET[/bold green] {symbol} | "
                 f"Strategie: {best.strategy_name} | "
@@ -568,7 +568,7 @@ class MultiStrategyBot:
             return
 
         self.risk.open_with_signal(signal, amount)
-        self.smart_exit.register_trade(symbol, "short", signal.entry)
+        self.smart_exit.register_trade(symbol, "short", signal.entry, signal.strategy_name)
         logger.info(
             f"[bold red]SHORT ERÖFFNET [PAPER][/bold red] {symbol} | "
             f"Strategie: {signal.strategy_name} | "

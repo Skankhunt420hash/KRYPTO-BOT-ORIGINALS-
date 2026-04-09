@@ -219,10 +219,22 @@ class MetaSelector:
                         f"{type(e).__name__} – neutraler Score verwendet"
                     )
 
-            # ── RL-Gewichtung (Q-Learning) ────────────────────────────────────
+            # ── RL-Gewichtung (Q-Learning) + Hard-Block ───────────────────────
             rl_mult = 1.0
             if self._rl is not None:
                 try:
+                    # Hard-Block: Combo mit bewiesener schlechter Performance
+                    blocked, block_reason = self._rl.is_blocked(
+                        strategy=sig.strategy_name,
+                        regime=regime.value,
+                        side=sig.side.value,
+                        confidence=sig.confidence,
+                        market_bias=mkt_bias,
+                    )
+                    if blocked:
+                        logger.debug(f"  {block_reason}")
+                        continue
+
                     rl_score = self._rl.get_score(
                         strategy=sig.strategy_name,
                         regime=regime.value,
@@ -230,8 +242,8 @@ class MetaSelector:
                         confidence=sig.confidence,
                         market_bias=mkt_bias,
                     )
-                    # RL-Score [0.5, 1.5] → Anpassung ±0.10
-                    rl_adj = (rl_score - 1.0) * 0.10
+                    # RL-Score [0.4, 1.6] → Anpassung ±0.12 (stärker als vorher)
+                    rl_adj = (rl_score - 1.0) * 0.12
                     rl_mult = rl_score
                     perf_adj += rl_adj
                 except Exception as e:
@@ -255,13 +267,24 @@ class MetaSelector:
 
         if not scored:
             logger.debug(
-                f"{symbol} | Alle Signale durch Regime-Filter blockiert "
+                f"{symbol} | Alle Signale durch Filter blockiert "
                 f"(Regime: {regime.value})"
             )
             return None
 
         scored.sort(key=lambda x: x[0], reverse=True)
         best_score, best, best_sig_score, best_perf_adj, best_perf_score = scored[0]
+
+        # ── Mindest-Final-Score-Schwelle ──────────────────────────────────────
+        # Nur Signale mit ausreichend hohem Gesamt-Score ausführen
+        # Verhindert "mittelmäßige" Trades die die Win-Rate drücken
+        min_final = getattr(settings, "MIN_FINAL_SCORE", 0.52)
+        if best_score < min_final:
+            logger.debug(
+                f"{symbol} | Final-Score {best_score:.3f} < {min_final} "
+                f"– Signal zu schwach (Win-Rate-Schutz)"
+            )
+            return None
 
         # Logging: signal_score + perf_adj + final für den Gewinner
         if self._scorer is not None and _PERF_WEIGHT > 0:

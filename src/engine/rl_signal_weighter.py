@@ -45,14 +45,15 @@ logger = setup_logger("rl_weighter")
 # ─────────────────────────────────────────────────────────────────────────────
 # Hyper-Parameter
 # ─────────────────────────────────────────────────────────────────────────────
-_ALPHA: float = 0.15        # Learning Rate
-_GAMMA: float = 0.90        # Discount Factor
-_EPSILON_START: float = 0.3 # Exploration (sinkt mit Erfahrung)
-_EPSILON_MIN: float = 0.05
-_MIN_SAMPLES: int = 8        # Mindest-Trades bevor Score aktiv wird
-_SCORE_MIN: float = 0.5
-_SCORE_MAX: float = 1.5
+_ALPHA: float = 0.25        # Learning Rate (erhöht: lernt schneller aus Fehlern)
+_GAMMA: float = 0.85        # Discount Factor
+_EPSILON_START: float = 0.2 # Exploration (geringer Start: direkt selektiver)
+_EPSILON_MIN: float = 0.03
+_MIN_SAMPLES: int = 5        # Mindest-Trades bevor Score aktiv wird (früher aktiv)
+_SCORE_MIN: float = 0.4      # Stärkere Strafe für Verlust-Combos
+_SCORE_MAX: float = 1.6      # Stärkerer Bonus für Gewinn-Combos
 _NEUTRAL_SCORE: float = 1.0
+_HARD_BLOCK_THRESHOLD: float = 0.45   # Score unter diesem Wert → Trade blockiert
 
 
 def _confidence_bucket(confidence: float) -> str:
@@ -138,14 +139,11 @@ class RLSignalWeighter:
         q_exec = self._q[key]["execute"]
         q_skip = self._q[key]["skip"]
 
-        # Epsilon-Greedy: mit sinkender Exploration-Rate
-        epsilon = max(_EPSILON_MIN, _EPSILON_START * math.exp(-n / 50))
-
         # Q-Wert in Score umrechnen
         # Positiver Q(execute) → Score > 1, negativer → Score < 1
         q_diff = q_exec - q_skip
-        # Sigmoid-ähnliche Normierung
-        score = _NEUTRAL_SCORE + q_diff * 0.3
+        # Stärkere Normierung (war 0.3, jetzt 0.4 für schärfere Reaktion)
+        score = _NEUTRAL_SCORE + q_diff * 0.4
         score = max(_SCORE_MIN, min(_SCORE_MAX, score))
 
         logger.debug(
@@ -202,6 +200,41 @@ class RLSignalWeighter:
             f"PnL={pnl_pct:+.2f}% → R={reward:+.2f} | "
             f"Q: {q_old:.3f} → {q_new:.3f}"
         )
+
+    def is_blocked(
+        self,
+        strategy: str,
+        regime: str,
+        side: str,
+        confidence: float,
+        market_bias: str = "neutral",
+    ) -> tuple:
+        """
+        Gibt (blocked, reason) zurück.
+        Blockiert wenn Q_execute stark negativ (zu oft verloren) + genug Daten.
+        """
+        key = self._make_key(strategy, regime, side, confidence, market_bias)
+        n = self._counts[key]
+        if n < _MIN_SAMPLES * 2:
+            return False, ""
+
+        q_exec = self._q[key]["execute"]
+        # Q_execute < -0.35 bedeutet: im Schnitt ~35% schlechter als neutral
+        # entspricht ungefähr einer Win-Rate unter 35%
+        if q_exec < -0.35:
+            estimated_wr = max(0.0, 0.5 + q_exec * 0.5)
+            return True, (
+                f"RL-BLOCK: {strategy}/{regime}/{side} "
+                f"Q={q_exec:.3f} (est. WR≈{estimated_wr:.0%}, {n} Trades)"
+            )
+
+        score = self.get_score(strategy, regime, side, confidence, market_bias)
+        if score < _HARD_BLOCK_THRESHOLD:
+            return True, (
+                f"RL-BLOCK: {strategy}/{regime}/{side} Score={score:.2f} "
+                f"< {_HARD_BLOCK_THRESHOLD} ({n} Trades)"
+            )
+        return False, ""
 
     def get_top_states(self, n: int = 10) -> list:
         """Gibt die n besten gelernten States zurück (für Logging/Status)."""

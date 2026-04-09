@@ -15,6 +15,7 @@ from src.engine.pair_scanner import PairScanner
 from src.engine.smart_exit import SmartExitEngine
 from src.engine.rl_signal_weighter import RLSignalWeighter
 from src.engine.market_intelligence import MarketIntelligenceEngine
+from src.engine.winrate_tracker import WinRateTracker
 from src.storage.trade_repository import TradeRepository
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager
@@ -285,6 +286,9 @@ class MultiStrategyBot:
         # Market Intelligence Engine (OB, Funding, MTF, Liq, Sentiment)
         self.market_intel = MarketIntelligenceEngine(self.exchange)
 
+        # Win-Rate-Tracker mit Auto-Pause-Schutz
+        self.winrate = WinRateTracker()
+
         # Dynamic Pair Scanner (Kraken Perp Pairs nach Volumen)
         self.pair_scanner = PairScanner(self.exchange)
         if settings.DYNAMIC_PAIRS_ENABLED:
@@ -370,6 +374,10 @@ class MultiStrategyBot:
                     if pnl is not None and pos_size > 0:
                         pnl_pct_rl = (pnl / (entry_price * pos_size) * 100)
                         self.rl.record_outcome(ep_id, pnl_pct_rl)
+
+                # Win-Rate-Tracker aktualisieren
+                if pnl is not None:
+                    self.winrate.record(pnl)
 
                 side_label = "[LONG]" if pos_side == "long" else "[SHORT]"
                 pnl_str = f"{pnl:+.4f} USDT" if pnl is not None else "?"
@@ -656,6 +664,14 @@ class MultiStrategyBot:
 
         # Heartbeat aktualisieren (Health Monitor Liveness-Tracking)
         self.health.update_heartbeat()
+
+        # Win-Rate-Schutz: pausieren wenn zu viele Verluste
+        paused, pause_reason = self.winrate.should_pause()
+        if paused:
+            logger.warning(
+                f"[red]WIN-RATE-SCHUTZ: Kein neuer Trade[/red] | {pause_reason}"
+            )
+            return
 
         # Execution Engine Gesundheitscheck (Circuit Breaker, Emergency Pause, Kill-Switch)
         if not self.exec_engine.is_healthy:

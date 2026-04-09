@@ -32,11 +32,17 @@ class EnhancedSignal:
     volume_confirmed: bool = False
 
     def is_actionable(self) -> bool:
-        """Signal ist ausführbar wenn Seite gesetzt, Konfidenz & RR ausreichend."""
+        """
+        Signal ist ausführbar wenn alle Basisbedingungen erfüllt.
+        Konfigurierbarer Schwellwert via Settings (DEFAULT: 40, kann auf 60+ erhöht werden).
+        """
+        from config.settings import settings
+        min_conf = getattr(settings, "MIN_SIGNAL_CONFIDENCE", 40.0)
+        min_rr   = getattr(settings, "MIN_SIGNAL_RR", 1.5)
         return (
             self.side != Side.NONE
-            and self.confidence >= 40.0
-            and self.rr >= 1.5
+            and self.confidence >= min_conf
+            and self.rr >= min_rr
             and self.entry > 0
         )
 

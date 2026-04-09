@@ -50,6 +50,22 @@ class Settings:
     # ── Market Intelligence ───────────────────────────────────────────────────
     MARKET_INTEL_ENABLED: bool = os.getenv("MARKET_INTEL_ENABLED", "true").lower() == "true"
 
+    # ── Meta-Selector: Mindest-Final-Score ────────────────────────────────────
+    # Nur Signale mit >= 0.52 Final-Score ausführen (Win-Rate-Schutz)
+    MIN_FINAL_SCORE: float = float(os.getenv("MIN_FINAL_SCORE", 0.52))
+
+    # ── Win-Rate-Tracker ──────────────────────────────────────────────────────
+    # Fenster für Rolling-Win-Rate (letzte N Trades)
+    WINRATE_WINDOW: int = int(os.getenv("WINRATE_WINDOW", 20))
+    # Trading pausieren wenn Rolling-Win-Rate unter diesem Wert
+    WINRATE_PAUSE_THRESHOLD: float = float(os.getenv("WINRATE_PAUSE_THRESHOLD", 0.40))
+    # Trading fortsetzen wenn Rolling-Win-Rate über diesem Wert (nach Pause)
+    WINRATE_RESUME_THRESHOLD: float = float(os.getenv("WINRATE_RESUME_THRESHOLD", 0.50))
+    # Max. Verluste in Folge bevor Pause
+    MAX_CONSECUTIVE_LOSSES: int = int(os.getenv("MAX_CONSECUTIVE_LOSSES", 5))
+    # Pause-Dauer nach Verlust-Strähne (Sekunden)
+    LOSS_STREAK_COOLDOWN_SEC: int = int(os.getenv("LOSS_STREAK_COOLDOWN_SEC", 1800))
+
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)
     )
@@ -91,10 +107,15 @@ class Settings:
     # Multi-Modus:         auto
 
     # Mindest-Konfidenz für aktionsfähige Signale (0-100)
+    # Erhöht auf 60 für höhere Win-Rate (weniger aber bessere Trades)
     MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", 40.0))
 
-    # Mindest-RR für aktionsfähige Signale
+    # Mindest-Konfidenz direkt in is_actionable() (kann unabhängig gesetzt werden)
+    MIN_SIGNAL_CONFIDENCE: float = float(os.getenv("MIN_SIGNAL_CONFIDENCE", 60.0))
+
+    # Mindest-RR für aktionsfähige Signale (erhöht auf 2.0 für besseres CRV)
     MIN_RR: float = float(os.getenv("MIN_RR", 1.5))
+    MIN_SIGNAL_RR: float = float(os.getenv("MIN_SIGNAL_RR", 2.0))
 
     # ------------------------------------------------------------------
     # Risk Engine Cooldowns & Limits

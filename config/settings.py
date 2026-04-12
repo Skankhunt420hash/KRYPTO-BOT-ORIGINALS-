@@ -1,7 +1,18 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+# .env immer relativ zum Projekt-Root laden (nicht vom aktuellen cwd abhängig).
+# Das verhindert stille Fallbacks auf Defaults, wenn der Bot via systemd/Controller
+# aus einem anderen Arbeitsverzeichnis gestartet wird.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_PATH = _PROJECT_ROOT / ".env"
+if _ENV_PATH.exists():
+    load_dotenv(dotenv_path=_ENV_PATH, override=False)
+else:
+    # Fallback für lokale Sonderfälle (bisheriges Verhalten).
+    load_dotenv(override=False)
 
 
 def _first_non_empty(*keys: str, default: str = "") -> str:

@@ -102,7 +102,8 @@ class TelegramNotifier:
         if level == "critical":
             return category in ("critical", "error")
         if level == "trading":
-            return category in ("critical", "error", "trading")
+            # runtime = Start/Stop/Control-Meldungen (ohne „all“-Spam)
+            return category in ("critical", "error", "trading", "runtime")
         return True  # all
 
     def _is_rate_limited(self) -> bool:

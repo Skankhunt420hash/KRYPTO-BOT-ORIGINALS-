@@ -298,7 +298,11 @@ class TelegramControlPanel:
             return
 
         if self._allowed_ids and chat_id not in self._allowed_ids:
-            logger.debug(f"Telegram-Panel: Chat {chat_id} nicht whitelisted – ignoriert")
+            logger.warning(
+                "Telegram-Panel: Chat %s nicht in TELEGRAM_PANEL_ALLOWED_IDS – Befehl ignoriert "
+                "(Whitelist anpassen oder leer lassen).",
+                chat_id,
+            )
             return
 
         logger.info(f"Telegram-Panel Command von Chat {chat_id}: {text}")
@@ -310,6 +314,9 @@ class TelegramControlPanel:
 
     def _dispatch_command(self, chat_id: str, text: str) -> None:
         cmd = text.split()[0].lower()
+        # Gruppen-Chats: /start@MeinBot_Bot — sonst kein Match
+        if "@" in cmd:
+            cmd = cmd.split("@", 1)[0]
         try:
             if cmd == "/start":
                 self._send_start(chat_id)

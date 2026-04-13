@@ -743,12 +743,17 @@ class MultiStrategyBot:
         )
 
         strat_names = [s.name for s in self.strategies]
+        _pool = ", ".join(strat_names)
         # Eine Zeile (kein Umbruch in journalctl bei langen Listen)
         logger.info(
             "Aktive Strategien (%d): %s — Regime-Engine + Meta-Selector + Brain wählen pro Symbol.",
             len(strat_names),
-            ", ".join(strat_names),
+            _pool,
         )
+        # Zusätzlich grep-freundlich (ohne Rich): in journalctl klar erkennbar
+        logger.info("STRATEGY_POOL_COUNT=%d", len(strat_names))
+        logger.info("STRATEGY_POOL_NAMES=%s", _pool)
+        # Pro Symbol werden Einzel-Strategien nur bei LOG_LEVEL=DEBUG geloggt (sonst zu viel Spam).
         if bool(getattr(settings, "SHORT_ONLY_TRADING", False)):
             logger.info(
                 "[yellow]SHORT_ONLY_TRADING aktiv[/yellow] – nur SHORT-Entries "
@@ -780,6 +785,12 @@ class MultiStrategyBot:
             "set" if bool(settings.TELEGRAM_CHAT_ID) else "missing",
         )
         if autostart_services:
+            # Panel zuerst wie Single-Bot — getUpdates läuft, bevor große Start-Pushes
+            self.panel.start_in_background()
+            if self.panel.enabled:
+                logger.info("Telegram Polling gestartet.")
+            else:
+                logger.info("Telegram Polling nicht gestartet (deaktiviert).")
             self.tg.notify_bot_start(
                 mode=settings.TRADING_MODE,
                 strategy="AUTO (Meta-Selector)",
@@ -790,11 +801,6 @@ class MultiStrategyBot:
                 limits = self._mini_live_limits_text()
                 logger.warning("MINI-LIVE START: %s", limits)
                 self.tg.notify_live_test_mode_start(limits)
-            self.panel.start_in_background()
-            if self.panel.enabled:
-                logger.info("Telegram Polling gestartet.")
-            else:
-                logger.info("Telegram Polling nicht gestartet (deaktiviert).")
         logger.info("Multi-Bot bereit.")
 
     def _recovery_state_path(self) -> Path:

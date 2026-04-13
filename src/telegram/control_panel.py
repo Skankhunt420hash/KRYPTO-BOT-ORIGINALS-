@@ -168,6 +168,8 @@ class TelegramControlPanel:
             return
         if self._thread and self._thread.is_alive():
             return
+        # Webhook blockiert getUpdates – einmal entfernen (häufiger Grund wenn „vorher ging es“)
+        self._delete_webhook_for_polling()
         self._stop_flag = False
         self._thread = threading.Thread(
             target=self._poll_loop,
@@ -195,6 +197,33 @@ class TelegramControlPanel:
                 )
             else:
                 logger.info("Telegram-Control-Panel gestoppt.")
+
+    def _delete_webhook_for_polling(self) -> None:
+        """Entfernt einen gesetzten Bot-Webhook, sonst liefert getUpdates nichts / Fehler."""
+        if not self._token:
+            return
+        try:
+            url = _API_BASE.format(token=self._token, method="deleteWebhook")
+            resp = requests.get(
+                url,
+                params={"drop_pending_updates": "false"},
+                timeout=15,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("ok"):
+                    logger.info("Telegram-Panel: deleteWebhook OK (Polling-Modus)")
+                else:
+                    logger.warning(
+                        "Telegram-Panel: deleteWebhook API: %s",
+                        data.get("description", data),
+                    )
+            else:
+                logger.warning(
+                    "Telegram-Panel: deleteWebhook HTTP %s", resp.status_code
+                )
+        except Exception as e:
+            logger.warning("Telegram-Panel: deleteWebhook fehlgeschlagen: %s", e)
 
     # ------------------------------------------------------------------
     # Interner Polling-Loop

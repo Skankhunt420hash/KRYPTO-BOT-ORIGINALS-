@@ -1,7 +1,11 @@
 import os
+from pathlib import Path
+
 from dotenv import load_dotenv
 
-load_dotenv()
+# Immer Projektroot/.env laden (nicht vom aktuellen Arbeitsverzeichnis abhängig – wichtig für systemd)
+_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+load_dotenv(dotenv_path=_ENV_PATH, override=False)
 
 
 def _first_non_empty(*keys: str, default: str = "") -> str:

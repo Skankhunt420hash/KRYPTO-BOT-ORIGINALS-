@@ -67,7 +67,6 @@ class IntelligenceBrain:
         selector_snapshot = self._selector.get_last_selection()
 
         min_trade_score = float(getattr(settings, "BRAIN_MIN_SCORE_TO_TRADE", 0.45))
-        winner_rank = ranking[0] if ranking else {}
         risky_phase = self._is_risky_phase(regime, ranking)
 
         chosen = selector_winner
@@ -135,6 +134,7 @@ class IntelligenceBrain:
             losing_streak = int(metrics.losing_streak) if metrics else 0
             drawdown = float(metrics.max_drawdown_pct) if metrics else 0.0
             recency_wr = float(metrics.recency_win_rate) if metrics else 0.5
+            reward_bias = float(metrics.reward_bias) if metrics else 0.0
 
             trend_quality = regime_fit
             momentum_quality = _clamp(float(sig.confidence) / 100.0)
@@ -153,6 +153,7 @@ class IntelligenceBrain:
                 + rr_quality * 0.15
                 + perf_score * 0.17
                 + recency_wr * 0.08
+                + reward_bias * 0.08
             ) - streak_penalty - dd_penalty
 
             priority_adj = 0.0
@@ -178,6 +179,7 @@ class IntelligenceBrain:
                         "rr_quality": round(rr_quality, 3),
                         "perf_score": round(perf_score, 3),
                         "recency_win_rate": round(recency_wr, 3),
+                        "reward_bias": round(reward_bias, 3),
                         "priority_adj": round(priority_adj, 3),
                         "streak_penalty": round(streak_penalty, 3),
                         "drawdown_penalty": round(dd_penalty, 3),

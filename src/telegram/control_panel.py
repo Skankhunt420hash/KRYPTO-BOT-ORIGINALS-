@@ -43,6 +43,10 @@ _STRATEGY_ALIASES = {
     "volatility_breakout": "VolatilityBreakout",
     "trendcontinuation": "TrendContinuation",
     "trend_continuation": "TrendContinuation",
+    "liquiditysweepreversal": "LiquiditySweepReversal",
+    "liquidity_sweep_reversal": "LiquiditySweepReversal",
+    "emareclaimbreakout": "EMAReclaimBreakout",
+    "ema_reclaim_breakout": "EMAReclaimBreakout",
     "rsi_ema": "RSI_EMA",
     "macd_crossover": "MACD_Crossover",
     "combined": "Combined",
@@ -1070,7 +1074,8 @@ class TelegramControlPanel:
                 chat_id,
                 "Verwendung: /setstrategy <name>\n"
                 "Beispiele: momentum_pullback, trend_continuation, range_reversion, "
-                "volatility_breakout, auto"
+                "volatility_breakout, liquidity_sweep_reversal, "
+                "ema_reclaim_breakout, auto"
             )
             return
         raw = parts[1].strip().lower()

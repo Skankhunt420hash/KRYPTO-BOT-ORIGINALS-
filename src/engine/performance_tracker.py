@@ -51,6 +51,10 @@ class StrategyMetrics:
 
     recency_win_rate: float = 0.5   # Exponentiell-gewichtete Win-Rate (0–1)
     losing_streak: int = 0          # Aktuelle aufeinanderfolgende Verluste
+    # Reward-Signale für kontrollierte, kurzfristige Verhaltensanpassung.
+    # Wertebereich: [-1.0, +1.0]
+    recent_reward_signal: float = 0.0
+    reward_bias: float = 0.0
 
     last_trade_timestamp: str = ""
 
@@ -137,6 +141,38 @@ class PerformanceTracker:
     def known_strategies(self) -> List[str]:
         return sorted(self._global.keys())
 
+    def latest_outcomes(self, strategy_name: str, limit: int = 8) -> List[float]:
+        """
+        Liefert die zuletzt abgeschlossenen PnL-Werte (neueste zuerst) einer Strategie.
+        Wird vom Brain als kompaktes Reward/Emotion-Signal genutzt.
+        """
+        if not self.available:
+            return []
+        try:
+            conn = get_connection()
+            if conn is None:
+                return []
+            try:
+                rows = conn.execute(
+                    """
+                    SELECT pnl_abs
+                    FROM trades
+                    WHERE status='closed'
+                      AND pnl_abs IS NOT NULL
+                      AND paper_mode = ?
+                      AND strategy_name = ?
+                    ORDER BY timestamp_close DESC
+                    LIMIT ?
+                    """,
+                    (int(_IS_PAPER), strategy_name, int(max(1, limit))),
+                ).fetchall()
+                return [float(r["pnl_abs"]) for r in rows if r["pnl_abs"] is not None]
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.debug("latest_outcomes fehlgeschlagen (%s): %s", strategy_name, e)
+            return []
+
     # ── Interne Daten-Ladung ──────────────────────────────────────────────
 
     def _load_trades(self) -> Dict[str, List[dict]]:
@@ -209,6 +245,8 @@ class PerformanceTracker:
         recency_wr = _recency_win_rate(recent, self.recency_decay)
         streak = _losing_streak(pnls)
         max_dd = _max_drawdown(pnls)
+        reward_signal = _recent_reward_signal(pnls, window=min(12, self.rolling_window))
+        reward_bias = _clamp((reward_signal * 0.6) + (((recency_wr - 0.5) * 2.0) * 0.4), -1.0, 1.0)
         last_ts = trades[-1].get("timestamp_close", "") if trades else ""
 
         return StrategyMetrics(
@@ -227,6 +265,8 @@ class PerformanceTracker:
             avg_rr_realized=round(avg_rr, 2),
             recency_win_rate=round(recency_wr, 4),
             losing_streak=streak,
+            recent_reward_signal=round(reward_signal, 4),
+            reward_bias=round(reward_bias, 4),
             last_trade_timestamp=last_ts,
         )
 
@@ -279,3 +319,28 @@ def _losing_streak(pnls: List[float]) -> int:
         else:
             break
     return streak
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def _recent_reward_signal(pnls: List[float], window: int = 12) -> float:
+    """
+    Kurzfristiges Reward-Signal im Bereich [-1, +1].
+    Positiv bei frischer Gewinner-Serie mit gesundem PnL, negativ umgekehrt.
+    """
+    if not pnls:
+        return 0.0
+    recent = pnls[-max(1, int(window)):]
+    n = len(recent)
+    if n == 0:
+        return 0.0
+
+    win_ratio = sum(1 for p in recent if p > 0) / n
+    win_signal = (win_ratio - 0.5) * 2.0  # [-1..+1]
+    pnl_sum = float(sum(recent))
+    pnl_norm = pnl_sum / (sum(abs(p) for p in recent) + 1e-9)  # [-1..+1]
+
+    # Win-Qualität etwas stärker als reiner PnL-Saldo gewichten.
+    return _clamp((win_signal * 0.65) + (pnl_norm * 0.35), -1.0, 1.0)

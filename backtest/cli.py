@@ -283,7 +283,8 @@ def _print_available_strategies() -> None:
     console.print(
         "\n[bold]Verfügbare Strategien:[/bold]\n"
         "  Einzel:  momentum_pullback, range_reversion, "
-        "volatility_breakout, trend_continuation\n"
+        "volatility_breakout, trend_continuation,\n"
+        "            liquidity_sweep_reversal, ema_reclaim_breakout\n"
         "  Multi:   --multi  (alle + Meta-Selector + Regime-Engine)\n"
         "\nBeispiele:\n"
         "  python3 main.py --backtest --csv data/BTC_1h.csv --strategy trend_continuation\n"

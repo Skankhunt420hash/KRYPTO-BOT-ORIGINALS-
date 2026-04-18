@@ -467,7 +467,8 @@ def main():
         "--strategy", type=str, default=None,
         help=(
             "Strategie für Backtest: momentum_pullback, range_reversion, "
-            "volatility_breakout, trend_continuation"
+            "volatility_breakout, trend_continuation, "
+            "liquidity_sweep_reversal, ema_reclaim_breakout"
         ),
     )
     parser.add_argument(

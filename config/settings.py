@@ -302,6 +302,11 @@ class Settings:
     BRAIN_RISKY_PHASE_SCORE: float = float(
         os.getenv("BRAIN_RISKY_PHASE_SCORE", 0.35)
     )
+    # Kurzfristiges Reward-System für den Brain-Score:
+    # beeinflusst die Strategieauswahl anhand jüngster Outcomes.
+    BRAIN_REWARD_WEIGHT: float = float(os.getenv("BRAIN_REWARD_WEIGHT", 0.08))
+    BRAIN_REWARD_WINDOW: int = int(os.getenv("BRAIN_REWARD_WINDOW", 12))
+    BRAIN_REWARD_DECAY: float = float(os.getenv("BRAIN_REWARD_DECAY", 0.88))
 
     # ------------------------------------------------------------------
     # Portfolio Risk Engine & Position Sizing

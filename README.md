@@ -232,9 +232,9 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 #### 6.5 Verfügbare Commands
 
 - **Info / Monitoring**  
-  `/start`, `/help`, `/status`, `/summary`, `/mode`, `/strategy`, `/risk`, `/balance`, `/positions`, `/trades`, `/logs`
+  `/start`, `/help`, `/status`, `/summary`, `/analysis`, `/brain`, `/config`, `/mode`, `/strategy`, `/risk`, `/balance`, `/positions`, `/trades`, `/logs`
 - **Steuerung (sicherheitsbegrenzt)**  
-  `/pause`, `/resume`, `/riskoff`, `/riskon`, `/killswitch`, `/killswitchoff`, `/setmode paper`, `/setstrategy <name>`, `/stop_bot`, `/start_bot` *(nur wenn Start-Callback angebunden ist)*
+  `/pause`, `/resume`, `/riskoff`, `/riskon`, `/killswitch`, `/killswitchoff`, `/setmode paper`, `/setstrategy <name>`, `/setbrain <key> <value>`, `/setrisk <key> <value>`, `/stop_bot`, `/start_bot` *(nur wenn Start-Callback angebunden ist)*
 - **Supervisor (separater Bot-Prozess)**  
   `/botstart`, `/botstop`, `/botrestart`, `/botstatus`
 
@@ -317,6 +317,8 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 | `STRATEGY_MIN_PERF_SCORE` | `0.0`           | Optionaler Performance-Gate \[0.0–1.0], z.B. 0.4 = Strategien mit Score < 0.4 werden im Meta-Selector ignoriert |
 | `BRAIN_MIN_SCORE_TO_TRADE` | `0.45`         | Brain-Gate: Mindestscore für Entry-Freigabe |
 | `BRAIN_RISKY_PHASE_SCORE` | `0.35`          | Unterhalb dieses Scores gilt die Phase als riskant |
+| `BRAIN_REWARD_WEIGHT`     | `0.08`          | Stärke des kurzfristigen Belohnungs-/Penalty-Bias im Scorer |
+| `BRAIN_REWARD_WINDOW`     | `12`            | Anzahl letzter Trades für das Reward-Signal je Strategie |
 | `TELEGRAM_PANEL_ENABLED`  | `false`         | `true` = Telegram-Control-Panel aktiviert (Polling) |
 | `TELEGRAM_PANEL_POLL_INTERVAL_SEC` | `10`   | Poll-Intervall des Panels (Sekunden) |
 | `TELEGRAM_PANEL_LOG_LINES` | `20`          | Anzahl Log-Zeilen für `/logs` |

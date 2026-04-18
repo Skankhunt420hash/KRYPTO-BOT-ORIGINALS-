@@ -245,7 +245,11 @@ class PerformanceTracker:
         recency_wr = _recency_win_rate(recent, self.recency_decay)
         streak = _losing_streak(pnls)
         max_dd = _max_drawdown(pnls)
-        reward_signal = _recent_reward_signal(pnls, window=min(12, self.rolling_window))
+        reward_window = int(getattr(settings, "BRAIN_REWARD_WINDOW", 12))
+        reward_signal = _recent_reward_signal(
+            pnls,
+            window=min(max(2, reward_window), self.rolling_window),
+        )
         reward_bias = _clamp((reward_signal * 0.6) + (((recency_wr - 0.5) * 2.0) * 0.4), -1.0, 1.0)
         last_ts = trades[-1].get("timestamp_close", "") if trades else ""
 

@@ -21,7 +21,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Any
 
 import requests
 
@@ -68,6 +68,7 @@ class PanelCallbacks:
     request_bot_start: Optional[Callable[[], Tuple[bool, str]]] = None
     request_bot_restart: Optional[Callable[[], Tuple[bool, str]]] = None
     get_bot_status: Optional[Callable[[], Dict]] = None
+    apply_runtime_settings: Optional[Callable[[Dict[str, Any]], Tuple[bool, str]]] = None
 
 
 class TelegramControlPanel:
@@ -337,6 +338,12 @@ class TelegramControlPanel:
                 self._send_logs(chat_id)
             elif cmd == "/summary":
                 self._send_summary(chat_id)
+            elif cmd == "/analysis":
+                self._send_analysis(chat_id)
+            elif cmd == "/brain":
+                self._send_brain(chat_id)
+            elif cmd == "/config":
+                self._send_config(chat_id)
             elif cmd == "/pause":
                 self._handle_pause(chat_id)
             elif cmd == "/resume":
@@ -353,6 +360,10 @@ class TelegramControlPanel:
                 self._handle_setmode(chat_id, text)
             elif cmd == "/setstrategy":
                 self._handle_setstrategy(chat_id, text)
+            elif cmd == "/setbrain":
+                self._handle_setbrain(chat_id, text)
+            elif cmd == "/setrisk":
+                self._handle_setrisk(chat_id, text)
             elif cmd == "/stop_bot":
                 self._handle_stop_bot(chat_id)
             elif cmd == "/start_bot":
@@ -473,9 +484,9 @@ class TelegramControlPanel:
         self._send_text(
             chat_id,
             "<b>KRYPTO-BOT Control Center</b>\n"
-            "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
+            "📖 <b>Lesend</b>: /status /summary /analysis /brain /config /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
-            "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper\n"
+            "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
         )
@@ -523,6 +534,184 @@ class TelegramControlPanel:
             f"Brain Decision: <code>{(rt.get('brain') or {}).get('last_decision_reason') or 'n/a'}</code>\n"
             f"Top Ranking:\n{top_txt}"
         )
+
+    def _send_analysis(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        selector = rt.get("selector") or {}
+        gate = rt.get("risk_gate") or {}
+        last_signal = rt.get("last_signal") or {}
+        last_decision = rt.get("last_decision") or {}
+        ranking = list(brain.get("last_strategy_ranking") or [])
+
+        lines = [
+            "🧠 <b>Luxus Analyse</b>",
+            f"Regime: <code>{brain.get('last_regime', 'n/a')}</code>",
+            f"Brain-Score: <code>{brain.get('last_signal_score', 'n/a')}</code> | "
+            f"Risky: <code>{brain.get('risky_phase', 'n/a')}</code>",
+            f"Decision: <code>{brain.get('last_decision_reason', 'n/a')}</code>",
+            f"Selector Winner: <code>{selector.get('winner') or 'none'}</code> | "
+            f"Score: <code>{selector.get('winner_score', 'n/a')}</code> | "
+            f"Eligible: <code>{selector.get('eligible', 'n/a')}</code>",
+            f"Risk-Gate: <code>{gate.get('last_gate_reason', 'n/a')}</code>",
+        ]
+
+        if last_signal:
+            lines.append(
+                "Letztes Signal: "
+                f"<code>{last_signal.get('symbol', 'n/a')} {last_signal.get('side', 'n/a')} "
+                f"{last_signal.get('strategy', 'n/a')}</code> | "
+                f"conf={last_signal.get('confidence', 'n/a')} rr={last_signal.get('rr', 'n/a')}"
+            )
+        if last_decision:
+            lines.append(
+                "Letzte Entscheidung: "
+                f"<code>{last_decision.get('decision', 'n/a')}</code> | "
+                f"{last_decision.get('strategy', 'n/a')} | "
+                f"{last_decision.get('reason', 'n/a')}"
+            )
+
+        if ranking:
+            lines.append("")
+            lines.append("<b>Top 5 Ranking</b>")
+            for i, item in enumerate(ranking[:5], start=1):
+                comps = item.get("components") or {}
+                lines.append(
+                    f"{i}. {item.get('strategy')} [{item.get('side')}] "
+                    f"score={item.get('brain_score')} elig={item.get('eligible')} "
+                    f"reward={comps.get('reward_bias', 'n/a')} perf={comps.get('perf_score', 'n/a')}"
+                )
+
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_brain(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        ranking = list(brain.get("last_strategy_ranking") or [])
+        lines = [
+            "🧠 <b>Brain Deep-Dive</b>",
+            f"Regime: <code>{brain.get('last_regime', 'n/a')}</code>",
+            f"Last Score: <code>{brain.get('last_signal_score', 'n/a')}</code>",
+            f"Decision: <code>{brain.get('last_decision_reason', 'n/a')}</code>",
+            f"Risky Phase: <code>{brain.get('risky_phase', 'n/a')}</code>",
+            f"Min Trade Score: <code>{brain.get('min_trade_score', 'n/a')}</code>",
+            f"Reward Weight: <code>{getattr(settings, 'BRAIN_REWARD_WEIGHT', 'n/a')}</code>",
+            f"Perf Weight: <code>{settings.PERF_SELECTOR_WEIGHT}</code>",
+            f"Priority Bonus: <code>{settings.CONTROL_STRATEGY_PRIORITY_BONUS}</code>",
+        ]
+        if ranking:
+            lines.append("")
+            lines.append("<b>Ranking-Details</b>")
+            for i, item in enumerate(ranking[:6], start=1):
+                comps = item.get("components") or {}
+                lines.append(
+                    f"{i}) {item.get('strategy')} {item.get('side')} "
+                    f"s={item.get('brain_score')} e={item.get('eligible')} "
+                    f"| trend={comps.get('trend_quality')} rr={comps.get('rr_quality')} "
+                    f"perf={comps.get('perf_score')} rew={comps.get('reward_bias')}"
+                )
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_config(self, chat_id: str) -> None:
+        lines = [
+            "⚙️ <b>Aktive Runtime-Konfiguration</b>",
+            f"MIN_CONFIDENCE: <code>{settings.MIN_CONFIDENCE}</code>",
+            f"MIN_RR: <code>{settings.MIN_RR}</code>",
+            f"BRAIN_MIN_SCORE_TO_TRADE: <code>{settings.BRAIN_MIN_SCORE_TO_TRADE}</code>",
+            f"BRAIN_RISKY_PHASE_SCORE: <code>{settings.BRAIN_RISKY_PHASE_SCORE}</code>",
+            f"PERF_SELECTOR_WEIGHT: <code>{settings.PERF_SELECTOR_WEIGHT}</code>",
+            f"CONTROL_STRATEGY_PRIORITY_BONUS: <code>{settings.CONTROL_STRATEGY_PRIORITY_BONUS}</code>",
+            f"BRAIN_REWARD_WEIGHT: <code>{getattr(settings, 'BRAIN_REWARD_WEIGHT', 'n/a')}</code>",
+            f"BRAIN_REWARD_WINDOW: <code>{getattr(settings, 'BRAIN_REWARD_WINDOW', 'n/a')}</code>",
+            f"RISK_PER_TRADE_PCT: <code>{settings.RISK_PER_TRADE_PCT}</code>",
+            f"MAX_TOTAL_OPEN_RISK_PCT: <code>{settings.MAX_TOTAL_OPEN_RISK_PCT}</code>",
+            f"MAX_POSITIONS_TOTAL: <code>{settings.MAX_POSITIONS_TOTAL}</code>",
+            f"MAX_POSITION_NOTIONAL: <code>{settings.MAX_POSITION_NOTIONAL}</code>",
+            "",
+            "<i>Setzen via: /setbrain KEY VALUE oder /setrisk KEY VALUE</i>",
+        ]
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _handle_setbrain(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setbrain <key> <value>\n"
+                "Keys: min_score, risky_score, perf_weight, priority_bonus, reward_weight, reward_window, min_confidence, min_rr"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "min_score": ("brain_min_score_to_trade", float, 0.0, 1.5),
+            "risky_score": ("brain_risky_phase_score", float, 0.0, 1.5),
+            "perf_weight": ("perf_selector_weight", float, 0.0, 1.0),
+            "priority_bonus": ("control_strategy_priority_bonus", float, 0.0, 1.0),
+            "reward_weight": ("reward_weight", float, 0.0, 0.5),
+            "reward_window": ("reward_window", int, 2, 50),
+            "min_confidence": ("min_confidence", float, 0.0, 100.0),
+            "min_rr": ("min_rr", float, 0.0, 10.0),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setbrain-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            if ok:
+                self._send_text(chat_id, f"🧠 {msg}")
+            else:
+                self._send_text(chat_id, f"⚠️ {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _handle_setrisk(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setrisk <key> <value>\n"
+                "Keys: risk_per_trade, max_open_risk, max_positions, max_notional, min_notional"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "risk_per_trade": ("risk_per_trade_pct", float, 0.1, 10.0),
+            "max_open_risk": ("max_total_open_risk_pct", float, 1.0, 50.0),
+            "max_positions": ("max_positions_total", int, 1, 50),
+            "max_notional": ("max_position_notional", float, 5.0, 1_000_000.0),
+            "min_notional": ("min_position_notional", float, 1.0, 100_000.0),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setrisk-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            if ok:
+                self._send_text(chat_id, f"🛡 {msg}")
+            else:
+                self._send_text(chat_id, f"⚠️ {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
 
     def _send_risk(self, chat_id: str) -> None:
         runtime_daily_loss = "n/a"
@@ -591,6 +780,12 @@ class TelegramControlPanel:
                 f"risky={brain.get('risky_phase')}"
             )
             parts.append(f"• Brain Decision: {brain.get('last_decision_reason')}")
+            parts.append(
+                f"• Brain Config: minScore={float(getattr(settings, 'BRAIN_MIN_SCORE_TO_TRADE', 0.45)):.3f} | "
+                f"riskyPhase<{float(getattr(settings, 'BRAIN_RISKY_PHASE_SCORE', 0.35)):.3f} | "
+                f"perfW={float(getattr(settings, 'PERF_SELECTOR_WEIGHT', 0.22)):.3f} | "
+                f"rewardW={float(getattr(settings, 'BRAIN_REWARD_WEIGHT', 0.08)):.3f}"
+            )
         gate = rt.get("risk_gate") or {}
         if gate:
             parts.append(

@@ -59,6 +59,7 @@ class TradingBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                apply_runtime_settings=self._apply_runtime_settings_from_panel,
             ),
         )
         self.running = False
@@ -584,6 +585,84 @@ class TradingBot:
             "(Telegram kann keinen sicheren Cold-Start auslösen)."
         )
 
+    def _apply_runtime_settings_from_panel(self, changes: Dict[str, float]) -> Tuple[bool, str]:
+        """
+        Erlaubt kontrollierte Laufzeit-Änderungen aus dem Telegram-Panel.
+        Verfügbar im Single-Bot als Soft-Tuning ohne Neustart.
+        """
+        changed: List[str] = []
+        try:
+            if "risk_per_trade_pct" in changes:
+                val = float(changes["risk_per_trade_pct"])
+                if not (0.1 <= val <= 10.0):
+                    return False, "risk_per_trade_pct muss zwischen 0.1 und 10.0 liegen."
+                settings.RISK_PER_TRADE_PCT = val
+                changed.append(f"RISK_PER_TRADE_PCT={val:.2f}")
+
+            if "max_total_open_risk_pct" in changes:
+                val = float(changes["max_total_open_risk_pct"])
+                if not (0.5 <= val <= 50.0):
+                    return False, "max_total_open_risk_pct muss zwischen 0.5 und 50.0 liegen."
+                settings.MAX_TOTAL_OPEN_RISK_PCT = val
+                changed.append(f"MAX_TOTAL_OPEN_RISK_PCT={val:.2f}")
+
+            if "min_confidence" in changes:
+                val = float(changes["min_confidence"])
+                if not (1.0 <= val <= 100.0):
+                    return False, "min_confidence muss zwischen 1 und 100 liegen."
+                settings.MIN_CONFIDENCE = val
+                changed.append(f"MIN_CONFIDENCE={val:.1f}")
+
+            if "min_rr" in changes:
+                val = float(changes["min_rr"])
+                if not (0.5 <= val <= 6.0):
+                    return False, "min_rr muss zwischen 0.5 und 6.0 liegen."
+                settings.MIN_RR = val
+                changed.append(f"MIN_RR={val:.2f}")
+
+            if "brain_min_score_to_trade" in changes:
+                val = float(changes["brain_min_score_to_trade"])
+                if not (0.1 <= val <= 0.95):
+                    return False, "brain_min_score_to_trade muss zwischen 0.10 und 0.95 liegen."
+                settings.BRAIN_MIN_SCORE_TO_TRADE = val
+                changed.append(f"BRAIN_MIN_SCORE_TO_TRADE={val:.3f}")
+
+            if "brain_risky_phase_score" in changes:
+                val = float(changes["brain_risky_phase_score"])
+                if not (0.05 <= val <= 0.9):
+                    return False, "brain_risky_phase_score muss zwischen 0.05 und 0.90 liegen."
+                settings.BRAIN_RISKY_PHASE_SCORE = val
+                changed.append(f"BRAIN_RISKY_PHASE_SCORE={val:.3f}")
+
+            if "perf_selector_weight" in changes:
+                val = float(changes["perf_selector_weight"])
+                if not (0.0 <= val <= 0.8):
+                    return False, "perf_selector_weight muss zwischen 0.0 und 0.8 liegen."
+                settings.PERF_SELECTOR_WEIGHT = val
+                changed.append(f"PERF_SELECTOR_WEIGHT={val:.3f}")
+
+            if "reward_weight" in changes:
+                val = float(changes["reward_weight"])
+                if not (0.0 <= val <= 0.5):
+                    return False, "reward_weight muss zwischen 0.0 und 0.5 liegen."
+                settings.BRAIN_REWARD_WEIGHT = val
+                changed.append(f"BRAIN_REWARD_WEIGHT={val:.3f}")
+
+            if "control_strategy_priority_bonus" in changes:
+                val = float(changes["control_strategy_priority_bonus"])
+                if not (0.0 <= val <= 0.5):
+                    return False, "control_strategy_priority_bonus muss zwischen 0.0 und 0.5 liegen."
+                settings.CONTROL_STRATEGY_PRIORITY_BONUS = val
+                changed.append(f"CONTROL_STRATEGY_PRIORITY_BONUS={val:.3f}")
+
+            if not changed:
+                return False, "Keine gültigen Runtime-Änderungen übergeben."
+
+            runtime_state.append_log("TELEGRAM runtime_tuning " + ", ".join(changed))
+            return True, "Runtime-Parameter aktualisiert: " + ", ".join(changed)
+        except Exception as e:
+            return False, f"Runtime-Tuning fehlgeschlagen: {type(e).__name__}"
+
     def stop(self):
         self.running = False
         if self.panel:
@@ -689,6 +768,7 @@ class MultiStrategyBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                apply_runtime_settings=self._apply_runtime_settings_from_panel,
             ),
         )
 
@@ -2054,6 +2134,87 @@ class MultiStrategyBot:
             "Multi-Bot läuft aktuell nicht. Bitte Bot-Prozess lokal starten "
             "(Telegram kann keinen sicheren Cold-Start auslösen)."
         )
+
+    def _apply_runtime_settings_from_panel(self, changes: Dict[str, float]) -> Tuple[bool, str]:
+        """
+        Kontrolliertes Live-Tuning aus Telegram für den Multi-Bot.
+        Änderungen sind Laufzeit-Overrides (nicht persistiert in .env).
+        """
+        changed: List[str] = []
+        try:
+            if "risk_per_trade_pct" in changes:
+                val = float(changes["risk_per_trade_pct"])
+                if not (0.1 <= val <= 10.0):
+                    return False, "risk_per_trade_pct muss zwischen 0.1 und 10.0 liegen."
+                settings.RISK_PER_TRADE_PCT = val
+                # RiskEngine + PortfolioRiskEngine synchron nachziehen
+                self.risk.portfolio.cfg.risk_per_trade_pct = val
+                changed.append(f"RISK_PER_TRADE_PCT={val:.2f}")
+
+            if "max_total_open_risk_pct" in changes:
+                val = float(changes["max_total_open_risk_pct"])
+                if not (0.5 <= val <= 50.0):
+                    return False, "max_total_open_risk_pct muss zwischen 0.5 und 50.0 liegen."
+                settings.MAX_TOTAL_OPEN_RISK_PCT = val
+                self.risk.portfolio.cfg.max_total_open_risk_pct = val
+                changed.append(f"MAX_TOTAL_OPEN_RISK_PCT={val:.2f}")
+
+            if "min_confidence" in changes:
+                val = float(changes["min_confidence"])
+                if not (1.0 <= val <= 100.0):
+                    return False, "min_confidence muss zwischen 1 und 100 liegen."
+                settings.MIN_CONFIDENCE = val
+                changed.append(f"MIN_CONFIDENCE={val:.1f}")
+
+            if "min_rr" in changes:
+                val = float(changes["min_rr"])
+                if not (0.5 <= val <= 6.0):
+                    return False, "min_rr muss zwischen 0.5 und 6.0 liegen."
+                settings.MIN_RR = val
+                changed.append(f"MIN_RR={val:.2f}")
+
+            if "brain_min_score_to_trade" in changes:
+                val = float(changes["brain_min_score_to_trade"])
+                if not (0.1 <= val <= 0.95):
+                    return False, "brain_min_score_to_trade muss zwischen 0.10 und 0.95 liegen."
+                settings.BRAIN_MIN_SCORE_TO_TRADE = val
+                changed.append(f"BRAIN_MIN_SCORE_TO_TRADE={val:.3f}")
+
+            if "brain_risky_phase_score" in changes:
+                val = float(changes["brain_risky_phase_score"])
+                if not (0.05 <= val <= 0.9):
+                    return False, "brain_risky_phase_score muss zwischen 0.05 und 0.90 liegen."
+                settings.BRAIN_RISKY_PHASE_SCORE = val
+                changed.append(f"BRAIN_RISKY_PHASE_SCORE={val:.3f}")
+
+            if "perf_selector_weight" in changes:
+                val = float(changes["perf_selector_weight"])
+                if not (0.0 <= val <= 0.8):
+                    return False, "perf_selector_weight muss zwischen 0.0 und 0.8 liegen."
+                settings.PERF_SELECTOR_WEIGHT = val
+                changed.append(f"PERF_SELECTOR_WEIGHT={val:.3f}")
+
+            if "reward_weight" in changes:
+                val = float(changes["reward_weight"])
+                if not (0.0 <= val <= 0.5):
+                    return False, "reward_weight muss zwischen 0.0 und 0.5 liegen."
+                settings.BRAIN_REWARD_WEIGHT = val
+                changed.append(f"BRAIN_REWARD_WEIGHT={val:.3f}")
+
+            if "control_strategy_priority_bonus" in changes:
+                val = float(changes["control_strategy_priority_bonus"])
+                if not (0.0 <= val <= 0.5):
+                    return False, "control_strategy_priority_bonus muss zwischen 0.0 und 0.5 liegen."
+                settings.CONTROL_STRATEGY_PRIORITY_BONUS = val
+                changed.append(f"CONTROL_STRATEGY_PRIORITY_BONUS={val:.3f}")
+
+            if not changed:
+                return False, "Keine gültigen Runtime-Änderungen übergeben."
+
+            runtime_state.append_log("TELEGRAM runtime_tuning " + ", ".join(changed))
+            return True, "Runtime-Parameter aktualisiert: " + ", ".join(changed)
+        except Exception as e:
+            return False, f"Runtime-Tuning fehlgeschlagen: {type(e).__name__}"
 
     def stop(self):
         self.running = False

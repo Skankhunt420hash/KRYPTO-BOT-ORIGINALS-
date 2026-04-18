@@ -67,7 +67,7 @@ _SCORE_MAX: float = 1.00
 # Reinforcement / "Belohnungssystem":
 # Neue gute Trades sollen die Strategy kurzfristig leicht pushen,
 # schlechte Trades analog dämpfen (kontrolliert, nicht dominant).
-_REWARD_WEIGHT: float = 0.08
+_REWARD_WEIGHT: float = float(getattr(settings, "BRAIN_REWARD_WEIGHT", 0.08))
 
 
 class StrategyScorer:

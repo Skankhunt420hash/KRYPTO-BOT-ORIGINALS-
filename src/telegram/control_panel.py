@@ -629,6 +629,7 @@ class TelegramControlPanel:
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
+            "ℹ️ /botrestart nutzt Callback oder automatisch Stop+Start-Fallback.\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
         )
 
@@ -1381,10 +1382,41 @@ class TelegramControlPanel:
 
     def _handle_bot_restart(self, chat_id: str) -> None:
         if self._callbacks.request_bot_restart:
-            ok, msg = self._callbacks.request_bot_restart()
-            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            try:
+                ok, msg = self._callbacks.request_bot_restart()
+                self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            except Exception as e:
+                logger.error("Restart-Callback-Fehler: %s", e)
+                self._send_text(chat_id, "⚠️ Restart-Callback fehlgeschlagen.")
             return
-        self._send_text(chat_id, "⚠️ Supervisor-Restart nicht angebunden.")
+
+        # Fallback: wenn kein dedizierter Restart vorhanden ist, versuche stop+start.
+        if self._callbacks.request_bot_stop and self._callbacks.request_bot_start:
+            try:
+                stop_result = self._callbacks.request_bot_stop()
+                stop_msg = ""
+                if isinstance(stop_result, tuple) and len(stop_result) == 2:
+                    stop_ok, stop_txt = stop_result
+                    stop_msg = f"Stop: {'ok' if stop_ok else 'warn'} ({stop_txt})"
+                else:
+                    stop_msg = "Stop: gesendet"
+
+                start_ok, start_msg = self._callbacks.request_bot_start()
+                icon = "✅" if start_ok else "⚠️"
+                self._send_text(
+                    chat_id,
+                    f"{icon} Restart via Fallback (stop+start).\n{stop_msg}\nStart: {start_msg}",
+                )
+            except Exception as e:
+                logger.error("Fallback-Restart (stop+start) fehlgeschlagen: %s", e)
+                self._send_text(chat_id, "⚠️ Fallback-Restart (stop+start) fehlgeschlagen.")
+            return
+
+        self._send_text(
+            chat_id,
+            "⚠️ Restart nicht angebunden.\n"
+            "Nutze /botstop + /botstart oder starte den Controller/Supervisor.",
+        )
 
     def _send_bot_status(self, chat_id: str) -> None:
         status = {}

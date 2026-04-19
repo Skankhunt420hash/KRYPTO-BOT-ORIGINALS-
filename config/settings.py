@@ -229,7 +229,7 @@ class Settings:
     # ------------------------------------------------------------------
 
     # Tagesverlust-Limit in % des Startkapitals (danach kein neues Trading)
-    DAILY_LOSS_LIMIT_PCT: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 5.0))
+    DAILY_LOSS_LIMIT_PCT: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 10.0))
 
     # Optionaler Volatilitäts-Stop: blockiert neue Trades in HIGH_VOLATILITY-Regimes
     # (Regime wird von RegimeEngine erkannt und im EnhancedSignal.regime gespeichert)

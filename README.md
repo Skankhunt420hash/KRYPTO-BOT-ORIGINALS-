@@ -310,7 +310,7 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 | `RISK_PER_TRADE_PCT`      | `1.0`           | Max. Risiko je Trade (% vom Konto, Backtest/Multi-Mode) |
 | `MAX_TOTAL_OPEN_RISK_PCT` | `10.0`          | Max. Summe aller offenen SL-Risiken (% vom Konto) |
 | `MAX_POSITIONS_TOTAL`     | `5`             | Max. Gesamtzahl gleichzeitiger Positionen (Multi-Mode) |
-| `DAILY_LOSS_LIMIT_PCT`    | `5.0`           | Tagesverlust-Limit in % des Startkapitals |
+| `DAILY_LOSS_LIMIT_PCT`    | `10.0`          | Tagesverlust-Limit in % des Startkapitals |
 | `COIN_COOLDOWN_MINUTES`   | `60`            | Cooldown nach Trade auf demselben Symbol (Minuten) |
 | `STRATEGY_COOLDOWN_MINUTES` | `30`          | Cooldown nach Verlust-Trade pro Strategie (Minuten) |
 | `RISK_BLOCK_HIGH_VOLATILITY` | `false`      | `true` = neue Trades im HIGH_VOLATILITY-Regime blockieren |

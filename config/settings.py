@@ -6,8 +6,7 @@ from dotenv import load_dotenv
 # .env immer relativ zum Projekt-Root laden (nicht vom aktuellen cwd abhängig).
 # Das verhindert stille Fallbacks auf Defaults, wenn der Bot via systemd/Controller
 # aus einem anderen Arbeitsverzeichnis gestartet wird.
-_PROJECT_ROOT = Path(__file__).resolve().parent.parent
-_ENV_PATH = _PROJECT_ROOT / ".env"
+_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
 if _ENV_PATH.exists():
     load_dotenv(dotenv_path=_ENV_PATH, override=False)
 else:
@@ -97,6 +96,16 @@ class Settings:
     # Heuristische Mindest-„Gewinnchance“ (0–100, siehe src/utils/win_chance.py).
     # Trades mit niedrigerer Kennzahl werden nicht eröffnet. 0 = Filter deaktiviert.
     MIN_WIN_CHANCE_PCT: float = float(os.getenv("MIN_WIN_CHANCE_PCT", "80"))
+    # Anteil der gemessenen Strategie-Win-Rate (DB) in der Entry-Kennzahl (0–1).
+    # 0.35 = 35 % echte Historie, 65 % Heuristik – reduziert „Schein-80%“-Effekt.
+    WIN_CHANCE_BLEND_ACTUAL_WR: float = float(
+        os.getenv("WIN_CHANCE_BLEND_ACTUAL_WR", "0.35")
+    )
+    # Harte Sperre: nach PERF_TRACKER_MIN_TRADES Trades keine neuen Entries, wenn
+    # gemessene Win-Rate darunter liegt. 0 = aus (Default).
+    MIN_HISTORICAL_WIN_RATE_PCT: float = float(
+        os.getenv("MIN_HISTORICAL_WIN_RATE_PCT", "0")
+    )
 
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)
@@ -245,6 +254,14 @@ class Settings:
     LOSS_PATTERN_WINDOW_HOURS: float = float(os.getenv("LOSS_PATTERN_WINDOW_HOURS", "72"))
     # Ab so vielen Verlusten im Fenster wird neu eröffnet blockiert (z. B. 2 = ab dem 3. Versuch)
     LOSS_PATTERN_MAX_LOSSES: int = int(os.getenv("LOSS_PATTERN_MAX_LOSSES", "2"))
+    # Schlüssel inkl. Marktregime (Strategie|Symbol|Regime) – präziseres Lernen
+    LOSS_PATTERN_INCLUDE_REGIME: bool = _env_bool(
+        "LOSS_PATTERN_INCLUDE_REGIME", default=True
+    )
+    # Pro Gewinn-Trade: älteste Verlust-Markierung(en) im gleichen Setup streichen (0 = aus)
+    LOSS_PATTERN_WIN_FORGIVENESS: int = int(
+        os.getenv("LOSS_PATTERN_WIN_FORGIVENESS", "1")
+    )
 
     # ------------------------------------------------------------------
     # SHORT-Trading Einstellungen

@@ -26,7 +26,11 @@ from src.telegram.control_panel import TelegramControlPanel, PanelCallbacks
 from src.utils.logger import setup_logger
 from src.utils.risk_manager import RiskManager, Position, paper_equity_ledger_enabled
 from src.utils.telegram_notifier import TelegramNotifier
-from src.utils.win_chance import compute_trade_win_chance_pct
+from src.utils.win_chance import (
+    compute_trade_win_chance_pct,
+    effective_entry_win_chance_pct,
+    historical_win_rate_block_reason,
+)
 
 logger = setup_logger("bot", settings.LOG_LEVEL)
 
@@ -49,6 +53,7 @@ class TradingBot:
         )
         self.strategy = get_strategy(settings.STRATEGY)
         self.risk = RiskManager()
+        self.perf_tracker = PerformanceTracker()
         self.repo = TradeRepository()
         self.perf_repo = PerformanceRepository()
         self.decision_repo = DecisionRepository()
@@ -151,6 +156,10 @@ class TradingBot:
                     pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
                     if trade_id is not None:
                         self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
+                    try:
+                        self.perf_tracker.refresh()
+                    except Exception:
+                        pass
                     self.tg.notify_trade_closed(
                         symbol=symbol,
                         side="long",
@@ -187,9 +196,40 @@ class TradingBot:
             rr_pre = (tp_pre - current_price) / max(current_price - sl_pre, 1e-9)
             conf_pct_gate = round(signal.confidence * 100, 1)
             min_wc = float(getattr(settings, "MIN_WIN_CHANCE_PCT", 0.0) or 0.0)
+            hist_r = historical_win_rate_block_reason(
+                self.strategy.name, self.perf_tracker
+            )
+            if hist_r:
+                logger.info(
+                    f"[yellow]SKIP historische Win-Rate[/yellow] {symbol} | {hist_r}"
+                )
+                self.repo.save_rejected_signal(
+                    symbol=symbol,
+                    timeframe=settings.TIMEFRAME,
+                    strategy_name=self.strategy.name,
+                    side="long",
+                    entry_price=current_price,
+                    stop_loss=sl_pre,
+                    take_profit=tp_pre,
+                    rr_planned=round(rr_pre, 2),
+                    confidence=conf_pct_gate,
+                    regime="UNKNOWN",
+                    reason_rejected=hist_r,
+                )
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="blocked_historical_win_rate",
+                    reason=hist_r,
+                    strategy=self.strategy.name,
+                )
+                return
             if min_wc > 0:
-                wc_gate, _ = compute_trade_win_chance_pct(
-                    conf_pct_gate, brain_score=None, rr=round(rr_pre, 2)
+                wc_gate, _ = effective_entry_win_chance_pct(
+                    conf_pct_gate,
+                    brain_score=None,
+                    rr=round(rr_pre, 2),
+                    strategy_name=self.strategy.name,
+                    perf_tracker=self.perf_tracker,
                 )
                 if wc_gate < min_wc:
                     reason_gate = f"MIN_WIN_CHANCE:{wc_gate:.1f}<{min_wc:.0f}"
@@ -225,15 +265,17 @@ class TradingBot:
                     rr = (pos.take_profit - pos.entry_price) / max(
                         pos.entry_price - pos.stop_loss, 1e-9
                     )
-                    _wc1, _wl1 = compute_trade_win_chance_pct(
+                    _wc1, _wl1 = effective_entry_win_chance_pct(
                         round(signal.confidence * 100, 1),
                         brain_score=None,
                         rr=round(rr, 2),
+                        strategy_name=self.strategy.name,
+                        perf_tracker=self.perf_tracker,
                     )
                     logger.info(
                         f"[bold green]KAUF[/bold green] {symbol} | "
                         f"Grund: {signal.reason} | Konfidenz: {signal.confidence:.0%} | "
-                        f"Gewinnchance(geschätzt): {_wc1:.0f}% ({_wl1})"
+                        f"Gewinnchance(effektiv): {_wc1:.0f}% ({_wl1})"
                     )
                     trade_id = self.repo.save_open_trade(
                         symbol=symbol,
@@ -326,6 +368,10 @@ class TradingBot:
                     self.repo.close_trade(
                         trade_id, current_price, pnl, pnl_pct, signal.reason
                     )
+                    try:
+                        self.perf_tracker.refresh()
+                    except Exception:
+                        pass
                     self.tg.notify_trade_closed(
                         symbol=symbol,
                         side="long",
@@ -363,6 +409,10 @@ class TradingBot:
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle Paare durch."""
         logger.info(f"[dim]── Neuer Zyklus gestartet ──[/dim]")
+        try:
+            self.perf_tracker.refresh()
+        except Exception:
+            pass
         for symbol in self.pairs:
             try:
                 self._process_pair(symbol)
@@ -780,7 +830,17 @@ class MultiStrategyBot:
         )
 
         strat_names = [s.name for s in self.strategies]
-        logger.info(f"Aktive Strategien: {strat_names}")
+        _pool = ", ".join(strat_names)
+        # Eine Zeile (kein Umbruch in journalctl bei langen Listen)
+        logger.info(
+            "Aktive Strategien (%d): %s — Regime-Engine + Meta-Selector + Brain wählen pro Symbol.",
+            len(strat_names),
+            _pool,
+        )
+        # Zusätzlich grep-freundlich (ohne Rich): in journalctl klar erkennbar
+        logger.info("STRATEGY_POOL_COUNT=%d", len(strat_names))
+        logger.info("STRATEGY_POOL_NAMES=%s", _pool)
+        # Pro Symbol werden Einzel-Strategien nur bei LOG_LEVEL=DEBUG geloggt (sonst zu viel Spam).
         if bool(getattr(settings, "SHORT_ONLY_TRADING", False)):
             logger.info(
                 "[yellow]SHORT_ONLY_TRADING aktiv[/yellow] – nur SHORT-Entries "
@@ -812,6 +872,12 @@ class MultiStrategyBot:
             "set" if bool(settings.TELEGRAM_CHAT_ID) else "missing",
         )
         if autostart_services:
+            # Panel zuerst wie Single-Bot — getUpdates läuft, bevor große Start-Pushes
+            self.panel.start_in_background()
+            if self.panel.enabled:
+                logger.info("Telegram Polling gestartet.")
+            else:
+                logger.info("Telegram Polling nicht gestartet (deaktiviert).")
             self.tg.notify_bot_start(
                 mode=settings.TRADING_MODE,
                 strategy="AUTO (Meta-Selector)",
@@ -822,11 +888,6 @@ class MultiStrategyBot:
                 limits = self._mini_live_limits_text()
                 logger.warning("MINI-LIVE START: %s", limits)
                 self.tg.notify_live_test_mode_start(limits)
-            self.panel.start_in_background()
-            if self.panel.enabled:
-                logger.info("Telegram Polling gestartet.")
-            else:
-                logger.info("Telegram Polling nicht gestartet (deaktiviert).")
         logger.info("Multi-Bot bereit.")
 
     def _recovery_state_path(self) -> Path:
@@ -1264,6 +1325,10 @@ class MultiStrategyBot:
                     pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
                     if trade_id is not None:
                         self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
+                    try:
+                        self.perf_tracker.refresh()
+                    except Exception:
+                        pass
                     self.tg.notify_trade_closed(
                         symbol=symbol,
                         side=pos_side,
@@ -1572,13 +1637,59 @@ class MultiStrategyBot:
                 runtime_state.append_log(f"LIVE_GATE_BLOCK {symbol} {best.strategy_name} {live_reason}")
                 return
 
-        # 5d. Mindest-Gewinnchance (gleiche Heuristik wie Telegram-Anzeige)
+        # 5d. Harte Mindest-Win-Rate aus Trade-Historie (optional)
+        hist_reason = historical_win_rate_block_reason(
+            best.strategy_name, self.perf_tracker
+        )
+        if hist_reason:
+            logger.info(
+                f"[yellow]SKIP historische Win-Rate[/yellow] {symbol} | "
+                f"{best.strategy_name} | {hist_reason}"
+            )
+            self.repo.save_rejected_signal(
+                symbol=symbol,
+                timeframe=best.timeframe,
+                strategy_name=best.strategy_name,
+                side=best.side.value,
+                entry_price=best.entry,
+                stop_loss=best.stop_loss,
+                take_profit=best.take_profit,
+                rr_planned=best.rr,
+                confidence=best.confidence,
+                regime=best.regime,
+                reason_rejected=hist_reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_historical_win_rate",
+                reason=hist_reason,
+                strategy=best.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=regime.value,
+                ranking=ranking,
+                chosen_strategy=best.strategy_name,
+                signal_score=signal_score,
+                risk_decision="historical_win_rate_block",
+                allow_trade=False,
+                reject_reason=hist_reason,
+                last_decision_reason=hist_reason,
+                market_context=market_ctx,
+            )
+            return
+
+        # 5e. Mindest-Gewinnchance (Heuristik + optional DB-Kalibrierung)
         min_wc = float(getattr(settings, "MIN_WIN_CHANCE_PCT", 0.0) or 0.0)
         if min_wc > 0:
             _bsr_gate = brain_snapshot.get("last_signal_score")
             _bf_gate = float(_bsr_gate) if _bsr_gate is not None else None
-            wc_gate_m, _wl_gate_m = compute_trade_win_chance_pct(
-                best.confidence, brain_score=_bf_gate, rr=best.rr
+            wc_gate_m, _wl_gate_m = effective_entry_win_chance_pct(
+                best.confidence,
+                brain_score=_bf_gate,
+                rr=best.rr,
+                strategy_name=best.strategy_name,
+                perf_tracker=self.perf_tracker,
             )
             if wc_gate_m < min_wc:
                 reason_wc = f"MIN_WIN_CHANCE:{wc_gate_m:.1f}<{min_wc:.0f}"
@@ -1659,8 +1770,12 @@ class MultiStrategyBot:
             _snap = self._last_brain_snapshot or {}
             _bs_raw = _snap.get("last_signal_score")
             _brain_f = float(_bs_raw) if _bs_raw is not None else None
-            _wc, _wl = compute_trade_win_chance_pct(
-                best.confidence, brain_score=_brain_f, rr=best.rr
+            _wc, _wl = effective_entry_win_chance_pct(
+                best.confidence,
+                brain_score=_brain_f,
+                rr=best.rr,
+                strategy_name=best.strategy_name,
+                perf_tracker=self.perf_tracker,
             )
             logger.info(
                 f"[bold green]LONG ERÖFFNET[/bold green] {symbol} | "
@@ -1669,7 +1784,7 @@ class MultiStrategyBot:
                 f"Menge: {amount:.6f} | SL: {best.stop_loss:.4f} | "
                 f"TP: {best.take_profit:.4f} | RR: {best.rr:.2f} | "
                 f"Konfidenz: {best.confidence:.0f}/100 | "
-                f"Gewinnchance(geschätzt): {_wc:.0f}% ({_wl}) | "
+                f"Gewinnchance(effektiv): {_wc:.0f}% ({_wl}) | "
                 f"Dev: {exec_result.deviation_pct:.3f}%"
             )
             trade_id = self.repo.save_open_trade(
@@ -1797,8 +1912,12 @@ class MultiStrategyBot:
         _snap_s = self._last_brain_snapshot or {}
         _bs_raw_s = _snap_s.get("last_signal_score")
         _brain_fs = float(_bs_raw_s) if _bs_raw_s is not None else None
-        _wcs, _wls = compute_trade_win_chance_pct(
-            signal.confidence, brain_score=_brain_fs, rr=signal.rr
+        _wcs, _wls = effective_entry_win_chance_pct(
+            signal.confidence,
+            brain_score=_brain_fs,
+            rr=signal.rr,
+            strategy_name=signal.strategy_name,
+            perf_tracker=self.perf_tracker,
         )
         logger.info(
             f"[bold red]SHORT ERÖFFNET [PAPER][/bold red] {symbol} | "
@@ -1807,7 +1926,7 @@ class MultiStrategyBot:
             f"Menge: {amount:.6f} | SL: {signal.stop_loss:.4f} (oben) | "
             f"TP: {signal.take_profit:.4f} (unten) | "
             f"RR: {signal.rr:.2f} | Konfidenz: {signal.confidence:.0f}/100 | "
-            f"Gewinnchance(geschätzt): {_wcs:.0f}% ({_wls}) | "
+            f"Gewinnchance(effektiv): {_wcs:.0f}% ({_wls}) | "
             f"Dev: {exec_result.deviation_pct:.3f}%"
         )
         trade_id = self.repo.save_open_trade(

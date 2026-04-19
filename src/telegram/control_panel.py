@@ -364,6 +364,10 @@ class TelegramControlPanel:
                 self._handle_setbrain(chat_id, text)
             elif cmd == "/setrisk":
                 self._handle_setrisk(chat_id, text)
+            elif cmd == "/setprofile":
+                self._handle_setprofile(chat_id, text)
+            elif cmd == "/profiles":
+                self._send_profiles(chat_id)
             elif cmd == "/stop_bot":
                 self._handle_stop_bot(chat_id)
             elif cmd == "/start_bot":
@@ -487,6 +491,7 @@ class TelegramControlPanel:
             "📖 <b>Lesend</b>: /status /summary /analysis /brain /config /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
+            "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
         )
@@ -712,6 +717,114 @@ class TelegramControlPanel:
                 self._send_text(chat_id, f"⚠️ {msg}")
             return
         self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    @staticmethod
+    def _profile_presets() -> Dict[str, Dict[str, float]]:
+        return {
+            "defensive": {
+                "min_confidence": 58.0,
+                "min_rr": 2.0,
+                "brain_min_score_to_trade": 0.56,
+                "brain_risky_phase_score": 0.45,
+                "perf_selector_weight": 0.30,
+                "reward_weight": 0.05,
+                "risk_per_trade_pct": 0.6,
+                "max_total_open_risk_pct": 5.0,
+                "max_positions_total": 3,
+            },
+            "balanced": {
+                "min_confidence": 46.0,
+                "min_rr": 1.6,
+                "brain_min_score_to_trade": 0.48,
+                "brain_risky_phase_score": 0.36,
+                "perf_selector_weight": 0.24,
+                "reward_weight": 0.08,
+                "risk_per_trade_pct": 0.9,
+                "max_total_open_risk_pct": 9.0,
+                "max_positions_total": 5,
+            },
+            "aggressive": {
+                "min_confidence": 36.0,
+                "min_rr": 1.3,
+                "brain_min_score_to_trade": 0.38,
+                "brain_risky_phase_score": 0.28,
+                "perf_selector_weight": 0.18,
+                "reward_weight": 0.12,
+                "risk_per_trade_pct": 1.3,
+                "max_total_open_risk_pct": 14.0,
+                "max_positions_total": 7,
+            },
+            "sniper": {
+                "min_confidence": 62.0,
+                "min_rr": 2.4,
+                "brain_min_score_to_trade": 0.60,
+                "brain_risky_phase_score": 0.48,
+                "perf_selector_weight": 0.32,
+                "reward_weight": 0.06,
+                "risk_per_trade_pct": 0.7,
+                "max_total_open_risk_pct": 6.0,
+                "max_positions_total": 2,
+            },
+            "scalping": {
+                "min_confidence": 34.0,
+                "min_rr": 1.2,
+                "brain_min_score_to_trade": 0.34,
+                "brain_risky_phase_score": 0.24,
+                "perf_selector_weight": 0.14,
+                "reward_weight": 0.15,
+                "risk_per_trade_pct": 0.8,
+                "max_total_open_risk_pct": 12.0,
+                "max_positions_total": 8,
+            },
+        }
+
+    def _send_profiles(self, chat_id: str) -> None:
+        presets = self._profile_presets()
+        lines = [
+            "🎚 <b>Luxus Profile</b>",
+            "Wähle per <code>/setprofile &lt;name&gt;</code>:",
+            "",
+        ]
+        for name, values in presets.items():
+            lines.append(
+                f"• <b>{name}</b> → "
+                f"risk={values['risk_per_trade_pct']}% | "
+                f"open_risk={values['max_total_open_risk_pct']}% | "
+                f"min_conf={values['min_confidence']} | "
+                f"min_rr={values['min_rr']}"
+            )
+        lines.append("")
+        lines.append("Beispiel: <code>/setprofile defensive</code>")
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _handle_setprofile(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 2:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setprofile <defensive|balanced|aggressive|sniper|scalping>\n"
+                "Nutze /profiles für die Übersicht."
+            )
+            return
+        name = parts[1].strip().lower()
+        presets = self._profile_presets()
+        payload = presets.get(name)
+        if payload is None:
+            self._send_text(chat_id, f"Unbekanntes Profil: {name}. Nutze /profiles.")
+            return
+        if not self._callbacks.apply_runtime_settings:
+            self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.apply_runtime_settings(payload)
+        if ok:
+            runtime_state.append_log(f"TELEGRAM /setprofile {name}")
+            self._send_text(
+                chat_id,
+                f"✅ Profil <b>{name}</b> aktiviert.\n{msg}\n\n"
+                "Kontrolle mit /config und /analysis."
+            )
+        else:
+            self._send_text(chat_id, f"⚠️ Profil konnte nicht gesetzt werden: {msg}")
 
     def _send_risk(self, chat_id: str) -> None:
         runtime_daily_loss = "n/a"

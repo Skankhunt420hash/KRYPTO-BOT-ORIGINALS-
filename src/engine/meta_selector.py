@@ -11,10 +11,10 @@ if TYPE_CHECKING:
 
 logger = setup_logger("meta_selector")
 
-# Gewicht des Performance-Scores im Gesamt-Score.
-# final = signal_score + (perf_score - 0.5) * PERF_WEIGHT
-# Bei PERF_WEIGHT=0.15: max Anpassung = ±0.075 (konservativ)
-_PERF_WEIGHT: float = settings.PERF_SELECTOR_WEIGHT
+# Default-Gewicht des Performance-Scores im Gesamt-Score.
+# Der effektive Wert wird pro Auswahl dynamisch aus Settings gelesen,
+# damit /setbrain perf_weight sofort greift.
+_DEFAULT_PERF_WEIGHT: float = settings.PERF_SELECTOR_WEIGHT
 
 # Richtungs-Multiplikator: penalisiert Signale die gegen das Regime laufen.
 # SHORT im TREND_UP = kontra-zyklisch = 0.55 Abzug auf den Fit-Score.
@@ -121,6 +121,9 @@ class MetaSelector:
         regime: Regime,
         symbol: str,
     ) -> Optional[EnhancedSignal]:
+        perf_weight = float(
+            getattr(settings, "PERF_SELECTOR_WEIGHT", _DEFAULT_PERF_WEIGHT)
+        )
         self._last_selection = {
             "symbol": symbol,
             "regime": regime.value,
@@ -198,8 +201,8 @@ class MetaSelector:
                         )
                         continue
 
-                    if _PERF_WEIGHT > 0:
-                        perf_adj = (perf_score - 0.5) * _PERF_WEIGHT
+                    if perf_weight > 0:
+                        perf_adj = (perf_score - 0.5) * perf_weight
                 except Exception as e:
                     logger.warning(
                         f"Scorer.get_score fehlgeschlagen für {sig.strategy_name}: "
@@ -234,7 +237,7 @@ class MetaSelector:
         best_score, best, best_sig_score, best_perf_adj, best_perf_score, best_pref_adj = scored[0]
 
         # Logging: signal_score + perf_adj + final für den Gewinner
-        if self._scorer is not None and _PERF_WEIGHT > 0:
+        if self._scorer is not None and perf_weight > 0:
             perf_tag = (
                 f" | sig={best_sig_score:.3f} "
                 f"perf={best_perf_score:.2f} adj={best_perf_adj:+.3f} "

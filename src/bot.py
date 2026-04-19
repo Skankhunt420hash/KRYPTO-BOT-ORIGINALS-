@@ -648,6 +648,13 @@ class TradingBot:
                 settings.BRAIN_REWARD_WEIGHT = val
                 changed.append(f"BRAIN_REWARD_WEIGHT={val:.3f}")
 
+            if "reward_window" in changes:
+                val = int(changes["reward_window"])
+                if not (2 <= val <= 60):
+                    return False, "reward_window muss zwischen 2 und 60 liegen."
+                settings.BRAIN_REWARD_WINDOW = val
+                changed.append(f"BRAIN_REWARD_WINDOW={val}")
+
             if "control_strategy_priority_bonus" in changes:
                 val = float(changes["control_strategy_priority_bonus"])
                 if not (0.0 <= val <= 0.5):
@@ -2200,6 +2207,13 @@ class MultiStrategyBot:
                     return False, "reward_weight muss zwischen 0.0 und 0.5 liegen."
                 settings.BRAIN_REWARD_WEIGHT = val
                 changed.append(f"BRAIN_REWARD_WEIGHT={val:.3f}")
+
+            if "reward_window" in changes:
+                val = int(changes["reward_window"])
+                if not (2 <= val <= 60):
+                    return False, "reward_window muss zwischen 2 und 60 liegen."
+                settings.BRAIN_REWARD_WINDOW = val
+                changed.append(f"BRAIN_REWARD_WINDOW={val}")
 
             if "control_strategy_priority_bonus" in changes:
                 val = float(changes["control_strategy_priority_bonus"])

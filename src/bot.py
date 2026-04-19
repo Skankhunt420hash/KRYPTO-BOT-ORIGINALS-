@@ -64,6 +64,8 @@ class TradingBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                request_bot_restart=self._request_restart_from_panel,
+                get_bot_status=self._bot_status_from_panel,
                 apply_runtime_settings=self._apply_runtime_settings_from_panel,
             ),
         )
@@ -635,6 +637,34 @@ class TradingBot:
             "(Telegram kann keinen sicheren Cold-Start auslösen)."
         )
 
+    def _request_restart_from_panel(self) -> Tuple[bool, str]:
+        """
+        Restart innerhalb des laufenden Prozesses:
+        - Runtime-Sperren werden zurückgesetzt.
+        - Kein Prozess-Neustart; dafür ist der externe Supervisor zuständig.
+        """
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+        runtime_state.append_log("TELEGRAM /botrestart -> runtime gates reset")
+        try:
+            self.tg.notify_bot_resumed("telegram:/botrestart")
+        except Exception:
+            pass
+        if self.running:
+            return True, "Bot-Runtime neu aktiviert (Pause/Risk-Off zurückgesetzt)."
+        return False, (
+            "Bot-Prozess läuft nicht. Für echten Prozess-Restart bitte Controller/Supervisor nutzen."
+        )
+
+    def _bot_status_from_panel(self) -> Dict:
+        return {
+            "running": bool(self.running),
+            "pid": os.getpid(),
+            "uptime_sec": None,
+            "pidfile": "inprocess:trading-bot",
+        }
+
     def _apply_runtime_settings_from_panel(self, changes: Dict[str, float]) -> Tuple[bool, str]:
         """
         Erlaubt kontrollierte Laufzeit-Änderungen aus dem Telegram-Panel.
@@ -655,6 +685,20 @@ class TradingBot:
                     return False, "max_total_open_risk_pct muss zwischen 0.5 und 50.0 liegen."
                 settings.MAX_TOTAL_OPEN_RISK_PCT = val
                 changed.append(f"MAX_TOTAL_OPEN_RISK_PCT={val:.2f}")
+
+            if "daily_loss_limit_pct" in changes:
+                val = float(changes["daily_loss_limit_pct"])
+                if not (0.1 <= val <= 100.0):
+                    return False, "daily_loss_limit_pct muss zwischen 0.1 und 100.0 liegen."
+                settings.DAILY_LOSS_LIMIT_PCT = val
+                changed.append(f"DAILY_LOSS_LIMIT_PCT={val:.2f}")
+
+            if "live_test_daily_loss_limit_pct" in changes:
+                val = float(changes["live_test_daily_loss_limit_pct"])
+                if not (0.1 <= val <= 100.0):
+                    return False, "live_test_daily_loss_limit_pct muss zwischen 0.1 und 100.0 liegen."
+                settings.LIVE_TEST_DAILY_LOSS_LIMIT_PCT = val
+                changed.append(f"LIVE_TEST_DAILY_LOSS_LIMIT_PCT={val:.2f}")
 
             if "min_confidence" in changes:
                 val = float(changes["min_confidence"])
@@ -825,6 +869,8 @@ class MultiStrategyBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                request_bot_restart=self._request_restart_from_panel,
+                get_bot_status=self._bot_status_from_panel,
                 apply_runtime_settings=self._apply_runtime_settings_from_panel,
             ),
         )
@@ -2261,6 +2307,34 @@ class MultiStrategyBot:
             "(Telegram kann keinen sicheren Cold-Start auslösen)."
         )
 
+    def _request_restart_from_panel(self) -> Tuple[bool, str]:
+        """
+        Restart innerhalb des laufenden Multi-Bot-Prozesses:
+        - Runtime-Gates werden zurückgesetzt.
+        - Kein neuer Prozess wird von hier gestartet.
+        """
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+        runtime_state.append_log("TELEGRAM /botrestart -> runtime gates reset")
+        try:
+            self.tg.notify_bot_resumed("telegram:/botrestart")
+        except Exception:
+            pass
+        if self.running:
+            return True, "Multi-Bot-Runtime neu aktiviert (Pause/Risk-Off zurückgesetzt)."
+        return False, (
+            "Multi-Bot-Prozess läuft nicht. Für echten Prozess-Restart bitte Controller/Supervisor nutzen."
+        )
+
+    def _bot_status_from_panel(self) -> Dict:
+        return {
+            "running": bool(self.running),
+            "pid": os.getpid(),
+            "uptime_sec": None,
+            "pidfile": "inprocess:multi-strategy-bot",
+        }
+
     def _apply_runtime_settings_from_panel(self, changes: Dict[str, float]) -> Tuple[bool, str]:
         """
         Kontrolliertes Live-Tuning aus Telegram für den Multi-Bot.
@@ -2284,6 +2358,20 @@ class MultiStrategyBot:
                 settings.MAX_TOTAL_OPEN_RISK_PCT = val
                 self.risk.portfolio.cfg.max_total_open_risk_pct = val
                 changed.append(f"MAX_TOTAL_OPEN_RISK_PCT={val:.2f}")
+
+            if "daily_loss_limit_pct" in changes:
+                val = float(changes["daily_loss_limit_pct"])
+                if not (0.1 <= val <= 100.0):
+                    return False, "daily_loss_limit_pct muss zwischen 0.1 und 100.0 liegen."
+                settings.DAILY_LOSS_LIMIT_PCT = val
+                changed.append(f"DAILY_LOSS_LIMIT_PCT={val:.2f}")
+
+            if "live_test_daily_loss_limit_pct" in changes:
+                val = float(changes["live_test_daily_loss_limit_pct"])
+                if not (0.1 <= val <= 100.0):
+                    return False, "live_test_daily_loss_limit_pct muss zwischen 0.1 und 100.0 liegen."
+                settings.LIVE_TEST_DAILY_LOSS_LIMIT_PCT = val
+                changed.append(f"LIVE_TEST_DAILY_LOSS_LIMIT_PCT={val:.2f}")
 
             if "min_confidence" in changes:
                 val = float(changes["min_confidence"])

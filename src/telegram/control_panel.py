@@ -21,7 +21,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple, Any
+from typing import Callable, Dict, Optional, Tuple, Any, List
 
 import requests
 
@@ -347,80 +347,164 @@ class TelegramControlPanel:
     # ------------------------------------------------------------------
 
     def _dispatch_command(self, chat_id: str, text: str) -> None:
-        cmd = text.split()[0].lower()
-        # Gruppen-Chats: /start@MeinBot_Bot — sonst kein Match
-        if "@" in cmd:
-            cmd = cmd.split("@", 1)[0]
+        parts = self._split_command_parts(text)
+        if not parts:
+            return
+        cmd = parts[0]
+
         try:
-            if cmd == "/start":
+            if cmd == "start":
                 self._send_start(chat_id)
-            elif cmd == "/help":
+            elif cmd == "help":
                 self._send_help(chat_id)
-            elif cmd == "/status":
+            elif cmd == "status":
                 self._send_status(chat_id)
-            elif cmd == "/mode":
-                self._send_mode(chat_id)
-            elif cmd == "/strategy":
+            elif cmd == "mode":
+                self._handle_mode_command(chat_id, text)
+            elif cmd == "strategy":
                 self._send_strategy(chat_id)
-            elif cmd == "/risk":
-                self._send_risk(chat_id)
-            elif cmd == "/positions":
+            elif cmd == "risk":
+                self._handle_risk_command(chat_id, text)
+            elif cmd == "positions":
                 self._send_positions(chat_id)
-            elif cmd == "/trades":
+            elif cmd == "trades":
                 self._send_trades(chat_id)
-            elif cmd == "/balance":
+            elif cmd == "balance":
                 self._send_balance(chat_id)
-            elif cmd == "/logs":
+            elif cmd == "logs":
                 self._send_logs(chat_id)
-            elif cmd == "/summary":
+            elif cmd == "summary":
                 self._send_summary(chat_id)
-            elif cmd == "/analysis":
+            elif cmd == "analysis":
                 self._send_analysis(chat_id)
-            elif cmd == "/brain":
+            elif cmd == "brain":
                 self._send_brain(chat_id)
-            elif cmd == "/config":
+            elif cmd == "config":
                 self._send_config(chat_id)
-            elif cmd == "/pause":
+            elif cmd == "pause":
                 self._handle_pause(chat_id)
-            elif cmd == "/resume":
+            elif cmd == "resume":
                 self._handle_resume(chat_id)
-            elif cmd == "/riskoff":
+            elif cmd == "riskoff":
                 self._handle_riskoff(chat_id)
-            elif cmd == "/riskon":
+            elif cmd == "riskon":
                 self._handle_riskon(chat_id)
-            elif cmd == "/killswitch":
+            elif cmd == "killswitch":
                 self._handle_killswitch_on(chat_id)
-            elif cmd == "/killswitchoff":
+            elif cmd == "killswitchoff":
                 self._handle_killswitch_off(chat_id)
-            elif cmd == "/setmode":
+            elif cmd in ("setmode", "mode_set"):
                 self._handle_setmode(chat_id, text)
-            elif cmd == "/setstrategy":
+            elif cmd == "setstrategy":
                 self._handle_setstrategy(chat_id, text)
-            elif cmd == "/setbrain":
+            elif cmd == "setbrain":
                 self._handle_setbrain(chat_id, text)
-            elif cmd == "/setrisk":
+            elif cmd in ("setrisk", "riskset", "risktune", "risktuning"):
                 self._handle_setrisk(chat_id, text)
-            elif cmd == "/setprofile":
+            elif cmd in ("setprofile", "profile"):
                 self._handle_setprofile(chat_id, text)
-            elif cmd == "/profiles":
+            elif cmd == "profiles":
                 self._send_profiles(chat_id)
-            elif cmd == "/stop_bot":
+            elif cmd in ("stop_bot", "stopbot"):
                 self._handle_stop_bot(chat_id)
-            elif cmd == "/start_bot":
+            elif cmd in ("start_bot", "startbot"):
                 self._handle_start_bot(chat_id)
-            elif cmd == "/botstart":
+            elif cmd in ("botstart", "start"):
                 self._handle_bot_start(chat_id)
-            elif cmd == "/botstop":
+            elif cmd in ("botstop", "stop"):
                 self._handle_bot_stop(chat_id)
-            elif cmd == "/botrestart":
+            elif cmd in ("botrestart", "restartbot", "restart"):
                 self._handle_bot_restart(chat_id)
-            elif cmd == "/botstatus":
+            elif cmd == "botstatus":
                 self._send_bot_status(chat_id)
             else:
-                self._send_text(chat_id, "Unbekannter Befehl. Sende /help für eine Übersicht.")
+                self._send_text(
+                    chat_id,
+                    "Unbekannter Befehl. Nutze /help.\n"
+                    "Tipp: /setprofile defensive, /setrisk daily_loss_limit_pct 10, /botrestart",
+                )
         except Exception as e:
             logger.error(f"Telegram-Panel Dispatch-Fehler ({cmd}): {e}")
             self._send_text(chat_id, "Interner Fehler im Telegram-Panel. Siehe Logs.")
+
+    # ------------------------------------------------------------------
+    # Command-Parsing Helper
+    # ------------------------------------------------------------------
+
+    def _handle_mode_command(self, chat_id: str, text: str) -> None:
+        """
+        /mode
+          -> zeigt aktuellen Modus
+        /mode paper
+          -> alias für /setmode paper
+        /mode defensive|balanced|aggressive|sniper|scalping
+          -> alias für /setprofile <name>
+        """
+        parts = self._split_command_parts(text)
+        if len(parts) <= 1:
+            self._send_mode(chat_id)
+            return
+        target = parts[1].strip().lower()
+        if target in self._profile_presets():
+            self._handle_setprofile(chat_id, f"/setprofile {target}")
+            return
+        if target == "paper":
+            self._handle_setmode(chat_id, "/setmode paper")
+            return
+        self._send_text(
+            chat_id,
+            "Verwendung:\n"
+            "• /mode (Status)\n"
+            "• /mode paper\n"
+            "• /mode <defensive|balanced|aggressive|sniper|scalping>",
+        )
+
+    def _handle_risk_command(self, chat_id: str, text: str) -> None:
+        """
+        /risk
+          -> zeigt Risk-Status
+        /risk <key> <value>
+          -> alias für /setrisk <key> <value>
+        /risk set|tune|tuning|live <key> <value>
+          -> alias für /setrisk <key> <value>
+        """
+        parts = self._split_command_parts(text)
+        if len(parts) <= 1:
+            self._send_risk(chat_id)
+            return
+
+        marker = parts[1].strip().lower()
+        if marker in ("set", "tune", "tuning", "live", "update"):
+            key_idx = 2
+            if len(parts) > key_idx and parts[key_idx].strip().lower() in (
+                "set",
+                "tune",
+                "tuning",
+                "live",
+                "update",
+            ):
+                key_idx += 1
+            if len(parts) <= key_idx + 1:
+                self._send_text(
+                    chat_id,
+                    "Verwendung: /risk <key> <value>\n"
+                    "oder: /risk live <key> <value>\n"
+                    "Keys: risk_per_trade, max_open_risk, max_positions, "
+                    "max_notional, min_notional, daily_loss_limit_pct, live_daily_loss_limit_pct",
+                )
+                return
+            self._handle_setrisk(chat_id, f"/setrisk {parts[key_idx]} {parts[key_idx + 1]}")
+            return
+
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /risk <key> <value>\n"
+                "Keys: risk_per_trade, max_open_risk, max_positions, "
+                "max_notional, min_notional, daily_loss_limit_pct, live_daily_loss_limit_pct",
+            )
+            return
+        self._handle_setrisk(chat_id, f"/setrisk {parts[1]} {parts[2]}")
 
     # ------------------------------------------------------------------
     # Senden an den anfragenden Chat
@@ -519,6 +603,22 @@ class TelegramControlPanel:
             "Nutze /help für die Befehlsübersicht.\n"
             "Sicherheits-Hinweis: Trading-Modus bleibt durch .env gesteuert."
         )
+
+    @staticmethod
+    def _strip_command_token(token: str) -> str:
+        cleaned = token.strip().lower()
+        cleaned = cleaned.strip("()[]{}")
+        if "@" in cleaned:
+            cleaned = cleaned.split("@", 1)[0]
+        return cleaned.lstrip("/")
+
+    def _split_command_parts(self, text: str) -> List[str]:
+        cleaned_text = (text or "").replace("\u200b", " ").replace("\ufeff", " ").strip()
+        parts = cleaned_text.split()
+        if not parts:
+            return []
+        first = self._strip_command_token(parts[0])
+        return [first] + [part.strip() for part in parts[1:]]
 
     def _send_help(self, chat_id: str) -> None:
         self._send_text(
@@ -674,7 +774,7 @@ class TelegramControlPanel:
         self._send_text(chat_id, "\n".join(lines))
 
     def _handle_setbrain(self, chat_id: str, text: str) -> None:
-        parts = text.split()
+        parts = self._split_command_parts(text)
         if len(parts) < 3:
             self._send_text(
                 chat_id,
@@ -716,12 +816,13 @@ class TelegramControlPanel:
         self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
 
     def _handle_setrisk(self, chat_id: str, text: str) -> None:
-        parts = text.split()
+        parts = self._split_command_parts(text)
         if len(parts) < 3:
             self._send_text(
                 chat_id,
                 "Verwendung: /setrisk <key> <value>\n"
-                "Keys: risk_per_trade, max_open_risk, max_positions, max_notional, min_notional"
+                "Keys: risk_per_trade, max_open_risk, max_positions, "
+                "max_notional, min_notional, daily_loss_limit_pct, live_daily_loss_limit_pct"
             )
             return
         key = parts[1].strip().lower()
@@ -732,6 +833,11 @@ class TelegramControlPanel:
             "max_positions": ("max_positions_total", int, 1, 50),
             "max_notional": ("max_position_notional", float, 5.0, 1_000_000.0),
             "min_notional": ("min_position_notional", float, 1.0, 100_000.0),
+            "daily_loss_limit_pct": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "daily_loss_pct": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "daily_loss": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "daily_limit_pct": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "live_daily_loss_limit_pct": ("live_test_daily_loss_limit_pct", float, 0.1, 100.0),
         }
         if key not in mapping:
             self._send_text(chat_id, f"Unbekannter setrisk-Key: {key}")
@@ -834,7 +940,7 @@ class TelegramControlPanel:
         self._send_text(chat_id, "\n".join(lines))
 
     def _handle_setprofile(self, chat_id: str, text: str) -> None:
-        parts = text.split()
+        parts = self._split_command_parts(text)
         if len(parts) < 2:
             self._send_text(
                 chat_id,
@@ -1381,7 +1487,7 @@ class TelegramControlPanel:
             self._send_text(chat_id, "⚠️ Kill-Switch konnte nicht deaktiviert werden.")
 
     def _handle_setmode(self, chat_id: str, text: str) -> None:
-        parts = text.split()
+        parts = self._split_command_parts(text)
         if len(parts) < 2:
             self._send_text(chat_id, "Verwendung: /setmode paper")
             return
@@ -1412,7 +1518,7 @@ class TelegramControlPanel:
         )
 
     def _handle_setstrategy(self, chat_id: str, text: str) -> None:
-        parts = text.split()
+        parts = self._split_command_parts(text)
         if len(parts) < 2:
             self._send_text(
                 chat_id,

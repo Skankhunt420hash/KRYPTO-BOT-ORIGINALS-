@@ -361,6 +361,8 @@ class TelegramControlPanel:
                 self._send_status(chat_id)
             elif cmd == "diag":
                 self._send_diag(chat_id)
+            elif cmd == "diagfull":
+                self._send_diagfull(chat_id)
             elif cmd == "mode":
                 self._handle_mode_command(chat_id, text)
             elif cmd == "strategy":
@@ -626,7 +628,7 @@ class TelegramControlPanel:
         self._send_text(
             chat_id,
             "<b>KRYPTO-BOT Control Center</b>\n"
-            "📖 <b>Lesend</b>: /status /diag /summary /analysis /brain /config /balance /positions /trades /risk /strategy /mode /logs\n"
+            "📖 <b>Lesend</b>: /status /diag /diagfull /summary /analysis /brain /config /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping&gt;\n"
@@ -1111,6 +1113,65 @@ class TelegramControlPanel:
             f"Last Decision: <code>{last_decision.get('decision', 'n/a')}</code> | <code>{last_decision.get('reason', 'n/a')}</code>",
             f"Open Pos: <code>{rt.get('open_positions', len(rt.get('open_positions_detail') or []))}</code>",
         ]
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_diagfull(self, chat_id: str) -> None:
+        """
+        Erweiterte Diagnose mit den letzten Block-/Skip-Ereignissen aus Runtime-Logs.
+        """
+        rt = self._safe_runtime_status()
+        ctrl = runtime_control.get_snapshot()
+        gate = rt.get("risk_gate") or {}
+        selector = rt.get("selector") or {}
+        brain = rt.get("brain") or {}
+        last_decision = rt.get("last_decision") or {}
+        app_ctx = rt.get("app_context") or {}
+        runtime_logs = list(rt.get("recent_logs") or [])
+
+        startup_reason = (
+            gate.get("recovery_startup_reason")
+            or app_ctx.get("startup_block_reason")
+            or "none"
+        )
+        lines = [
+            "🧪 <b>DiagFull (No-Trade Deep Debug)</b>",
+            f"Running: <code>{rt.get('running', False)}</code> | Health: <code>{rt.get('health_status', 'n/a')}</code> | Mode: <code>{rt.get('mode', settings.TRADING_MODE)}</code>",
+            f"Pause/RiskOff: <code>{rt.get('paused', ctrl.get('paused'))}/{rt.get('risk_off', ctrl.get('risk_off'))}</code>",
+            f"Startup-Gate: <code>{'OK' if startup_reason in ('', 'none', None) else 'BLOCKED'}</code> | <code>{startup_reason}</code>",
+            f"Selector regime=<code>{selector.get('regime', 'n/a')}</code> | total/actionable/eligible=<code>{selector.get('candidates_total', 'n/a')}/{selector.get('actionable', 'n/a')}/{selector.get('eligible', 'n/a')}</code>",
+            f"Selector blocked regime/perf=<code>{selector.get('blocked_regime', 'n/a')}/{selector.get('blocked_perf', 'n/a')}</code> | winner=<code>{selector.get('winner') or 'none'}</code>",
+            f"Brain regime=<code>{brain.get('last_regime', 'n/a')}</code> | score=<code>{brain.get('last_signal_score', 'n/a')}</code> | risky=<code>{brain.get('risky_phase', 'n/a')}</code>",
+            f"Brain decision=<code>{brain.get('last_decision_reason', 'n/a')}</code>",
+            f"Risk gate last=<code>{gate.get('last_gate_reason', 'n/a')}</code> | live=<code>{gate.get('live_last_gate_reason', 'n/a')}</code>",
+            f"Last Decision: <code>{last_decision.get('decision', 'n/a')}</code> | <code>{last_decision.get('reason', 'n/a')}</code>",
+            "",
+            "<b>Letzte Block-/Skip-Events (max 5)</b>",
+        ]
+        interesting_markers = (
+            "BLOCK",
+            "blocked",
+            "skip",
+            "startup",
+            "risk_off",
+            "pause",
+            "MIN_WIN_CHANCE",
+            "selector_none",
+            "brain_score_too_low",
+            "brain_risky_phase_block",
+            "LIVE_GATE",
+            "DAILY LOSS",
+        )
+        filtered: List[str] = []
+        for entry in reversed(runtime_logs):
+            if any(marker in entry for marker in interesting_markers):
+                filtered.append(entry)
+            if len(filtered) >= 5:
+                break
+        if not filtered:
+            lines.append("- <code>Keine Block-/Skip-Events im Runtime-Log gefunden.</code>")
+        else:
+            for item in filtered:
+                lines.append(f"- <code>{item[:260]}</code>")
         self._send_text(chat_id, "\n".join(lines))
 
     def _send_status(self, chat_id: str) -> None:

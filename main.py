@@ -23,6 +23,8 @@ Hinweis:
 import argparse
 import sys
 import os
+import traceback
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -63,12 +65,46 @@ except ModuleNotFoundError:
                 body = "\n".join(self._rows)
                 return f"{self.title}\n{body}" if self.title else body
             return self.title
-from src.bot import TradingBot, MultiStrategyBot
-from src.app import TradingApplication
-from src.storage.trade_repository import TradeRepository
 from config.settings import settings
 
 console = Console()
+
+
+def _write_startup_crash_log(context: str, exc: BaseException) -> None:
+    """
+    Schreibt frühe Startfehler in eine lokale Datei, falls systemd/journal
+    keine verwertbare Ausgabe liefert.
+    """
+    timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = (
+        f"[{timestamp}] Startup failure in {context}\n"
+        f"{type(exc).__name__}: {exc}\n"
+        f"{traceback.format_exc()}\n"
+    )
+
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "startup_crash.log"),
+        "/tmp/krypto-bot-startup-crash.log",
+    ]
+    written_path = None
+    for path in candidates:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(payload)
+            written_path = path
+            break
+        except Exception:
+            continue
+
+    console.print(f"[red]Fataler Startfehler:[/red] {type(exc).__name__}: {exc}")
+    if written_path:
+        console.print(f"[yellow]Crash-Log geschrieben:[/yellow] {written_path}")
+    else:
+        console.print(
+            "[yellow]Crash-Log konnte nicht geschrieben werden "
+            "(fehlende Dateirechte?).[/yellow]"
+        )
 
 
 def _warn_if_no_env_file() -> None:
@@ -240,8 +276,18 @@ def show_status(bot):
     console.print(table)
 
     # Datenbank-Statistik (persistiert)
-    repo = TradeRepository()
-    db_stats = repo.get_summary_stats()
+    db_stats = None
+    recent = []
+    try:
+        from src.storage.trade_repository import TradeRepository
+        repo = TradeRepository()
+        db_stats = repo.get_summary_stats()
+        recent = repo.get_recent_trades(limit=5, status="closed")
+    except Exception as e:
+        console.print(
+            f"[yellow]DB-Status konnte nicht geladen werden:[/yellow] "
+            f"{type(e).__name__}: {e}"
+        )
     if db_stats:
         db_table = Table(title="Datenbank-Statistik (Gesamt)", border_style="green")
         db_table.add_column("Parameter", style="bold")
@@ -258,7 +304,6 @@ def show_status(bot):
         console.print(db_table)
 
     # Letzte 5 Trades aus DB
-    recent = repo.get_recent_trades(limit=5, status="closed")
     if recent:
         rt = Table(title="Letzte 5 abgeschlossene Trades", border_style="blue")
         for col in ["id", "timestamp_open", "symbol", "strategy_name", "side",
@@ -452,6 +497,13 @@ def _show_health() -> None:
 
 
 def main():
+    try:
+        from src.bot import TradingBot, MultiStrategyBot
+        from src.app import TradingApplication
+    except Exception as e:
+        _write_startup_crash_log("runtime-imports", e)
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="Krypto Trading Bot + Backtester",
         formatter_class=argparse.RawDescriptionHelpFormatter,

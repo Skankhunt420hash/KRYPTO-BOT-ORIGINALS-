@@ -371,7 +371,7 @@ class TelegramControlPanel:
                 self._send_diagfull(chat_id)
             elif cmd == "autoheal":
                 self._handle_autoheal(chat_id, text)
-            elif cmd == "testtrade":
+            elif cmd in ("testtrade", "testtrades"):
                 self._handle_testtrade(chat_id, text)
             elif cmd == "mode":
                 self._handle_mode_command(chat_id, text)

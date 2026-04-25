@@ -8,7 +8,7 @@ from src.exchange.connector import ExchangeConnector
 from src.exchange.universe import resolve_trading_pairs, format_pairs_for_log
 from src.engine.portfolio_risk import PortfolioRiskEngine, build_config_from_settings
 from src.strategies import get_strategy, get_all_enhanced_strategies, Signal
-from src.strategies.signal import Side
+from src.strategies.signal import Side, EnhancedSignal
 from src.engine.regime import RegimeEngine
 from src.engine.meta_selector import MetaSelector
 from src.engine.brain import IntelligenceBrain

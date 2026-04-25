@@ -359,6 +359,8 @@ class TelegramControlPanel:
                 self._send_help(chat_id)
             elif cmd == "status":
                 self._send_status(chat_id)
+            elif cmd == "diag":
+                self._send_diag(chat_id)
             elif cmd == "mode":
                 self._handle_mode_command(chat_id, text)
             elif cmd == "strategy":
@@ -624,7 +626,7 @@ class TelegramControlPanel:
         self._send_text(
             chat_id,
             "<b>KRYPTO-BOT Control Center</b>\n"
-            "📖 <b>Lesend</b>: /status /summary /analysis /brain /config /balance /positions /trades /risk /strategy /mode /logs\n"
+            "📖 <b>Lesend</b>: /status /diag /summary /analysis /brain /config /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping&gt;\n"
@@ -1077,6 +1079,39 @@ class TelegramControlPanel:
                 f"worst={day.get('worst_strategy') or 'n/a'}"
             )
         self._send_text(chat_id, "\n".join(parts))
+
+    def _send_diag(self, chat_id: str) -> None:
+        """
+        Kompakte Diagnose für "warum kein Trade?".
+        """
+        rt = self._safe_runtime_status()
+        ctrl = runtime_control.get_snapshot()
+        gate = rt.get("risk_gate") or {}
+        selector = rt.get("selector") or {}
+        brain = rt.get("brain") or {}
+        last_decision = rt.get("last_decision") or {}
+        app_ctx = rt.get("app_context") or {}
+
+        startup_reason = (
+            gate.get("recovery_startup_reason")
+            or app_ctx.get("startup_block_reason")
+            or "none"
+        )
+        lines = [
+            "🧪 <b>Diag (No-Trade Debug)</b>",
+            f"Running: <code>{rt.get('running', False)}</code> | Health: <code>{rt.get('health_status', 'n/a')}</code>",
+            f"Pause/RiskOff: <code>{rt.get('paused', ctrl.get('paused'))}/{rt.get('risk_off', ctrl.get('risk_off'))}</code>",
+            f"Startup-Gate: <code>{'OK' if startup_reason in ('', 'none', None) else 'BLOCKED'}</code>",
+            f"Startup-Reason: <code>{startup_reason}</code>",
+            f"Selector: total/actionable/eligible=<code>{selector.get('candidates_total', 'n/a')}/{selector.get('actionable', 'n/a')}/{selector.get('eligible', 'n/a')}</code>",
+            f"Selector blocked: regime/perf=<code>{selector.get('blocked_regime', 'n/a')}/{selector.get('blocked_perf', 'n/a')}</code>",
+            f"Brain: regime=<code>{brain.get('last_regime', 'n/a')}</code> score=<code>{brain.get('last_signal_score', 'n/a')}</code> risky=<code>{brain.get('risky_phase', 'n/a')}</code>",
+            f"Risk-Gate last: <code>{gate.get('last_gate_reason', 'n/a')}</code>",
+            f"Live-Gate last: <code>{gate.get('live_last_gate_reason', 'n/a')}</code>",
+            f"Last Decision: <code>{last_decision.get('decision', 'n/a')}</code> | <code>{last_decision.get('reason', 'n/a')}</code>",
+            f"Open Pos: <code>{rt.get('open_positions', len(rt.get('open_positions_detail') or []))}</code>",
+        ]
+        self._send_text(chat_id, "\n".join(lines))
 
     def _send_status(self, chat_id: str) -> None:
         rt = self._safe_runtime_status()

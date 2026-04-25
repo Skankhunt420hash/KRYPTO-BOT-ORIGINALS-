@@ -1042,10 +1042,15 @@ class MultiStrategyBot:
 
     def _startup_sanity_checks(self) -> List[str]:
         issues: List[str] = []
+        # Im Paper-Modus sind Exchange-/Ticker-Checks bewusst soft:
+        # temporäre API-Probleme sollen den Bot nicht dauerhaft hart blockieren.
+        if settings.TRADING_MODE != "live":
+            return issues
+
         markets: List[str] = []
         try:
             markets = self.exchange.get_markets()
-            if settings.TRADING_MODE == "live" and not markets:
+            if not markets:
                 issues.append("exchange_markets_unavailable")
         except Exception as e:
             issues.append(f"exchange_connection_failed:{type(e).__name__}")
@@ -1063,6 +1068,31 @@ class MultiStrategyBot:
         except Exception as e:
             issues.append(f"ticker_check_failed:{type(e).__name__}")
         return issues
+
+    def _reevaluate_startup_gate(self) -> bool:
+        """
+        Recheckt den Startup-Gate zur Laufzeit.
+        So wird ein temporärer Startfehler (z.B. Exchange kurz down) automatisch
+        aufgehoben, sobald die Infrastruktur wieder stabil ist.
+        """
+        issues = self._startup_sanity_checks()
+        if issues:
+            self._startup_checks_ok = False
+            reason = " | ".join(issues)
+            if reason != self._startup_block_reason:
+                self._startup_block_reason = reason
+                runtime_state.append_log(f"STARTUP_GATE still_blocked {reason}")
+                self.tg.notify_error("STARTUP_GATE", reason)
+            return False
+
+        if not self._startup_checks_ok:
+            runtime_state.append_log("STARTUP_GATE released")
+            logger.warning(
+                "[green]STARTUP-GATE aufgehoben[/green] – Trading-Zyklen laufen wieder normal."
+            )
+        self._startup_checks_ok = True
+        self._startup_block_reason = ""
+        return True
 
     def _recover_after_restart(self) -> None:
         self._restore_control_state_from_file()
@@ -1102,8 +1132,6 @@ class MultiStrategyBot:
         if issues:
             self._startup_checks_ok = False
             self._startup_block_reason = " | ".join(issues)
-            runtime_control.pause_entries()
-            runtime_control.enable_risk_off()
             runtime_state.append_log(f"RECOVERY startup_block {self._startup_block_reason}")
             self.tg.notify_error("RECOVERY_STARTUP_BLOCK", self._startup_block_reason)
         else:
@@ -2038,7 +2066,7 @@ class MultiStrategyBot:
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
-        if not self._startup_checks_ok:
+        if not self._startup_checks_ok and not self._reevaluate_startup_gate():
             reason = self._startup_block_reason or "startup_checks_failed"
             logger.error(
                 f"[red]STARTUP-GATE AKTIV[/red] – Zyklus übersprungen | Grund: {reason}"

@@ -798,6 +798,13 @@ class TradingBot:
                 settings.CONTROL_STRATEGY_PRIORITY_BONUS = val
                 changed.append(f"CONTROL_STRATEGY_PRIORITY_BONUS={val:.3f}")
 
+            if "min_expectancy_pct" in changes:
+                val = float(changes["min_expectancy_pct"])
+                if not (-100.0 <= val <= 100.0):
+                    return False, "min_expectancy_pct muss zwischen -100 und 100 liegen."
+                settings.MIN_EXPECTANCY_R = val / 100.0
+                changed.append(f"MIN_EXPECTANCY_R={settings.MIN_EXPECTANCY_R:.3f}")
+
             if not changed:
                 return False, "Keine gültigen Runtime-Änderungen übergeben."
 
@@ -1807,6 +1814,13 @@ class MultiStrategyBot:
                 strategy_name=best.strategy_name,
                 perf_tracker=self.perf_tracker,
             )
+            # Erwartungswert-Gate:
+            # expectancy_r = p*RR - (1-p)
+            # p = Gewinnwahrscheinlichkeit in [0,1]
+            # Nur Trades mit positivem Erwartungswert zulassen.
+            p_est = max(0.0, min(1.0, wc_gate_m / 100.0))
+            expectancy_r = (p_est * float(best.rr)) - (1.0 - p_est)
+            min_expectancy = float(getattr(settings, "MIN_EXPECTANCY_R", 0.0) or 0.0)
             if wc_gate_m < min_wc:
                 reason_wc = f"MIN_WIN_CHANCE:{wc_gate_m:.1f}<{min_wc:.0f}"
                 logger.info(
@@ -1842,6 +1856,44 @@ class MultiStrategyBot:
                     allow_trade=False,
                     reject_reason=reason_wc,
                     last_decision_reason=reason_wc,
+                    market_context=market_ctx,
+                )
+                return
+            if expectancy_r < min_expectancy:
+                reason_ex = f"MIN_EXPECTANCY:{expectancy_r:.3f}<{min_expectancy:.3f}"
+                logger.info(
+                    f"[yellow]SKIP Erwartungswert[/yellow] {symbol} | "
+                    f"Strategie: {best.strategy_name} | E={expectancy_r:.3f} < {min_expectancy:.3f}"
+                )
+                self.repo.save_rejected_signal(
+                    symbol=symbol,
+                    timeframe=best.timeframe,
+                    strategy_name=best.strategy_name,
+                    side=best.side.value,
+                    entry_price=best.entry,
+                    stop_loss=best.stop_loss,
+                    take_profit=best.take_profit,
+                    rr_planned=best.rr,
+                    confidence=best.confidence,
+                    regime=best.regime,
+                    reason_rejected=reason_ex,
+                )
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="blocked_expectancy",
+                    reason=reason_ex,
+                    strategy=best.strategy_name,
+                )
+                self._log_decision_cycle(
+                    symbol=symbol,
+                    regime=regime.value,
+                    ranking=ranking,
+                    chosen_strategy=best.strategy_name,
+                    signal_score=signal_score,
+                    risk_decision="expectancy_block",
+                    allow_trade=False,
+                    reject_reason=reason_ex,
+                    last_decision_reason=reason_ex,
                     market_context=market_ctx,
                 )
                 return
@@ -2540,6 +2592,13 @@ class MultiStrategyBot:
                     return False, "control_strategy_priority_bonus muss zwischen 0.0 und 0.5 liegen."
                 settings.CONTROL_STRATEGY_PRIORITY_BONUS = val
                 changed.append(f"CONTROL_STRATEGY_PRIORITY_BONUS={val:.3f}")
+
+            if "min_expectancy_pct" in changes:
+                val = float(changes["min_expectancy_pct"])
+                if not (-100.0 <= val <= 100.0):
+                    return False, "min_expectancy_pct muss zwischen -100 und 100 liegen."
+                settings.MIN_EXPECTANCY_R = val / 100.0
+                changed.append(f"MIN_EXPECTANCY_R={settings.MIN_EXPECTANCY_R:.3f}")
 
             if not changed:
                 return False, "Keine gültigen Runtime-Änderungen übergeben."

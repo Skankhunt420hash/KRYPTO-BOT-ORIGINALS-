@@ -809,6 +809,7 @@ class TelegramControlPanel:
             "min_win_chance": ("min_win_chance_pct", float, 0.0, 100.0),
             "min_historical_wr": ("min_historical_win_rate_pct", float, 0.0, 100.0),
             "perf_min_trades": ("perf_tracker_min_trades", int, 1, 500),
+            "min_expectancy": ("min_expectancy_pct", float, -100.0, 100.0),
         }
         if key not in mapping:
             self._send_text(chat_id, f"Unbekannter setbrain-Key: {key}")
@@ -938,8 +939,8 @@ class TelegramControlPanel:
                 "max_positions_total": 8,
             },
             "hf75": {
-                # Ziel: mehr Entries bei großer Universe-Scanrate, aber 75%-Qualitätsgate.
-                # Historische WR-Hardsperre bleibt aus, damit der Bot nicht komplett dichtmacht.
+                # Ziel: mehr Entries bei großer Universe-Scanrate, aber 75%-Qualitätsgate
+                # + positives Erwartungswert-Gate (mathematischer Vorteil je Trade).
                 "min_confidence": 32.0,
                 "min_rr": 1.15,
                 "brain_min_score_to_trade": 0.24,
@@ -954,7 +955,8 @@ class TelegramControlPanel:
                 "duplicate_signal_minutes": 1,
                 "min_win_chance_pct": 75.0,
                 "min_historical_win_rate_pct": 0.0,
-                "perf_tracker_min_trades": 30,
+                "perf_tracker_min_trades": 12,
+                "min_expectancy_r": 0.05,
             },
             "highfreq75": {
                 "min_confidence": 32.0,
@@ -971,7 +973,8 @@ class TelegramControlPanel:
                 "duplicate_signal_minutes": 1,
                 "min_win_chance_pct": 75.0,
                 "min_historical_win_rate_pct": 0.0,
-                "perf_tracker_min_trades": 30,
+                "perf_tracker_min_trades": 12,
+                "min_expectancy_r": 0.05,
             },
         }
 

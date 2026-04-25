@@ -106,6 +106,11 @@ class Settings:
     MIN_HISTORICAL_WIN_RATE_PCT: float = float(
         os.getenv("MIN_HISTORICAL_WIN_RATE_PCT", "0")
     )
+    # Mindest-Expectancy pro Trade:
+    # E = p*RR - (1-p), mit p = effektive Gewinnchance [0..1].
+    # > 0 bedeutet positiver Erwartungswert.
+    # 0 = aus.
+    MIN_EXPECTANCY_SCORE: float = float(os.getenv("MIN_EXPECTANCY_SCORE", "0"))
 
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)

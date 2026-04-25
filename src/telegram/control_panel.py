@@ -370,10 +370,6 @@ class TelegramControlPanel:
                 self._send_diagfull(chat_id)
             elif cmd == "autoheal":
                 self._handle_autoheal(chat_id, text)
-            elif cmd == "diagfull":
-                self._send_diagfull(chat_id)
-            elif cmd == "autoheal":
-                self._handle_autoheal(chat_id, text)
             elif cmd == "mode":
                 self._handle_mode_command(chat_id, text)
             elif cmd == "strategy":
@@ -643,7 +639,7 @@ class TelegramControlPanel:
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🩹 <b>Auto-Heal</b>: /autoheal status | /autoheal on | /autoheal off | /autoheal now\n"
-            "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping&gt;\n"
+            "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping|highfreq75&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "ℹ️ /botrestart nutzt Callback oder automatisch Stop+Start-Fallback.\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
@@ -796,7 +792,7 @@ class TelegramControlPanel:
             self._send_text(
                 chat_id,
                 "Verwendung: /setbrain <key> <value>\n"
-                "Keys: min_score, risky_score, perf_weight, priority_bonus, reward_weight, reward_window, min_confidence, min_rr"
+                "Keys: min_score, risky_score, perf_weight, priority_bonus, reward_weight, reward_window, min_confidence, min_rr, min_win_chance, min_historical_wr, perf_min_trades"
             )
             return
         key = parts[1].strip().lower()
@@ -810,6 +806,9 @@ class TelegramControlPanel:
             "reward_window": ("reward_window", int, 2, 50),
             "min_confidence": ("min_confidence", float, 0.0, 100.0),
             "min_rr": ("min_rr", float, 0.0, 10.0),
+            "min_win_chance": ("min_win_chance_pct", float, 0.0, 100.0),
+            "min_historical_wr": ("min_historical_win_rate_pct", float, 0.0, 100.0),
+            "perf_min_trades": ("perf_tracker_min_trades", int, 1, 500),
         }
         if key not in mapping:
             self._send_text(chat_id, f"Unbekannter setbrain-Key: {key}")
@@ -839,7 +838,7 @@ class TelegramControlPanel:
                 chat_id,
                 "Verwendung: /setrisk <key> <value>\n"
                 "Keys: risk_per_trade, max_open_risk, max_positions, "
-                "max_notional, min_notional, daily_loss_limit_pct, live_daily_loss_limit_pct"
+                "max_notional, min_notional, daily_loss_limit_pct, live_daily_loss_limit_pct, coin_cooldown_minutes, strategy_cooldown_minutes, duplicate_signal_minutes"
             )
             return
         key = parts[1].strip().lower()
@@ -855,6 +854,9 @@ class TelegramControlPanel:
             "daily_loss": ("daily_loss_limit_pct", float, 0.1, 100.0),
             "daily_limit_pct": ("daily_loss_limit_pct", float, 0.1, 100.0),
             "live_daily_loss_limit_pct": ("live_test_daily_loss_limit_pct", float, 0.1, 100.0),
+            "coin_cooldown_minutes": ("coin_cooldown_minutes", int, 0, 240),
+            "strategy_cooldown_minutes": ("strategy_cooldown_minutes", int, 0, 240),
+            "duplicate_signal_minutes": ("duplicate_signal_minutes", int, 0, 180),
         }
         if key not in mapping:
             self._send_text(chat_id, f"Unbekannter setrisk-Key: {key}")
@@ -935,6 +937,23 @@ class TelegramControlPanel:
                 "max_total_open_risk_pct": 12.0,
                 "max_positions_total": 8,
             },
+            "hf75": {
+                # Ziel: mehr Entries, aber mit harter Qualitäts-Schwelle von 75%.
+                "min_confidence": 28.0,
+                "min_rr": 1.1,
+                "brain_min_score_to_trade": 0.26,
+                "brain_risky_phase_score": 0.18,
+                "perf_selector_weight": 0.10,
+                "reward_weight": 0.12,
+                "risk_per_trade_pct": 0.7,
+                "max_total_open_risk_pct": 12.0,
+                "max_positions_total": 10,
+                "coin_cooldown_minutes": 5,
+                "strategy_cooldown_minutes": 3,
+                "duplicate_signal_minutes": 2,
+                "min_win_chance_pct": 75.0,
+                "min_historical_win_rate_pct": 75.0,
+            },
         }
 
     def _send_profiles(self, chat_id: str) -> None:
@@ -942,6 +961,7 @@ class TelegramControlPanel:
         lines = [
             "🎚 <b>Luxus Profile</b>",
             "Wähle per <code>/setprofile &lt;name&gt;</code>:",
+            "Neu: <code>hf75</code> = mehr Entries + 75% Qualitätsgate",
             "",
         ]
         for name, values in presets.items():

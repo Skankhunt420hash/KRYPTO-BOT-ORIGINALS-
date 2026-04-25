@@ -714,6 +714,48 @@ class TradingBot:
                 settings.MIN_RR = val
                 changed.append(f"MIN_RR={val:.2f}")
 
+            if "min_win_chance_pct" in changes:
+                val = float(changes["min_win_chance_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_win_chance_pct muss zwischen 0 und 100 liegen."
+                settings.MIN_WIN_CHANCE_PCT = val
+                changed.append(f"MIN_WIN_CHANCE_PCT={val:.1f}")
+
+            if "min_historical_win_rate_pct" in changes:
+                val = float(changes["min_historical_win_rate_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_historical_win_rate_pct muss zwischen 0 und 100 liegen."
+                settings.MIN_HISTORICAL_WIN_RATE_PCT = val
+                changed.append(f"MIN_HISTORICAL_WIN_RATE_PCT={val:.1f}")
+
+            if "perf_tracker_min_trades" in changes:
+                val = int(changes["perf_tracker_min_trades"])
+                if not (1 <= val <= 500):
+                    return False, "perf_tracker_min_trades muss zwischen 1 und 500 liegen."
+                settings.PERF_TRACKER_MIN_TRADES = val
+                changed.append(f"PERF_TRACKER_MIN_TRADES={val}")
+
+            if "coin_cooldown_minutes" in changes:
+                val = int(changes["coin_cooldown_minutes"])
+                if not (0 <= val <= 240):
+                    return False, "coin_cooldown_minutes muss zwischen 0 und 240 liegen."
+                settings.COIN_COOLDOWN_MINUTES = val
+                changed.append(f"COIN_COOLDOWN_MINUTES={val}")
+
+            if "strategy_cooldown_minutes" in changes:
+                val = int(changes["strategy_cooldown_minutes"])
+                if not (0 <= val <= 240):
+                    return False, "strategy_cooldown_minutes muss zwischen 0 und 240 liegen."
+                settings.STRATEGY_COOLDOWN_MINUTES = val
+                changed.append(f"STRATEGY_COOLDOWN_MINUTES={val}")
+
+            if "duplicate_signal_minutes" in changes:
+                val = int(changes["duplicate_signal_minutes"])
+                if not (0 <= val <= 120):
+                    return False, "duplicate_signal_minutes muss zwischen 0 und 120 liegen."
+                settings.DUPLICATE_SIGNAL_MINUTES = val
+                changed.append(f"DUPLICATE_SIGNAL_MINUTES={val}")
+
             if "brain_min_score_to_trade" in changes:
                 val = float(changes["brain_min_score_to_trade"])
                 if not (0.1 <= val <= 0.95):
@@ -2414,6 +2456,48 @@ class MultiStrategyBot:
                     return False, "min_rr muss zwischen 0.5 und 6.0 liegen."
                 settings.MIN_RR = val
                 changed.append(f"MIN_RR={val:.2f}")
+
+            if "min_win_chance_pct" in changes:
+                val = float(changes["min_win_chance_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_win_chance_pct muss zwischen 0 und 100 liegen."
+                settings.MIN_WIN_CHANCE_PCT = val
+                changed.append(f"MIN_WIN_CHANCE_PCT={val:.1f}")
+
+            if "min_historical_win_rate_pct" in changes:
+                val = float(changes["min_historical_win_rate_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_historical_win_rate_pct muss zwischen 0 und 100 liegen."
+                settings.MIN_HISTORICAL_WIN_RATE_PCT = val
+                changed.append(f"MIN_HISTORICAL_WIN_RATE_PCT={val:.1f}")
+
+            if "perf_tracker_min_trades" in changes:
+                val = int(changes["perf_tracker_min_trades"])
+                if not (1 <= val <= 500):
+                    return False, "perf_tracker_min_trades muss zwischen 1 und 500 liegen."
+                settings.PERF_TRACKER_MIN_TRADES = val
+                changed.append(f"PERF_TRACKER_MIN_TRADES={val}")
+
+            if "coin_cooldown_minutes" in changes:
+                val = int(changes["coin_cooldown_minutes"])
+                if not (0 <= val <= 240):
+                    return False, "coin_cooldown_minutes muss zwischen 0 und 240 liegen."
+                settings.COIN_COOLDOWN_MINUTES = val
+                changed.append(f"COIN_COOLDOWN_MINUTES={val}")
+
+            if "strategy_cooldown_minutes" in changes:
+                val = int(changes["strategy_cooldown_minutes"])
+                if not (0 <= val <= 240):
+                    return False, "strategy_cooldown_minutes muss zwischen 0 und 240 liegen."
+                settings.STRATEGY_COOLDOWN_MINUTES = val
+                changed.append(f"STRATEGY_COOLDOWN_MINUTES={val}")
+
+            if "duplicate_signal_minutes" in changes:
+                val = int(changes["duplicate_signal_minutes"])
+                if not (0 <= val <= 120):
+                    return False, "duplicate_signal_minutes muss zwischen 0 und 120 liegen."
+                settings.DUPLICATE_SIGNAL_MINUTES = val
+                changed.append(f"DUPLICATE_SIGNAL_MINUTES={val}")
 
             if "brain_min_score_to_trade" in changes:
                 val = float(changes["brain_min_score_to_trade"])

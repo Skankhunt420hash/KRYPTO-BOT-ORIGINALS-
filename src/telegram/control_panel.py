@@ -639,7 +639,7 @@ class TelegramControlPanel:
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🩹 <b>Auto-Heal</b>: /autoheal status | /autoheal on | /autoheal off | /autoheal now\n"
-            "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping|highfreq75&gt;\n"
+            "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "ℹ️ /botrestart nutzt Callback oder automatisch Stop+Start-Fallback.\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
@@ -938,21 +938,40 @@ class TelegramControlPanel:
                 "max_positions_total": 8,
             },
             "hf75": {
-                # Ziel: mehr Entries, aber mit harter Qualitäts-Schwelle von 75%.
-                "min_confidence": 28.0,
-                "min_rr": 1.1,
-                "brain_min_score_to_trade": 0.26,
+                # Ziel: mehr Entries bei großer Universe-Scanrate, aber 75%-Qualitätsgate.
+                # Historische WR-Hardsperre bleibt aus, damit der Bot nicht komplett dichtmacht.
+                "min_confidence": 32.0,
+                "min_rr": 1.15,
+                "brain_min_score_to_trade": 0.24,
                 "brain_risky_phase_score": 0.18,
                 "perf_selector_weight": 0.10,
                 "reward_weight": 0.12,
                 "risk_per_trade_pct": 0.7,
                 "max_total_open_risk_pct": 12.0,
                 "max_positions_total": 10,
-                "coin_cooldown_minutes": 5,
-                "strategy_cooldown_minutes": 3,
-                "duplicate_signal_minutes": 2,
+                "coin_cooldown_minutes": 2,
+                "strategy_cooldown_minutes": 1,
+                "duplicate_signal_minutes": 1,
                 "min_win_chance_pct": 75.0,
-                "min_historical_win_rate_pct": 75.0,
+                "min_historical_win_rate_pct": 0.0,
+                "perf_tracker_min_trades": 30,
+            },
+            "highfreq75": {
+                "min_confidence": 32.0,
+                "min_rr": 1.15,
+                "brain_min_score_to_trade": 0.24,
+                "brain_risky_phase_score": 0.18,
+                "perf_selector_weight": 0.10,
+                "reward_weight": 0.12,
+                "risk_per_trade_pct": 0.7,
+                "max_total_open_risk_pct": 12.0,
+                "max_positions_total": 10,
+                "coin_cooldown_minutes": 2,
+                "strategy_cooldown_minutes": 1,
+                "duplicate_signal_minutes": 1,
+                "min_win_chance_pct": 75.0,
+                "min_historical_win_rate_pct": 0.0,
+                "perf_tracker_min_trades": 30,
             },
         }
 
@@ -961,7 +980,7 @@ class TelegramControlPanel:
         lines = [
             "🎚 <b>Luxus Profile</b>",
             "Wähle per <code>/setprofile &lt;name&gt;</code>:",
-            "Neu: <code>hf75</code> = mehr Entries + 75% Qualitätsgate",
+            "Neu: <code>hf75</code> / <code>highfreq75</code> = mehr Entries + 75% Qualitätsgate",
             "",
         ]
         for name, values in presets.items():
@@ -981,11 +1000,13 @@ class TelegramControlPanel:
         if len(parts) < 2:
             self._send_text(
                 chat_id,
-                "Verwendung: /setprofile <defensive|balanced|aggressive|sniper|scalping>\n"
+                "Verwendung: /setprofile <defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75>\n"
                 "Nutze /profiles für die Übersicht."
             )
             return
         name = parts[1].strip().lower()
+        if name == "highfreq75":
+            name = "hf75"
         presets = self._profile_presets()
         payload = presets.get(name)
         if payload is None:

@@ -69,6 +69,7 @@ class PanelCallbacks:
     request_bot_restart: Optional[Callable[[], Tuple[bool, str]]] = None
     get_bot_status: Optional[Callable[[], Dict]] = None
     apply_runtime_settings: Optional[Callable[[Dict[str, Any]], Tuple[bool, str]]] = None
+    request_test_trade: Optional[Callable[[], Tuple[bool, str]]] = None
 
 
 class TelegramControlPanel:
@@ -370,6 +371,8 @@ class TelegramControlPanel:
                 self._send_diagfull(chat_id)
             elif cmd == "autoheal":
                 self._handle_autoheal(chat_id, text)
+            elif cmd == "testtrade":
+                self._handle_testtrade(chat_id, text)
             elif cmd == "mode":
                 self._handle_mode_command(chat_id, text)
             elif cmd == "strategy":
@@ -636,7 +639,7 @@ class TelegramControlPanel:
             chat_id,
             "<b>KRYPTO-BOT Control Center</b>\n"
             "📖 <b>Lesend</b>: /status /diag /diagfull /summary /analysis /brain /config /balance /positions /trades /risk /strategy /mode /logs\n"
-            "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
+            "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff /testtrade\n"
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🩹 <b>Auto-Heal</b>: /autoheal status | /autoheal on | /autoheal off | /autoheal now\n"
             "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75&gt;\n"

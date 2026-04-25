@@ -1,7 +1,12 @@
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    # Optional dependency fallback: service should still boot with pure env vars.
+    def load_dotenv(*args, **kwargs):
+        return False
 
 # .env immer relativ zum Projekt-Root laden (nicht vom aktuellen cwd abhängig).
 # Das verhindert stille Fallbacks auf Defaults, wenn der Bot via systemd/Controller

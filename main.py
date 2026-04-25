@@ -26,10 +26,43 @@ import os
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from rich import box
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+except ModuleNotFoundError:
+    class _SimpleBox:
+        ROUNDED = None
+
+    box = _SimpleBox()
+
+    class Console:  # type: ignore[override]
+        def print(self, *args, **kwargs):
+            text = " ".join(str(a) for a in args)
+            print(text)
+
+    class Panel:  # type: ignore[override]
+        @staticmethod
+        def fit(content, border_style=None):
+            return content
+
+    class Table:  # type: ignore[override]
+        def __init__(self, title=None, border_style=None, box=None):
+            self.title = title or ""
+            self._rows = []
+
+        def add_column(self, *args, **kwargs):
+            return None
+
+        def add_row(self, *args, **kwargs):
+            self._rows.append(" | ".join(str(a) for a in args))
+
+        def __str__(self):
+            if self._rows:
+                body = "\n".join(self._rows)
+                return f"{self.title}\n{body}" if self.title else body
+            return self.title
 from src.bot import TradingBot, MultiStrategyBot
 from src.app import TradingApplication
 from src.storage.trade_repository import TradeRepository

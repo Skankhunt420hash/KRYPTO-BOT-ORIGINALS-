@@ -67,7 +67,7 @@ class TradingBot:
                 request_bot_restart=self._request_restart_from_panel,
                 get_bot_status=self._bot_status_from_panel,
                 apply_runtime_settings=self._apply_runtime_settings_from_panel,
-                trigger_test_trade=self._trigger_test_trade_from_panel,
+                request_test_trade=self._trigger_test_trade_from_panel,
             ),
         )
         self.running = False
@@ -1023,7 +1023,7 @@ class MultiStrategyBot:
                 request_bot_restart=self._request_restart_from_panel,
                 get_bot_status=self._bot_status_from_panel,
                 apply_runtime_settings=self._apply_runtime_settings_from_panel,
-                request_test_trade=self._request_test_trade_from_panel,
+                request_test_trade=self._trigger_test_trade_from_panel,
             ),
         )
 

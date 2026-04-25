@@ -127,6 +127,11 @@ class TelegramControlPanel:
         self._thread: Optional[threading.Thread] = None
         self._poll_fail_streak: int = 0
         self._last_conflict_warn_ts: float = 0.0
+        self._autoheal_enabled: bool = False
+        self._autoheal_cooldown_sec: int = int(
+            getattr(settings, "TELEGRAM_AUTOHEAL_COOLDOWN_SEC", 900)
+        )
+        self._last_autoheal_ts: float = 0.0
         token_state = "set" if bool(self._token) else "missing"
         chat_state = "set" if bool(self._chat_id) else "missing"
         logger.info(
@@ -363,6 +368,12 @@ class TelegramControlPanel:
                 self._send_diag(chat_id)
             elif cmd == "diagfull":
                 self._send_diagfull(chat_id)
+            elif cmd == "autoheal":
+                self._handle_autoheal(chat_id, text)
+            elif cmd == "diagfull":
+                self._send_diagfull(chat_id)
+            elif cmd == "autoheal":
+                self._handle_autoheal(chat_id, text)
             elif cmd == "mode":
                 self._handle_mode_command(chat_id, text)
             elif cmd == "strategy":
@@ -631,6 +642,7 @@ class TelegramControlPanel:
             "📖 <b>Lesend</b>: /status /diag /diagfull /summary /analysis /brain /config /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
+            "🩹 <b>Auto-Heal</b>: /autoheal status | /autoheal on | /autoheal off | /autoheal now\n"
             "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "ℹ️ /botrestart nutzt Callback oder automatisch Stop+Start-Fallback.\n"
@@ -1575,6 +1587,91 @@ class TelegramControlPanel:
         self._send_text(
             chat_id,
             "🟢 Risk-Off deaktiviert. Neue Entries sind wieder möglich (wenn Risk-Regeln erfüllt)."
+        )
+
+    def _autoheal_status_text(self) -> str:
+        return (
+            f"enabled={self._autoheal_enabled} "
+            f"cooldown={self._autoheal_cooldown_sec}s "
+            f"last_action_ts={int(self._last_autoheal_ts) if self._last_autoheal_ts else 0}"
+        )
+
+    def _can_autoheal_now(self) -> Tuple[bool, str]:
+        now = time.monotonic()
+        if now - self._last_autoheal_ts < self._autoheal_cooldown_sec:
+            wait_left = int(self._autoheal_cooldown_sec - (now - self._last_autoheal_ts))
+            return False, f"cooldown_active:{wait_left}s"
+
+        if Path(settings.KILL_SWITCH_FILE).exists():
+            return False, "kill_switch_active"
+
+        ctrl = runtime_control.get_snapshot()
+        if bool(ctrl.get("paused")):
+            return True, "resume_entries"
+        if bool(ctrl.get("risk_off")):
+            return True, "disable_risk_off"
+        return False, "nothing_to_heal"
+
+    def _run_autoheal(self, source: str) -> Tuple[bool, str]:
+        ok, action = self._can_autoheal_now()
+        if not ok:
+            return False, action
+
+        if action == "resume_entries":
+            runtime_control.resume_entries()
+            runtime_state.update_engine(paused=False)
+            runtime_state.append_log(f"AUTOHEAL resume_entries source={source}")
+            try:
+                self._notifier.notify_bot_resumed(f"autoheal:{source}")
+            except Exception:
+                pass
+            self._last_autoheal_ts = time.monotonic()
+            return True, "pause_aufgehoben"
+
+        if action == "disable_risk_off":
+            runtime_control.disable_risk_off()
+            runtime_state.update_engine(risk_off=False)
+            runtime_state.append_log(f"AUTOHEAL risk_on source={source}")
+            try:
+                self._notifier.notify_risk_off(False, f"autoheal:{source}")
+            except Exception:
+                pass
+            self._last_autoheal_ts = time.monotonic()
+            return True, "risk_off_deaktiviert"
+
+        return False, "nothing_to_heal"
+
+    def _handle_autoheal(self, chat_id: str, text: str) -> None:
+        parts = self._split_command_parts(text)
+        mode = parts[1].strip().lower() if len(parts) > 1 else "status"
+
+        if mode in ("status", "state"):
+            self._send_text(chat_id, f"🩹 AutoHeal: <code>{self._autoheal_status_text()}</code>")
+            return
+
+        if mode in ("on", "enable", "1", "true"):
+            self._autoheal_enabled = True
+            runtime_state.append_log("TELEGRAM /autoheal on")
+            self._send_text(chat_id, f"✅ AutoHeal aktiviert.\n<code>{self._autoheal_status_text()}</code>")
+            return
+
+        if mode in ("off", "disable", "0", "false"):
+            self._autoheal_enabled = False
+            runtime_state.append_log("TELEGRAM /autoheal off")
+            self._send_text(chat_id, f"⏸ AutoHeal deaktiviert.\n<code>{self._autoheal_status_text()}</code>")
+            return
+
+        if mode in ("now", "run", "heal"):
+            ok, msg = self._run_autoheal("telegram_manual")
+            if ok:
+                self._send_text(chat_id, f"✅ AutoHeal ausgeführt: <code>{msg}</code>")
+            else:
+                self._send_text(chat_id, f"ℹ️ AutoHeal nicht ausgeführt: <code>{msg}</code>")
+            return
+
+        self._send_text(
+            chat_id,
+            "Verwendung: /autoheal <on|off|status|now>",
         )
 
     def _handle_killswitch_on(self, chat_id: str) -> None:

@@ -24,7 +24,7 @@ import argparse
 import sys
 import os
 import traceback
-from datetime import datetime
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
@@ -65,6 +65,49 @@ except ModuleNotFoundError:
                 body = "\n".join(self._rows)
                 return f"{self.title}\n{body}" if self.title else body
             return self.title
+def _is_running_in_venv() -> bool:
+    return bool(
+        os.getenv("VIRTUAL_ENV")
+        or getattr(sys, "base_prefix", sys.prefix) != sys.prefix
+    )
+
+
+def _project_venv_python() -> str:
+    root = os.path.dirname(os.path.abspath(__file__))
+    candidates = (
+        os.path.join(root, ".venv", "bin", "python"),
+        os.path.join(root, "venv", "bin", "python"),
+    )
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return ""
+
+
+def _maybe_reexec_into_project_venv() -> None:
+    """
+    systemd startet manchmal mit dem falschen Python-Interpreter.
+    Falls eine Projekt-venv existiert und wir nicht darin laufen, re-exec.
+    """
+    if os.getenv("KRYPTO_BOT_SKIP_VENV_REEXEC") == "1":
+        return
+    if _is_running_in_venv():
+        return
+    target = _project_venv_python()
+    if not target:
+        return
+    try:
+        if os.path.realpath(sys.executable) == os.path.realpath(target):
+            return
+    except Exception:
+        # Bei ungewöhnlichen Dateisystemen konservativ weiter versuchen.
+        pass
+    os.environ["KRYPTO_BOT_SKIP_VENV_REEXEC"] = "1"
+    os.execv(target, [target, *sys.argv])
+
+
+_maybe_reexec_into_project_venv()
+
 from config.settings import settings
 
 console = Console()
@@ -75,7 +118,7 @@ def _write_startup_crash_log(context: str, exc: BaseException) -> None:
     Schreibt frühe Startfehler in eine lokale Datei, falls systemd/journal
     keine verwertbare Ausgabe liefert.
     """
-    timestamp = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     payload = (
         f"[{timestamp}] Startup failure in {context}\n"
         f"{type(exc).__name__}: {exc}\n"

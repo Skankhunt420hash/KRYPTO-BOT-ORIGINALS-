@@ -2683,6 +2683,111 @@ class MultiStrategyBot:
             "pidfile": "inprocess:multi-strategy-bot",
         }
 
+    def _trigger_test_trade_from_panel(self) -> Tuple[bool, str]:
+        """
+        Führt im Multi-Bot einen kontrollierten Test-Trade aus.
+        Sicherheitsgrenze: nur im Paper-Modus erlaubt.
+        """
+        if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
+            return False, "Test-Trade ist nur im Paper-Modus erlaubt."
+        if not self.pairs:
+            return False, "Keine Trading-Paare konfiguriert."
+        symbol = str(self.pairs[0]).strip()
+        if not symbol:
+            return False, "Erstes Trading-Paar ist leer."
+
+        try:
+            df = self.exchange.fetch_ohlcv(symbol, limit=2)
+            if df.empty:
+                return False, f"Keine Marktdaten für {symbol}."
+            entry = float(df["close"].iloc[-1])
+            if entry <= 0:
+                return False, f"Ungültiger Marktpreis für {symbol}: {entry}"
+
+            amount = float(self.risk.calculate_position_size(entry))
+            if amount <= 0:
+                return False, "Berechnete Positionsgröße ist 0."
+
+            stop_loss = entry * 0.99
+            take_profit = entry * 1.02
+            rr = (take_profit - entry) / max(entry - stop_loss, 1e-9)
+
+            order = self.exchange.create_market_buy_order(symbol, amount)
+            if not order:
+                return False, "Order konnte nicht ausgeführt werden."
+
+            signal = EnhancedSignal(
+                symbol=symbol,
+                timeframe=settings.TIMEFRAME,
+                strategy_name="TelegramTest",
+                side=Side.LONG,
+                confidence=99.0,
+                entry=entry,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                rr=round(rr, 2),
+                reason="telegram_test_trade",
+                regime="TEST",
+            )
+            pos = self.risk.open_with_signal(signal, amount)
+            if pos is None:
+                return False, "RiskEngine hat Position nicht geöffnet."
+
+            trade_id = self.repo.save_open_trade(
+                symbol=symbol,
+                timeframe=settings.TIMEFRAME,
+                strategy_name="TelegramTest",
+                side="long",
+                entry_price=entry,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                position_size=amount,
+                rr_planned=round(rr, 2),
+                confidence=99.0,
+                regime="TEST",
+                reason_open="telegram_test_trade",
+                signal_score=0.99,
+                risk_state_at_entry=self._risk_state_at_entry_snapshot(),
+                order_id=str(order.get("id", "")),
+            )
+            if trade_id:
+                self._open_trade_ids[symbol] = trade_id
+
+            self.tg.notify_trade_opened(
+                symbol=symbol,
+                side="long",
+                entry=entry,
+                sl=stop_loss,
+                tp=take_profit,
+                rr=round(rr, 2),
+                amount=amount,
+                strategy="TelegramTest",
+                confidence=99.0,
+                regime="TEST",
+                is_paper=True,
+                brain_score=None,
+            )
+            self._record_trade_event(
+                event="opened",
+                symbol=symbol,
+                side="long",
+                strategy="TelegramTest",
+                pnl=None,
+                reason="telegram_test_trade",
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="entry_opened_testtrade",
+                reason="telegram_test_trade",
+                strategy="TelegramTest",
+            )
+            return True, (
+                f"Test-Trade eröffnet: {symbol} | entry={entry:.4f} | amount={amount:.6f} | "
+                f"SL={stop_loss:.4f} TP={take_profit:.4f}"
+            )
+        except Exception as e:
+            return False, f"Test-Trade fehlgeschlagen: {type(e).__name__}"
+
     def _apply_runtime_settings_from_panel(self, changes: Dict[str, float]) -> Tuple[bool, str]:
         """
         Kontrolliertes Live-Tuning aus Telegram für den Multi-Bot.

@@ -133,7 +133,7 @@ class TelegramControlPanel:
             getattr(settings, "TELEGRAM_AUTOHEAL_COOLDOWN_SEC", 900)
         )
         self._last_autoheal_ts: float = 0.0
-        self._ampel_auto_enabled: bool = bool(getattr(settings, "AMPEL_AUTO_ENABLED", False))
+        self._ampel_auto_enabled: bool = bool(getattr(settings, "AMPEL_AUTO_ENABLED", True))
         self._ampel_auto_interval_sec: int = int(
             getattr(settings, "AMPEL_AUTO_INTERVAL_SEC", 180)
         )

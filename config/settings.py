@@ -161,7 +161,7 @@ class Settings:
     AMPEL_GREEN_MAX_LOSING_STREAK: int = int(
         os.getenv("AMPEL_GREEN_MAX_LOSING_STREAK", "2")
     )
-    AMPEL_AUTO_ENABLED: bool = _env_bool("AMPEL_AUTO_ENABLED", default=False)
+    AMPEL_AUTO_ENABLED: bool = _env_bool("AMPEL_AUTO_ENABLED", default=True)
     AMPEL_AUTO_INTERVAL_SEC: int = int(os.getenv("AMPEL_AUTO_INTERVAL_SEC", "180"))
 
     PAPER_TRADING_BALANCE: float = float(

@@ -313,11 +313,11 @@ class TelegramControlPanel:
                         self._last_update_id, update.get("update_id", 0)
                     )
                     self._handle_update(update)
-                self._maybe_run_ampel_auto()
+                self._safe_ampel_auto_tick()
 
             except requests.exceptions.Timeout:
                 # normal bei Long-Polling – einfach weiter
-                self._maybe_run_ampel_auto()
+                self._safe_ampel_auto_tick()
                 continue
             except Exception as e:
                 self._poll_fail_streak += 1
@@ -327,6 +327,17 @@ class TelegramControlPanel:
                 time.sleep(self._poll_interval)
 
         logger.info("Telegram-Control-Panel Polling-Loop beendet.")
+
+    def _safe_ampel_auto_tick(self) -> None:
+        """
+        Ampel-Auto darf den Polling-Thread niemals beenden.
+        Alle Fehler werden geloggt und geschluckt.
+        """
+        try:
+            self._maybe_run_ampel_auto()
+        except Exception as e:
+            logger.error("AmpelAuto Tick-Fehler (%s): %s", type(e).__name__, e)
+            runtime_state.append_log(f"AMPEL_AUTO_ERROR {type(e).__name__}")
 
     # ------------------------------------------------------------------
     # Update-Handling

@@ -795,7 +795,7 @@ class TelegramControlPanel:
             self._send_text(
                 chat_id,
                 "Verwendung: /setbrain <key> <value>\n"
-                "Keys: min_score, risky_score, perf_weight, priority_bonus, reward_weight, reward_window, min_confidence, min_rr, min_win_chance, min_historical_wr, perf_min_trades"
+                "Keys: min_score, risky_score, perf_weight, priority_bonus, reward_weight, reward_window, min_confidence, min_rr, min_win_chance, min_historical_wr, perf_min_trades, min_expectancy, min_recency_wr, min_profit_factor, max_losing_streak, weak_phase_scale"
             )
             return
         key = parts[1].strip().lower()
@@ -813,6 +813,10 @@ class TelegramControlPanel:
             "min_historical_wr": ("min_historical_win_rate_pct", float, 0.0, 100.0),
             "perf_min_trades": ("perf_tracker_min_trades", int, 1, 500),
             "min_expectancy": ("min_expectancy_pct", float, -100.0, 100.0),
+            "min_recency_wr": ("min_recency_win_rate_pct", float, 0.0, 100.0),
+            "min_profit_factor": ("min_profit_factor", float, 0.0, 20.0),
+            "max_losing_streak": ("max_losing_streak_to_trade", int, 0, 20),
+            "weak_phase_scale": ("weak_phase_position_scale", float, 0.1, 1.0),
         }
         if key not in mapping:
             self._send_text(chat_id, f"Unbekannter setbrain-Key: {key}")
@@ -960,6 +964,10 @@ class TelegramControlPanel:
                 "min_historical_win_rate_pct": 0.0,
                 "perf_tracker_min_trades": 12,
                 "min_expectancy_r": 0.05,
+                "min_recency_win_rate_pct": 60.0,
+                "min_profit_factor": 1.05,
+                "max_losing_streak_to_trade": 2,
+                "weak_phase_position_scale": 0.7,
             },
             "highfreq75": {
                 "min_confidence": 32.0,
@@ -978,6 +986,10 @@ class TelegramControlPanel:
                 "min_historical_win_rate_pct": 0.0,
                 "perf_tracker_min_trades": 12,
                 "min_expectancy_r": 0.05,
+                "min_recency_win_rate_pct": 60.0,
+                "min_profit_factor": 1.05,
+                "max_losing_streak_to_trade": 2,
+                "weak_phase_position_scale": 0.7,
             },
         }
 

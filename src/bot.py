@@ -30,6 +30,8 @@ from src.utils.win_chance import (
     compute_trade_win_chance_pct,
     effective_entry_win_chance_pct,
     historical_win_rate_block_reason,
+    strategy_quality_block_reason,
+    position_size_scaler_by_quality,
 )
 
 logger = setup_logger("bot", settings.LOG_LEVEL)
@@ -906,6 +908,34 @@ class TradingBot:
                     return False, "min_expectancy_pct muss zwischen -100 und 100 liegen."
                 settings.MIN_EXPECTANCY_R = val / 100.0
                 changed.append(f"MIN_EXPECTANCY_R={settings.MIN_EXPECTANCY_R:.3f}")
+
+            if "min_recency_win_rate_pct" in changes:
+                val = float(changes["min_recency_win_rate_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_recency_win_rate_pct muss zwischen 0 und 100 liegen."
+                settings.QUALITY_GATE_MIN_RECENCY_WR_PCT = val
+                changed.append(f"QUALITY_GATE_MIN_RECENCY_WR_PCT={val:.1f}")
+
+            if "min_profit_factor" in changes:
+                val = float(changes["min_profit_factor"])
+                if not (0.0 <= val <= 20.0):
+                    return False, "min_profit_factor muss zwischen 0 und 20 liegen."
+                settings.QUALITY_GATE_MIN_PROFIT_FACTOR = val
+                changed.append(f"QUALITY_GATE_MIN_PROFIT_FACTOR={val:.2f}")
+
+            if "max_losing_streak_to_trade" in changes:
+                val = int(changes["max_losing_streak_to_trade"])
+                if not (0 <= val <= 20):
+                    return False, "max_losing_streak_to_trade muss zwischen 0 und 20 liegen."
+                settings.QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER = val
+                changed.append(f"QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER={val}")
+
+            if "weak_phase_position_scale" in changes:
+                val = float(changes["weak_phase_position_scale"])
+                if not (0.1 <= val <= 1.0):
+                    return False, "weak_phase_position_scale muss zwischen 0.1 und 1.0 liegen."
+                settings.QUALITY_RISK_SCALE_MIN_FACTOR = val
+                changed.append(f"QUALITY_RISK_SCALE_MIN_FACTOR={val:.2f}")
 
             if not changed:
                 return False, "Keine gültigen Runtime-Änderungen übergeben."
@@ -2001,6 +2031,99 @@ class MultiStrategyBot:
                 )
                 return
 
+        # 5f. Erweiterter Qualitäts-Gate auf echter Strategie-Historie
+        quality_reason = strategy_quality_block_reason(
+            best.strategy_name,
+            self.perf_tracker,
+        )
+        if quality_reason:
+            logger.info(
+                f"[yellow]SKIP Strategie-Qualitätsgate[/yellow] {symbol} | "
+                f"Strategie: {best.strategy_name} | {quality_reason}"
+            )
+            self.repo.save_rejected_signal(
+                symbol=symbol,
+                timeframe=best.timeframe,
+                strategy_name=best.strategy_name,
+                side=best.side.value,
+                entry_price=best.entry,
+                stop_loss=best.stop_loss,
+                take_profit=best.take_profit,
+                rr_planned=best.rr,
+                confidence=best.confidence,
+                regime=best.regime,
+                reason_rejected=quality_reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_strategy_quality",
+                reason=quality_reason,
+                strategy=best.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=regime.value,
+                ranking=ranking,
+                chosen_strategy=best.strategy_name,
+                signal_score=signal_score,
+                risk_decision="strategy_quality_block",
+                allow_trade=False,
+                reject_reason=quality_reason,
+                last_decision_reason=quality_reason,
+                market_context=market_ctx,
+            )
+            return
+
+        # 5g. Adaptive Size-Steuerung: bei schwacher jüngster Qualität Risiko reduzieren
+        size_scale, size_scale_reason = position_size_scaler_by_quality(
+            best.strategy_name,
+            self.perf_tracker,
+        )
+        if size_scale < 1.0:
+            original_amount = amount
+            amount = max(0.0, float(amount) * float(size_scale))
+            logger.info(
+                "[cyan]Adaptive Size[/cyan] %s | %s | %.6f -> %.6f",
+                symbol,
+                size_scale_reason,
+                original_amount,
+                amount,
+            )
+            if amount <= 0:
+                reason_size = f"QUALITY_SIZE_ZERO:{size_scale_reason}"
+                self.repo.save_rejected_signal(
+                    symbol=symbol,
+                    timeframe=best.timeframe,
+                    strategy_name=best.strategy_name,
+                    side=best.side.value,
+                    entry_price=best.entry,
+                    stop_loss=best.stop_loss,
+                    take_profit=best.take_profit,
+                    rr_planned=best.rr,
+                    confidence=best.confidence,
+                    regime=best.regime,
+                    reason_rejected=reason_size,
+                )
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="blocked_strategy_quality_size",
+                    reason=reason_size,
+                    strategy=best.strategy_name,
+                )
+                self._log_decision_cycle(
+                    symbol=symbol,
+                    regime=regime.value,
+                    ranking=ranking,
+                    chosen_strategy=best.strategy_name,
+                    signal_score=signal_score,
+                    risk_decision="strategy_quality_size_block",
+                    allow_trade=False,
+                    reject_reason=reason_size,
+                    last_decision_reason=reason_size,
+                    market_context=market_ctx,
+                )
+                return
+
         # 6. Signal registrieren (Duplikatschutz)
         self.risk.register_signal(best)
 
@@ -2702,6 +2825,34 @@ class MultiStrategyBot:
                     return False, "min_expectancy_pct muss zwischen -100 und 100 liegen."
                 settings.MIN_EXPECTANCY_R = val / 100.0
                 changed.append(f"MIN_EXPECTANCY_R={settings.MIN_EXPECTANCY_R:.3f}")
+
+            if "min_recency_win_rate_pct" in changes:
+                val = float(changes["min_recency_win_rate_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_recency_win_rate_pct muss zwischen 0 und 100 liegen."
+                settings.QUALITY_GATE_MIN_RECENCY_WR_PCT = val
+                changed.append(f"QUALITY_GATE_MIN_RECENCY_WR_PCT={val:.1f}")
+
+            if "min_profit_factor" in changes:
+                val = float(changes["min_profit_factor"])
+                if not (0.0 <= val <= 20.0):
+                    return False, "min_profit_factor muss zwischen 0.0 und 20.0 liegen."
+                settings.QUALITY_GATE_MIN_PROFIT_FACTOR = val
+                changed.append(f"QUALITY_GATE_MIN_PROFIT_FACTOR={val:.2f}")
+
+            if "max_losing_streak_to_trade" in changes:
+                val = int(changes["max_losing_streak_to_trade"])
+                if not (0 <= val <= 20):
+                    return False, "max_losing_streak_to_trade muss zwischen 0 und 20 liegen."
+                settings.QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER = val
+                changed.append(f"QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER={val}")
+
+            if "weak_phase_position_scale" in changes:
+                val = float(changes["weak_phase_position_scale"])
+                if not (0.1 <= val <= 1.0):
+                    return False, "weak_phase_position_scale muss zwischen 0.1 und 1.0 liegen."
+                settings.QUALITY_RISK_SCALE_MIN_FACTOR = val
+                changed.append(f"QUALITY_RISK_SCALE_MIN_FACTOR={val:.2f}")
 
             if not changed:
                 return False, "Keine gültigen Runtime-Änderungen übergeben."

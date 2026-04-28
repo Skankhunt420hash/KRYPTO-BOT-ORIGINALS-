@@ -106,6 +106,12 @@ class Settings:
     WIN_CHANCE_BLEND_ACTUAL_WR: float = float(
         os.getenv("WIN_CHANCE_BLEND_ACTUAL_WR", "0.35")
     )
+    # Neu: Mindest-Anteil echter Historie in der effektiven Win-Chance.
+    # Beispiel: 0.55 bedeutet >=55% der Kennzahl stammen aus gemessener DB-Win-Rate
+    # (falls genügend Daten vorhanden sind). Dämpft Überoptimismus der Heuristik.
+    WIN_CHANCE_MIN_ACTUAL_WR_BLEND: float = float(
+        os.getenv("WIN_CHANCE_MIN_ACTUAL_WR_BLEND", "0.55")
+    )
     # Harte Sperre: nach PERF_TRACKER_MIN_TRADES Trades keine neuen Entries, wenn
     # gemessene Win-Rate darunter liegt. 0 = aus (Default).
     MIN_HISTORICAL_WIN_RATE_PCT: float = float(
@@ -116,6 +122,30 @@ class Settings:
     # > 0 bedeutet positiver Erwartungswert.
     # 0 = aus.
     MIN_EXPECTANCY_SCORE: float = float(os.getenv("MIN_EXPECTANCY_SCORE", "0"))
+    # Alias für Runtime-/Telegram-Tuning (min_expectancy_pct → MIN_EXPECTANCY_R).
+    MIN_EXPECTANCY_R: float = float(
+        os.getenv("MIN_EXPECTANCY_R", os.getenv("MIN_EXPECTANCY_SCORE", "0"))
+    )
+    # Harte Qualitätsgates auf Strategie-Historie:
+    # - recency win-rate unter Schwelle → Entry blockieren
+    # - profit factor unter Schwelle     → Entry blockieren
+    QUALITY_GATE_MIN_RECENCY_WR_PCT: float = float(
+        os.getenv("QUALITY_GATE_MIN_RECENCY_WR_PCT", "58.0")
+    )
+    QUALITY_GATE_MIN_PROFIT_FACTOR: float = float(
+        os.getenv("QUALITY_GATE_MIN_PROFIT_FACTOR", "1.08")
+    )
+    # Adaptive Risikoreduktion in Drawdown-/Losing-Streak-Phasen.
+    # Faktor multipliziert die berechnete Positionsgröße (0.10–1.0).
+    QUALITY_RISK_SCALE_MIN_FACTOR: float = float(
+        os.getenv("QUALITY_RISK_SCALE_MIN_FACTOR", "0.45")
+    )
+    QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER: int = int(
+        os.getenv("QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER", "2")
+    )
+    QUALITY_RISK_SCALE_DD_TRIGGER_PCT: float = float(
+        os.getenv("QUALITY_RISK_SCALE_DD_TRIGGER_PCT", "10.0")
+    )
 
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)

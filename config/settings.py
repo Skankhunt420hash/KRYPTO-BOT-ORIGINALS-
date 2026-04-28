@@ -146,6 +146,23 @@ class Settings:
     QUALITY_RISK_SCALE_DD_TRIGGER_PCT: float = float(
         os.getenv("QUALITY_RISK_SCALE_DD_TRIGGER_PCT", "10.0")
     )
+    # Ampel-System (Trade-Qualitätsmonitor):
+    # RED  -> Entries pausieren + Risk-Off
+    # YELLOW/GREEN -> Ampel-Sperre wieder lösen.
+    AMPEL_WINDOW_TRADES: int = int(os.getenv("AMPEL_WINDOW_TRADES", "50"))
+    AMPEL_MIN_TRADES: int = int(os.getenv("AMPEL_MIN_TRADES", "20"))
+    AMPEL_RED_PF: float = float(os.getenv("AMPEL_RED_PF", "1.05"))
+    AMPEL_RED_WINRATE_PCT: float = float(os.getenv("AMPEL_RED_WINRATE_PCT", "58.0"))
+    AMPEL_RED_EXPECTANCY_R: float = float(os.getenv("AMPEL_RED_EXPECTANCY_R", "0.02"))
+    AMPEL_RED_LOSING_STREAK: int = int(os.getenv("AMPEL_RED_LOSING_STREAK", "5"))
+    AMPEL_GREEN_PF: float = float(os.getenv("AMPEL_GREEN_PF", "1.25"))
+    AMPEL_GREEN_WINRATE_PCT: float = float(os.getenv("AMPEL_GREEN_WINRATE_PCT", "68.0"))
+    AMPEL_GREEN_EXPECTANCY_R: float = float(os.getenv("AMPEL_GREEN_EXPECTANCY_R", "0.08"))
+    AMPEL_GREEN_MAX_LOSING_STREAK: int = int(
+        os.getenv("AMPEL_GREEN_MAX_LOSING_STREAK", "2")
+    )
+    AMPEL_AUTO_ENABLED: bool = _env_bool("AMPEL_AUTO_ENABLED", default=False)
+    AMPEL_AUTO_INTERVAL_SEC: int = int(os.getenv("AMPEL_AUTO_INTERVAL_SEC", "180"))
 
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)

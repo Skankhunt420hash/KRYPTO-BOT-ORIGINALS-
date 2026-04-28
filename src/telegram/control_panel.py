@@ -133,6 +133,11 @@ class TelegramControlPanel:
             getattr(settings, "TELEGRAM_AUTOHEAL_COOLDOWN_SEC", 900)
         )
         self._last_autoheal_ts: float = 0.0
+        self._ampel_auto_enabled: bool = bool(getattr(settings, "AMPEL_AUTO_ENABLED", False))
+        self._ampel_auto_interval_sec: int = int(
+            getattr(settings, "AMPEL_AUTO_INTERVAL_SEC", 180)
+        )
+        self._last_ampel_auto_ts: float = 0.0
         token_state = "set" if bool(self._token) else "missing"
         chat_state = "set" if bool(self._chat_id) else "missing"
         logger.info(
@@ -308,9 +313,11 @@ class TelegramControlPanel:
                         self._last_update_id, update.get("update_id", 0)
                     )
                     self._handle_update(update)
+                self._maybe_run_ampel_auto()
 
             except requests.exceptions.Timeout:
                 # normal bei Long-Polling – einfach weiter
+                self._maybe_run_ampel_auto()
                 continue
             except Exception as e:
                 self._poll_fail_streak += 1
@@ -371,6 +378,10 @@ class TelegramControlPanel:
                 self._send_diagfull(chat_id)
             elif cmd == "autoheal":
                 self._handle_autoheal(chat_id, text)
+            elif cmd == "ampel":
+                self._send_ampel(chat_id)
+            elif cmd == "ampelauto":
+                self._handle_ampelauto(chat_id, text)
             elif cmd in ("testtrade", "testtrades"):
                 self._handle_testtrade(chat_id, text)
             elif cmd == "mode":
@@ -435,7 +446,7 @@ class TelegramControlPanel:
                 self._send_text(
                     chat_id,
                     "Unbekannter Befehl. Nutze /help.\n"
-                    "Tipp: /setprofile defensive, /setrisk daily_loss_limit_pct 10, /botrestart",
+                    "Tipp: /setprofile defensive, /setrisk daily_loss_limit_pct 10, /ampel, /botrestart",
                 )
         except Exception as e:
             logger.error(f"Telegram-Panel Dispatch-Fehler ({cmd}): {e}")
@@ -642,6 +653,7 @@ class TelegramControlPanel:
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff /testtrade\n"
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🩹 <b>Auto-Heal</b>: /autoheal status | /autoheal on | /autoheal off | /autoheal now\n"
+            "🚦 <b>Ampel</b>: /ampel | /ampelauto status | /ampelauto on | /ampelauto off | /ampelauto now\n"
             "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "ℹ️ /botrestart nutzt Callback oder automatisch Stop+Start-Fallback.\n"
@@ -1441,6 +1453,219 @@ class TelegramControlPanel:
             f"Total PnL: {stats.get('total_pnl', 0.0):+.4f} USDT\n"
             f"Avg PnL: {stats.get('avg_pnl', 0.0):+.4f} USDT"
         )
+
+    @staticmethod
+    def _ampel_profit_factor(pnls: List[float]) -> float:
+        wins = sum(p for p in pnls if p > 0.0)
+        losses = abs(sum(p for p in pnls if p <= 0.0))
+        if losses <= 1e-12:
+            return 99.0 if wins > 0 else 0.0
+        return float(wins / losses)
+
+    def _collect_closed_pnls(self, lookback: int) -> List[float]:
+        if not self._repo.available:
+            return []
+        rows = self._repo.get_recent_trades(limit=max(10, int(lookback) * 3), status="closed")
+        pnls: List[float] = []
+        for row in rows:
+            value = row.get("pnl_abs")
+            if value is None:
+                continue
+            try:
+                pnls.append(float(value))
+            except Exception:
+                continue
+            if len(pnls) >= lookback:
+                break
+        return pnls
+
+    def _compute_ampel(self, lookback: Optional[int] = None) -> Dict[str, Any]:
+        lookback_n = int(lookback or int(getattr(settings, "AMPEL_WINDOW_TRADES", 50) or 50))
+        lookback_n = max(10, min(lookback_n, 300))
+        pnls = self._collect_closed_pnls(lookback_n)
+        n = len(pnls)
+        min_trades = int(getattr(settings, "AMPEL_MIN_TRADES", 20) or 20)
+        if n == 0:
+            return {
+                "state": "YELLOW",
+                "emoji": "🟡",
+                "reason": "no_closed_trades",
+                "trades": 0,
+                "lookback": lookback_n,
+                "winrate": 0.0,
+                "pf": 0.0,
+                "avg_pnl": 0.0,
+                "total_pnl": 0.0,
+                "expectancy_r": 0.0,
+                "losing_streak": 0,
+                "insufficient_data": True,
+            }
+
+        wins = [p for p in pnls if p > 0.0]
+        losses = [p for p in pnls if p <= 0.0]
+        winrate = round((len(wins) / n) * 100.0, 1)
+        total_pnl = round(sum(pnls), 4)
+        avg_pnl = round(total_pnl / max(1, n), 6)
+        pf = round(self._ampel_profit_factor(pnls), 3)
+
+        rr_ref = float(max(0.5, getattr(settings, "MIN_RR", 1.2) or 1.2))
+        p = max(0.0, min(1.0, winrate / 100.0))
+        expectancy_r = round((p * rr_ref) - (1.0 - p), 4)
+
+        losing_streak = 0
+        for v in pnls:
+            if v <= 0.0:
+                losing_streak += 1
+            else:
+                break
+
+        green_wr = float(getattr(settings, "AMPEL_GREEN_WINRATE_PCT", 68.0) or 68.0)
+        green_pf = float(getattr(settings, "AMPEL_GREEN_PF", 1.25) or 1.25)
+        green_exp = float(getattr(settings, "AMPEL_GREEN_EXPECTANCY_R", 0.08) or 0.08)
+        green_ls = int(getattr(settings, "AMPEL_GREEN_MAX_LOSING_STREAK", 2) or 2)
+
+        red_wr = float(getattr(settings, "AMPEL_RED_WINRATE_PCT", 58.0) or 58.0)
+        red_pf = float(getattr(settings, "AMPEL_RED_PF", 1.05) or 1.05)
+        red_exp = float(getattr(settings, "AMPEL_RED_EXPECTANCY_R", 0.02) or 0.02)
+        red_ls = int(getattr(settings, "AMPEL_RED_LOSING_STREAK", 5) or 5)
+
+        if n < min_trades:
+            state = "YELLOW"
+            reason = f"insufficient_data:{n}/{min_trades}"
+        else:
+            is_green = (
+                winrate >= green_wr
+                and pf >= green_pf
+                and avg_pnl > 0.0
+                and expectancy_r >= green_exp
+                and losing_streak <= green_ls
+            )
+            is_red = (
+                winrate <= red_wr
+                or pf <= red_pf
+                or avg_pnl <= 0.0
+                or expectancy_r <= red_exp
+                or losing_streak >= red_ls
+            )
+            if is_green:
+                state = "GREEN"
+                reason = "metrics_green"
+            elif is_red:
+                state = "RED"
+                reason = "metrics_red"
+            else:
+                state = "YELLOW"
+                reason = "metrics_mixed"
+
+        return {
+            "state": state,
+            "emoji": {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(state, "⚪"),
+            "reason": reason,
+            "trades": n,
+            "lookback": lookback_n,
+            "winrate": winrate,
+            "pf": pf,
+            "avg_pnl": avg_pnl,
+            "total_pnl": total_pnl,
+            "expectancy_r": expectancy_r,
+            "losing_streak": losing_streak,
+            "insufficient_data": n < min_trades,
+        }
+
+    def _apply_ampel_guard(self, ampel: Dict[str, Any], *, source: str) -> Tuple[bool, str]:
+        state = str(ampel.get("state", "YELLOW")).upper()
+        if state == "RED":
+            runtime_control.pause_entries()
+            runtime_control.enable_risk_off()
+            runtime_state.update_engine(paused=True, risk_off=True)
+            runtime_state.append_log(f"AMPEL {source} RED -> pause+risk_off")
+            try:
+                self._notifier.notify_bot_paused(f"ampel:{source}:red")
+                self._notifier.notify_risk_off(True, f"ampel:{source}:red")
+            except Exception:
+                pass
+            return True, "red_pause_risk_off"
+
+        ctrl = runtime_control.get_snapshot()
+        if bool(ctrl.get("paused")) or bool(ctrl.get("risk_off")):
+            runtime_control.resume_entries()
+            runtime_control.disable_risk_off()
+            runtime_state.update_engine(paused=False, risk_off=False)
+            runtime_state.append_log(f"AMPEL {source} {state} -> resume+risk_on")
+            try:
+                self._notifier.notify_bot_resumed(f"ampel:{source}:{state.lower()}")
+                self._notifier.notify_risk_off(False, f"ampel:{source}:{state.lower()}")
+            except Exception:
+                pass
+            return True, f"{state.lower()}_resume_risk_on"
+        return False, f"{state.lower()}_no_change"
+
+    def _format_ampel_text(self, ampel: Dict[str, Any], action: str) -> str:
+        state = str(ampel.get("state", "YELLOW")).upper()
+        action_txt = "Trading pausiert (ROT)" if state == "RED" else "Trading erlaubt"
+        return (
+            f"{ampel.get('emoji', '⚪')} <b>Ampel: {state}</b>\n"
+            f"Action: <code>{action}</code> | Guard: <code>{action_txt}</code>\n"
+            f"Trades: <code>{ampel.get('trades')}</code>/<code>{ampel.get('lookback')}</code>\n"
+            f"Winrate: <code>{ampel.get('winrate')}%</code> | PF: <code>{ampel.get('pf')}</code>\n"
+            f"AvgPnL: <code>{ampel.get('avg_pnl')}</code> | TotalPnL: <code>{ampel.get('total_pnl')}</code>\n"
+            f"Expectancy(R): <code>{ampel.get('expectancy_r')}</code> | "
+            f"LosingStreak: <code>{ampel.get('losing_streak')}</code>\n"
+            f"Reason: <code>{ampel.get('reason')}</code>"
+        )
+
+    def _send_ampel(self, chat_id: str) -> None:
+        ampel = self._compute_ampel()
+        changed, action = self._apply_ampel_guard(ampel, source="telegram_manual")
+        if changed:
+            self._last_ampel_auto_ts = time.monotonic()
+        self._send_text(chat_id, self._format_ampel_text(ampel, action))
+
+    def _maybe_run_ampel_auto(self, force: bool = False) -> None:
+        if not self._ampel_auto_enabled and not force:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_ampel_auto_ts < self._ampel_auto_interval_sec):
+            return
+        self._last_ampel_auto_ts = now
+        ampel = self._compute_ampel()
+        changed, action = self._apply_ampel_guard(ampel, source="ampel_auto")
+        if changed and self._chat_id:
+            try:
+                self._send_text(
+                    self._chat_id,
+                    "🚦 <b>AmpelAuto Aktion</b>\n" + self._format_ampel_text(ampel, action),
+                )
+            except Exception:
+                pass
+
+    def _handle_ampelauto(self, chat_id: str, text: str) -> None:
+        parts = self._split_command_parts(text)
+        mode = parts[1].strip().lower() if len(parts) > 1 else "status"
+        if mode in ("status", "state"):
+            self._send_text(
+                chat_id,
+                "🚦 <b>AmpelAuto</b>\n"
+                f"enabled=<code>{self._ampel_auto_enabled}</code>\n"
+                f"interval=<code>{self._ampel_auto_interval_sec}s</code>",
+            )
+            return
+        if mode in ("on", "enable", "1", "true"):
+            self._ampel_auto_enabled = True
+            runtime_state.append_log("TELEGRAM /ampelauto on")
+            self._send_text(chat_id, "✅ AmpelAuto aktiviert.")
+            return
+        if mode in ("off", "disable", "0", "false"):
+            self._ampel_auto_enabled = False
+            runtime_state.append_log("TELEGRAM /ampelauto off")
+            self._send_text(chat_id, "⏸ AmpelAuto deaktiviert.")
+            return
+        if mode in ("now", "run", "check"):
+            self._last_ampel_auto_ts = 0.0
+            self._maybe_run_ampel_auto(force=True)
+            self._send_text(chat_id, "✅ AmpelAuto-Check ausgeführt.")
+            return
+        self._send_text(chat_id, "Verwendung: /ampelauto <on|off|status|now>")
 
     def _send_logs(self, chat_id: str) -> None:
         """

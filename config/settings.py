@@ -150,7 +150,7 @@ class Settings:
         os.getenv("TELEGRAM_PANEL_LOG_LINES", 20)
     )
     # Kommagetrennte Liste von Chat-/User-IDs, die das Panel bedienen dürfen.
-    # Leer = kein Whitelisting (nicht empfohlen in produktiven Umgebungen).
+    # Leer fällt auf TELEGRAM_CHAT_ID zurück; ohne beides bleibt das Panel aus.
     TELEGRAM_PANEL_ALLOWED_IDS: str = os.getenv("TELEGRAM_PANEL_ALLOWED_IDS", "")
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///data/trades.db")

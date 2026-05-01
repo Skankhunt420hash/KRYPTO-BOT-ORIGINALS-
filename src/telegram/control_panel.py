@@ -96,22 +96,25 @@ class TelegramControlPanel:
     ) -> None:
         self._token = settings.TELEGRAM_BOT_TOKEN
         self._chat_id = settings.TELEGRAM_CHAT_ID
-        self._enabled = bool(
-            settings.TELEGRAM_ENABLED
-            and settings.TELEGRAM_PANEL_ENABLED
-            and bool(self._token)
-        )
         self._poll_interval = int(
             getattr(settings, "TELEGRAM_PANEL_POLL_INTERVAL_SEC", 10)
         )
         self._log_lines = int(
             getattr(settings, "TELEGRAM_PANEL_LOG_LINES", 20)
         )
-        # Optionales Whitelisting: kommaseparierte User-/Chat-IDs
+        # Kommaseparierte User-/Chat-IDs. Ohne Whitelist darf das Steuerpanel nicht laufen.
         raw_ids = getattr(settings, "TELEGRAM_PANEL_ALLOWED_IDS", "")
         self._allowed_ids = {
             part.strip() for part in raw_ids.split(",") if part.strip()
         }
+        if not self._allowed_ids and self._chat_id:
+            self._allowed_ids = {str(self._chat_id).strip()}
+        self._enabled = bool(
+            settings.TELEGRAM_ENABLED
+            and settings.TELEGRAM_PANEL_ENABLED
+            and bool(self._token)
+            and bool(self._allowed_ids)
+        )
 
         self._notifier = notifier or TelegramNotifier()
         self._callbacks = callbacks or PanelCallbacks()
@@ -144,10 +147,15 @@ class TelegramControlPanel:
                 logger.warning(
                     "Telegram-Control-Panel deaktiviert: TELEGRAM_BOT_TOKEN fehlt."
                 )
+            if settings.TELEGRAM_ENABLED and settings.TELEGRAM_PANEL_ENABLED and self._token and not self._allowed_ids:
+                logger.warning(
+                    "Telegram-Control-Panel deaktiviert: TELEGRAM_PANEL_ALLOWED_IDS "
+                    "oder TELEGRAM_CHAT_ID muss gesetzt sein."
+                )
             logger.info(
                 "Telegram-Control-Panel deaktiviert "
                 "(ENABLE_TELEGRAM/TELEGRAM_ENABLED=false, "
-                "TELEGRAM_PANEL_ENABLED=false oder kein Bot-Token gesetzt)"
+                "TELEGRAM_PANEL_ENABLED=false, kein Bot-Token oder keine Whitelist gesetzt)"
             )
 
     # ------------------------------------------------------------------
@@ -321,16 +329,21 @@ class TelegramControlPanel:
 
         chat = msg.get("chat", {})
         chat_id = str(chat.get("id", ""))
+        user = msg.get("from", {})
+        user_id = str(user.get("id", ""))
         text = (msg.get("text") or "").strip()
 
         if not text:
             return
 
-        if self._allowed_ids and chat_id not in self._allowed_ids:
+        if not self._allowed_ids or (
+            chat_id not in self._allowed_ids and user_id not in self._allowed_ids
+        ):
             logger.warning(
-                "Telegram-Panel: Chat %s nicht in TELEGRAM_PANEL_ALLOWED_IDS – Befehl ignoriert "
-                "(Whitelist anpassen oder leer lassen).",
+                "Telegram-Panel: Chat %s/User %s nicht in TELEGRAM_PANEL_ALLOWED_IDS – "
+                "Befehl ignoriert.",
                 chat_id,
+                user_id,
             )
             return
 

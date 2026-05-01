@@ -145,7 +145,24 @@ class TradingBot:
                 entry_price = position.entry_price
                 pos_size = position.amount
 
-                self.exchange.create_market_sell_order(symbol, position.amount)
+                order = self.exchange.create_market_sell_order(symbol, position.amount)
+                if not order:
+                    logger.error(
+                        f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
+                        "Position bleibt lokal offen"
+                    )
+                    self.tg.notify_error(
+                        f"Exit-Order fehlgeschlagen: {symbol}",
+                        "Lokale Position wurde nicht geschlossen.",
+                    )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason="exchange_order_failed",
+                        strategy=self.strategy.name,
+                    )
+                    return
+
                 pnl = self.risk.close_position(symbol, current_price)
 
                 # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
@@ -396,6 +413,21 @@ class TradingBot:
                         reason=signal.reason,
                         strategy=self.strategy.name,
                     )
+            else:
+                logger.error(
+                    f"[red]VERKAUF FEHLGESCHLAGEN[/red] {symbol} | "
+                    "Position bleibt lokal offen"
+                )
+                self.tg.notify_error(
+                    f"Verkaufsorder fehlgeschlagen: {symbol}",
+                    "Lokale Position wurde nicht geschlossen.",
+                )
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="manual_exit_failed",
+                    reason="exchange_order_failed",
+                    strategy=self.strategy.name,
+                )
         else:
             self._record_last_decision(
                 symbol=symbol,
@@ -1219,8 +1251,27 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"Position bleibt lokal offen"
                     )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason="exchange_order_failed",
+                        strategy=position.strategy_name,
+                    )
+                    self._log_decision_cycle(
+                        symbol=symbol,
+                        regime="EXIT_FAILED",
+                        ranking=[],
+                        chosen_strategy=position.strategy_name,
+                        signal_score=0.0,
+                        risk_decision="exit_failed",
+                        allow_trade=False,
+                        reject_reason="exchange_order_failed",
+                        last_decision_reason="exchange_order_failed",
+                        market_context=market_ctx,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 

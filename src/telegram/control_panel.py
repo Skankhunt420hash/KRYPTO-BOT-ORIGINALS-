@@ -474,7 +474,7 @@ class TelegramControlPanel:
           -> zeigt aktuellen Modus
         /mode paper
           -> alias für /setmode paper
-        /mode defensive|balanced|aggressive|sniper|scalping
+        /mode growth|continuous|defensive|balanced|aggressive|sniper|scalping
           -> alias für /setprofile <name>
         """
         parts = self._split_command_parts(text)
@@ -493,7 +493,7 @@ class TelegramControlPanel:
             "Verwendung:\n"
             "• /mode (Status)\n"
             "• /mode paper\n"
-            "• /mode <defensive|balanced|aggressive|sniper|scalping>",
+            "• /mode <growth|continuous|defensive|balanced|aggressive|sniper|scalping>",
         )
 
     def _handle_risk_command(self, chat_id: str, text: str) -> None:
@@ -666,7 +666,7 @@ class TelegramControlPanel:
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🩹 <b>Auto-Heal</b>: /autoheal status | /autoheal on | /autoheal off | /autoheal now\n"
             "🚦 <b>Ampel</b>: /ampel | /ampelauto status | /ampelauto on | /ampelauto off | /ampelauto now\n"
-            "🎚 <b>Profile</b>: /profiles, /setprofile &lt;defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75&gt;\n"
+            "🎚 <b>Profile</b>: /profiles, /setprofile &lt;growth|continuous|defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "ℹ️ /botrestart nutzt Callback oder automatisch Stop+Start-Fallback.\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
@@ -804,6 +804,11 @@ class TelegramControlPanel:
             f"CONTROL_STRATEGY_PRIORITY_BONUS: <code>{settings.CONTROL_STRATEGY_PRIORITY_BONUS}</code>",
             f"BRAIN_REWARD_WEIGHT: <code>{getattr(settings, 'BRAIN_REWARD_WEIGHT', 'n/a')}</code>",
             f"BRAIN_REWARD_WINDOW: <code>{getattr(settings, 'BRAIN_REWARD_WINDOW', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_ENABLED: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_ENABLED', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_WINDOW: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_WINDOW', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_MIN_TRADES: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_MIN_TRADES', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT', 'n/a')}</code>",
             f"RISK_PER_TRADE_PCT: <code>{settings.RISK_PER_TRADE_PCT}</code>",
             f"MAX_TOTAL_OPEN_RISK_PCT: <code>{settings.MAX_TOTAL_OPEN_RISK_PCT}</code>",
             f"MAX_POSITIONS_TOTAL: <code>{settings.MAX_POSITIONS_TOTAL}</code>",
@@ -819,7 +824,7 @@ class TelegramControlPanel:
             self._send_text(
                 chat_id,
                 "Verwendung: /setbrain <key> <value>\n"
-                "Keys: min_score, risky_score, perf_weight, priority_bonus, reward_weight, reward_window, min_confidence, min_rr, min_win_chance, min_historical_wr, perf_min_trades, min_expectancy, min_recency_wr, min_profit_factor, max_losing_streak, weak_phase_scale"
+                "Keys: min_score, risky_score, perf_weight, priority_bonus, reward_weight, reward_window, pattern_enabled, pattern_window, pattern_min_trades, pattern_min_winrate, pattern_bonus, min_confidence, min_rr, min_win_chance, min_historical_wr, perf_min_trades, min_expectancy, min_recency_wr, min_profit_factor, max_losing_streak, weak_phase_scale"
             )
             return
         key = parts[1].strip().lower()
@@ -831,6 +836,11 @@ class TelegramControlPanel:
             "priority_bonus": ("control_strategy_priority_bonus", float, 0.0, 1.0),
             "reward_weight": ("reward_weight", float, 0.0, 0.5),
             "reward_window": ("reward_window", int, 2, 50),
+            "pattern_enabled": ("brain_positive_pattern_enabled", int, 0, 1),
+            "pattern_window": ("brain_positive_pattern_window", int, 10, 300),
+            "pattern_min_trades": ("brain_positive_pattern_min_trades", int, 3, 300),
+            "pattern_min_winrate": ("brain_positive_pattern_min_winrate_pct", float, 40.0, 95.0),
+            "pattern_bonus": ("brain_positive_pattern_bonus_weight", float, 0.0, 0.30),
             "min_confidence": ("min_confidence", float, 0.0, 100.0),
             "min_rr": ("min_rr", float, 0.0, 10.0),
             "min_win_chance": ("min_win_chance_pct", float, 0.0, 100.0),
@@ -969,6 +979,62 @@ class TelegramControlPanel:
                 "max_total_open_risk_pct": 12.0,
                 "max_positions_total": 8,
             },
+            "growth": {
+                # Kontinuierliches Wachstum statt schneller Peak:
+                # konservativeres Risiko, strengere Qualitätsgates, moderates Pattern-Lernen.
+                "min_confidence": 52.0,
+                "min_rr": 1.8,
+                "brain_min_score_to_trade": 0.52,
+                "brain_risky_phase_score": 0.40,
+                "perf_selector_weight": 0.28,
+                "reward_weight": 0.07,
+                "risk_per_trade_pct": 0.45,
+                "max_total_open_risk_pct": 4.5,
+                "max_positions_total": 3,
+                "coin_cooldown_minutes": 5,
+                "strategy_cooldown_minutes": 6,
+                "duplicate_signal_minutes": 4,
+                "min_win_chance_pct": 72.0,
+                "min_historical_win_rate_pct": 25.0,
+                "perf_tracker_min_trades": 25,
+                "min_expectancy_pct": 8.0,
+                "min_recency_win_rate_pct": 62.0,
+                "min_profit_factor": 1.18,
+                "max_losing_streak_to_trade": 1,
+                "weak_phase_position_scale": 0.50,
+                "brain_positive_pattern_enabled": 1,
+                "brain_positive_pattern_window": 50,
+                "brain_positive_pattern_min_trades": 10,
+                "brain_positive_pattern_min_winrate_pct": 58.0,
+                "brain_positive_pattern_bonus_weight": 0.06,
+            },
+            "continuous": {
+                "min_confidence": 52.0,
+                "min_rr": 1.8,
+                "brain_min_score_to_trade": 0.52,
+                "brain_risky_phase_score": 0.40,
+                "perf_selector_weight": 0.28,
+                "reward_weight": 0.07,
+                "risk_per_trade_pct": 0.45,
+                "max_total_open_risk_pct": 4.5,
+                "max_positions_total": 3,
+                "coin_cooldown_minutes": 5,
+                "strategy_cooldown_minutes": 6,
+                "duplicate_signal_minutes": 4,
+                "min_win_chance_pct": 72.0,
+                "min_historical_win_rate_pct": 25.0,
+                "perf_tracker_min_trades": 25,
+                "min_expectancy_pct": 8.0,
+                "min_recency_win_rate_pct": 62.0,
+                "min_profit_factor": 1.18,
+                "max_losing_streak_to_trade": 1,
+                "weak_phase_position_scale": 0.50,
+                "brain_positive_pattern_enabled": 1,
+                "brain_positive_pattern_window": 50,
+                "brain_positive_pattern_min_trades": 10,
+                "brain_positive_pattern_min_winrate_pct": 58.0,
+                "brain_positive_pattern_bonus_weight": 0.06,
+            },
             "hf75": {
                 # Ziel: mehr Entries bei großer Universe-Scanrate, aber 75%-Qualitätsgate
                 # + positives Erwartungswert-Gate (mathematischer Vorteil je Trade).
@@ -987,7 +1053,7 @@ class TelegramControlPanel:
                 "min_win_chance_pct": 75.0,
                 "min_historical_win_rate_pct": 0.0,
                 "perf_tracker_min_trades": 12,
-                "min_expectancy_r": 0.05,
+                "min_expectancy_pct": 5.0,
                 "min_recency_win_rate_pct": 60.0,
                 "min_profit_factor": 1.05,
                 "max_losing_streak_to_trade": 2,
@@ -1009,7 +1075,7 @@ class TelegramControlPanel:
                 "min_win_chance_pct": 75.0,
                 "min_historical_win_rate_pct": 0.0,
                 "perf_tracker_min_trades": 12,
-                "min_expectancy_r": 0.05,
+                "min_expectancy_pct": 5.0,
                 "min_recency_win_rate_pct": 60.0,
                 "min_profit_factor": 1.05,
                 "max_losing_streak_to_trade": 2,
@@ -1022,6 +1088,7 @@ class TelegramControlPanel:
         lines = [
             "🎚 <b>Luxus Profile</b>",
             "Wähle per <code>/setprofile &lt;name&gt;</code>:",
+            "Neu: <code>growth</code> / <code>continuous</code> = stabiles, kontinuierliches Wachstum",
             "Neu: <code>hf75</code> / <code>highfreq75</code> = mehr Entries + 75% Qualitätsgate",
             "",
         ]
@@ -1042,13 +1109,15 @@ class TelegramControlPanel:
         if len(parts) < 2:
             self._send_text(
                 chat_id,
-                "Verwendung: /setprofile <defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75>\n"
+                "Verwendung: /setprofile <growth|continuous|defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75>\n"
                 "Nutze /profiles für die Übersicht."
             )
             return
         name = parts[1].strip().lower()
         if name == "highfreq75":
             name = "hf75"
+        if name in ("continuous_growth", "steady", "stable"):
+            name = "growth"
         presets = self._profile_presets()
         payload = presets.get(name)
         if payload is None:

@@ -926,6 +926,76 @@ class TradingBot:
                 settings.BRAIN_REWARD_WINDOW = val
                 changed.append(f"BRAIN_REWARD_WINDOW={val}")
 
+            if "brain_positive_pattern_enabled" in changes:
+                raw = changes["brain_positive_pattern_enabled"]
+                try:
+                    val = bool(int(raw))
+                except Exception:
+                    val = str(raw).strip().lower() in ("1", "true", "yes", "on")
+                settings.BRAIN_POSITIVE_PATTERN_ENABLED = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_ENABLED={val}")
+
+            if "brain_positive_pattern_window" in changes:
+                val = int(changes["brain_positive_pattern_window"])
+                if not (10 <= val <= 200):
+                    return False, "brain_positive_pattern_window muss zwischen 10 und 200 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_WINDOW = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_WINDOW={val}")
+
+            if "brain_positive_pattern_min_trades" in changes:
+                val = int(changes["brain_positive_pattern_min_trades"])
+                if not (3 <= val <= 80):
+                    return False, "brain_positive_pattern_min_trades muss zwischen 3 und 80 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_TRADES = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_TRADES={val}")
+
+            if "brain_positive_pattern_min_winrate_pct" in changes:
+                val = float(changes["brain_positive_pattern_min_winrate_pct"])
+                if not (40.0 <= val <= 90.0):
+                    return False, "brain_positive_pattern_min_winrate_pct muss zwischen 40.0 und 90.0 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT={val:.1f}")
+
+            if "brain_positive_pattern_bonus_weight" in changes:
+                val = float(changes["brain_positive_pattern_bonus_weight"])
+                if not (0.0 <= val <= 0.2):
+                    return False, "brain_positive_pattern_bonus_weight muss zwischen 0.0 und 0.2 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT={val:.3f}")
+
+            if "brain_positive_pattern_enabled" in changes:
+                val = bool(int(changes["brain_positive_pattern_enabled"]))
+                settings.BRAIN_POSITIVE_PATTERN_ENABLED = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_ENABLED={val}")
+
+            if "brain_positive_pattern_window" in changes:
+                val = int(changes["brain_positive_pattern_window"])
+                if not (10 <= val <= 500):
+                    return False, "brain_positive_pattern_window muss zwischen 10 und 500 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_WINDOW = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_WINDOW={val}")
+
+            if "brain_positive_pattern_min_trades" in changes:
+                val = int(changes["brain_positive_pattern_min_trades"])
+                if not (3 <= val <= 200):
+                    return False, "brain_positive_pattern_min_trades muss zwischen 3 und 200 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_TRADES = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_TRADES={val}")
+
+            if "brain_positive_pattern_min_winrate_pct" in changes:
+                val = float(changes["brain_positive_pattern_min_winrate_pct"])
+                if not (30.0 <= val <= 95.0):
+                    return False, "brain_positive_pattern_min_winrate_pct muss zwischen 30 und 95 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT={val:.1f}")
+
+            if "brain_positive_pattern_bonus_weight" in changes:
+                val = float(changes["brain_positive_pattern_bonus_weight"])
+                if not (0.0 <= val <= 0.25):
+                    return False, "brain_positive_pattern_bonus_weight muss zwischen 0.0 und 0.25 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT={val:.3f}")
+
             if "control_strategy_priority_bonus" in changes:
                 val = float(changes["control_strategy_priority_bonus"])
                 if not (0.0 <= val <= 0.5):
@@ -2978,6 +3048,39 @@ class MultiStrategyBot:
                     return False, "reward_window muss zwischen 2 und 60 liegen."
                 settings.BRAIN_REWARD_WINDOW = val
                 changed.append(f"BRAIN_REWARD_WINDOW={val}")
+
+            if "brain_positive_pattern_enabled" in changes:
+                val = bool(int(changes["brain_positive_pattern_enabled"]))
+                settings.BRAIN_POSITIVE_PATTERN_ENABLED = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_ENABLED={val}")
+
+            if "brain_positive_pattern_window" in changes:
+                val = int(changes["brain_positive_pattern_window"])
+                if not (10 <= val <= 500):
+                    return False, "brain_positive_pattern_window muss zwischen 10 und 500 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_WINDOW = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_WINDOW={val}")
+
+            if "brain_positive_pattern_min_trades" in changes:
+                val = int(changes["brain_positive_pattern_min_trades"])
+                if not (3 <= val <= 200):
+                    return False, "brain_positive_pattern_min_trades muss zwischen 3 und 200 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_TRADES = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_TRADES={val}")
+
+            if "brain_positive_pattern_min_winrate_pct" in changes:
+                val = float(changes["brain_positive_pattern_min_winrate_pct"])
+                if not (30.0 <= val <= 95.0):
+                    return False, "brain_positive_pattern_min_winrate_pct muss zwischen 30 und 95 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT={val:.1f}")
+
+            if "brain_positive_pattern_bonus_weight" in changes:
+                val = float(changes["brain_positive_pattern_bonus_weight"])
+                if not (0.0 <= val <= 0.25):
+                    return False, "brain_positive_pattern_bonus_weight muss zwischen 0.0 und 0.25 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT={val:.3f}")
 
             if "control_strategy_priority_bonus" in changes:
                 val = float(changes["control_strategy_priority_bonus"])

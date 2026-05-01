@@ -84,6 +84,7 @@ class PerformanceTracker:
 
         self._global: Dict[str, StrategyMetrics] = {}
         self._by_regime: Dict[str, Dict[str, StrategyMetrics]] = {}
+        self._profit_patterns: Dict[str, Dict[str, Dict[str, Dict[str, float]]]] = {}
         self.available: bool = False
 
         self.refresh()
@@ -96,9 +97,13 @@ class PerformanceTracker:
             trades_by_strat = self._load_trades()
             self._global = {}
             self._by_regime = {}
+            self._profit_patterns = {}
 
             for name, trades in trades_by_strat.items():
                 self._global[name] = self._compute(name, "GLOBAL", trades)
+                self._profit_patterns[name] = {
+                    "GLOBAL": self._compute_profit_patterns(trades)
+                }
 
                 # Regime-Aufschlüsselung
                 regime_groups: Dict[str, List[dict]] = {}
@@ -110,6 +115,8 @@ class PerformanceTracker:
                     reg: self._compute(name, reg, rt)
                     for reg, rt in regime_groups.items()
                 }
+                for reg, rt in regime_groups.items():
+                    self._profit_patterns[name][reg] = self._compute_profit_patterns(rt)
 
             self.available = True
             total = sum(m.trade_count for m in self._global.values())
@@ -140,6 +147,62 @@ class PerformanceTracker:
 
     def known_strategies(self) -> List[str]:
         return sorted(self._global.keys())
+
+    def positive_pattern_bias(
+        self,
+        strategy_name: str,
+        regime: str,
+        side: str,
+        confidence: float,
+        rr: float,
+    ) -> float:
+        """
+        Liefert einen kontrollierten Bias [-1..+1], der profitable Muster verstärkt.
+
+        Musterbasis:
+        - Strategie + Regime + Side (long/short)
+        - Nähe von Signal-Confidence und RR zu den Gewinner-Trades dieser Gruppe
+        """
+        if not bool(getattr(settings, "BRAIN_POSITIVE_PATTERN_ENABLED", True)):
+            return 0.0
+        if not self.available:
+            return 0.0
+
+        side_key = str(side or "").strip().lower()
+        if side_key not in ("long", "short"):
+            return 0.0
+
+        strat_patterns = self._profit_patterns.get(strategy_name) or {}
+        regime_key = (regime or "UNKNOWN").strip() or "UNKNOWN"
+        regime_patterns = strat_patterns.get(regime_key) or strat_patterns.get("GLOBAL") or {}
+        side_stats = regime_patterns.get(side_key) or {}
+        if not side_stats:
+            return 0.0
+
+        min_trades = int(getattr(settings, "BRAIN_POSITIVE_PATTERN_MIN_TRADES", 8) or 8)
+        if int(side_stats.get("trade_count", 0)) < max(3, min_trades):
+            return 0.0
+
+        wr = float(side_stats.get("win_rate", 0.5))
+        min_wr = float(getattr(settings, "BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT", 55.0) or 55.0) / 100.0
+        if wr < min_wr:
+            return 0.0
+        win_signal = _clamp((wr - 0.5) * 2.0, -1.0, 1.0)
+
+        conf_fit = 0.5
+        conf_ref = side_stats.get("avg_conf_win")
+        if conf_ref is not None:
+            conf_diff = abs(float(confidence) - float(conf_ref))
+            conf_fit = 1.0 - min(conf_diff / 100.0, 1.0)
+
+        rr_fit = 0.5
+        rr_ref = side_stats.get("avg_rr_win")
+        if rr_ref is not None and float(rr_ref) > 0:
+            rr_diff = abs(float(rr) - float(rr_ref))
+            rr_fit = 1.0 - min(rr_diff / max(float(rr_ref), 1e-9), 1.0)
+
+        quality_signal = _clamp(((conf_fit * 2.0 - 1.0) * 0.55) + ((rr_fit * 2.0 - 1.0) * 0.45), -1.0, 1.0)
+        return round(_clamp((win_signal * 0.65) + (quality_signal * 0.35), -1.0, 1.0), 4)
 
     def latest_outcomes(self, strategy_name: str, limit: int = 8) -> List[float]:
         """
@@ -188,6 +251,7 @@ class PerformanceTracker:
             rows = conn.execute(
                 """
                 SELECT strategy_name, regime,
+                       side, confidence,
                        pnl_abs, pnl_pct, rr_planned, risk_amount,
                        timestamp_close, reason_close
                 FROM   trades
@@ -204,6 +268,12 @@ class PerformanceTracker:
                 d = dict(row)
                 name = d.get("strategy_name") or "unknown"
                 result.setdefault(name, []).append(d)
+            # Nur die letzten N Trades je Strategie für Pattern-Lernen verwenden,
+            # damit das Modell schnell auf neue Marktphasen reagiert.
+            pat_window = int(getattr(settings, "BRAIN_POSITIVE_PATTERN_WINDOW", 40) or 40)
+            if pat_window > 0:
+                for strat_name in list(result.keys()):
+                    result[strat_name] = result[strat_name][-pat_window:]
             return result
 
         except Exception as e:
@@ -211,6 +281,48 @@ class PerformanceTracker:
             return {}
         finally:
             conn.close()
+
+    def _compute_profit_patterns(self, trades: List[dict]) -> Dict[str, Dict[str, float]]:
+        """
+        Verdichtet profitable Muster je Side (long/short) für eine Strategie-Gruppe.
+        Rückgabe pro Side:
+          trade_count, win_rate (0..1), avg_conf_win, avg_rr_win
+        """
+        out: Dict[str, Dict[str, float]] = {}
+
+        for side_key in ("long", "short"):
+            side_rows = [
+                t for t in trades
+                if str(t.get("side") or "").strip().lower() == side_key
+            ]
+            if not side_rows:
+                continue
+
+            wins = []
+            conf_win: List[float] = []
+            rr_win: List[float] = []
+
+            for row in side_rows:
+                pnl = float(row.get("pnl_abs") or 0.0)
+                if pnl > 0.0:
+                    wins.append(pnl)
+                    if row.get("confidence") is not None:
+                        conf_win.append(float(row.get("confidence")))
+                    if row.get("rr_planned") is not None:
+                        rr_win.append(float(row.get("rr_planned")))
+
+            trade_count = len(side_rows)
+            win_rate = (len(wins) / trade_count) if trade_count > 0 else 0.0
+            out[side_key] = {
+                "trade_count": float(trade_count),
+                "win_rate": float(win_rate),
+            }
+            if conf_win:
+                out[side_key]["avg_conf_win"] = round(sum(conf_win) / len(conf_win), 4)
+            if rr_win:
+                out[side_key]["avg_rr_win"] = round(sum(rr_win) / len(rr_win), 4)
+
+        return out
 
     # ── Metriken-Berechnung ───────────────────────────────────────────────
 

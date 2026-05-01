@@ -385,6 +385,41 @@ class Settings:
     BRAIN_REWARD_WEIGHT: float = float(os.getenv("BRAIN_REWARD_WEIGHT", 0.08))
     BRAIN_REWARD_WINDOW: int = int(os.getenv("BRAIN_REWARD_WINDOW", 12))
     BRAIN_REWARD_DECAY: float = float(os.getenv("BRAIN_REWARD_DECAY", 0.88))
+    # Positiver Trade-Muster-Lernbonus:
+    # Aus erfolgreichen Trades werden typische Confidence/RR/Side/Regime-Muster
+    # je Strategie gelernt und bei ähnlichen neuen Signalen leicht bevorzugt.
+    BRAIN_POSITIVE_PATTERN_ENABLED: bool = _env_bool(
+        "BRAIN_POSITIVE_PATTERN_ENABLED",
+        "BRAIN_PATTERN_LEARNING_ENABLED",
+        default=True,
+    )
+    BRAIN_POSITIVE_PATTERN_WINDOW: int = int(
+        _first_non_empty(
+            "BRAIN_POSITIVE_PATTERN_WINDOW",
+            "BRAIN_PATTERN_WINDOW",
+            default="40",
+        )
+    )
+    BRAIN_POSITIVE_PATTERN_MIN_TRADES: int = int(
+        _first_non_empty(
+            "BRAIN_POSITIVE_PATTERN_MIN_TRADES",
+            "BRAIN_PATTERN_MIN_WINS",
+            default="8",
+        )
+    )
+    BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT: float = float(
+        _first_non_empty(
+            "BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT",
+            default="55.0",
+        )
+    )
+    BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT: float = float(
+        _first_non_empty(
+            "BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT",
+            "BRAIN_PATTERN_MAX_BONUS",
+            default="0.08",
+        )
+    )
 
     # ------------------------------------------------------------------
     # Portfolio Risk Engine & Position Sizing

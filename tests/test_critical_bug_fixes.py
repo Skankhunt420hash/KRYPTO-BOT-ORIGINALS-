@@ -109,6 +109,7 @@ class ExitOrderFailureTests(unittest.TestCase):
             highest_price=100.0,
         )
         bot._active_strategy_runtime = "test"
+        bot._last_prices = {}
         bot._record_last_signal = MagicMock()
         bot._record_last_decision = MagicMock()
         bot.tg = MagicMock()
@@ -131,6 +132,7 @@ class ExitOrderFailureTests(unittest.TestCase):
     def test_multi_bot_keeps_position_open_when_exit_engine_fails(self):
         bot = object.__new__(MultiStrategyBot)
         bot._recovery_blocked_symbols = set()
+        bot._last_prices = {}
         bot.exchange = MagicMock()
         bot.exchange.fetch_ohlcv.return_value = _single_close_df(90.0)
         bot.health = MagicMock()

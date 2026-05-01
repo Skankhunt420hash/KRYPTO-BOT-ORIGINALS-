@@ -87,17 +87,14 @@ class ExitOrderFailureTests(unittest.TestCase):
         bot.exchange = MagicMock()
         bot.exchange.fetch_ohlcv.return_value = _single_close_df(90.0)
         bot.exchange.create_market_sell_order.return_value = {}
-        bot.strategy = MagicMock(
-            name="test",
-            analyze=MagicMock(
-                return_value=TradeSignal(
-                    signal=Signal.HOLD,
-                    symbol="BTC/USDT",
-                    price=90.0,
-                    confidence=0.0,
-                    reason="hold",
-                )
-            ),
+        bot.strategy = MagicMock()
+        bot.strategy.name = "test"
+        bot.strategy.analyze.return_value = TradeSignal(
+            signal=Signal.HOLD,
+            symbol="BTC/USDT",
+            price=90.0,
+            confidence=0.0,
+            reason="hold",
         )
         bot.risk = RiskManager(initial_balance=1000.0)
         bot.risk.open_positions["BTC/USDT"] = Position(

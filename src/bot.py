@@ -790,6 +790,37 @@ class TradingBot:
                 settings.MAX_TOTAL_OPEN_RISK_PCT = val
                 changed.append(f"MAX_TOTAL_OPEN_RISK_PCT={val:.2f}")
 
+            if "max_positions_total" in changes:
+                val = int(changes["max_positions_total"])
+                if not (1 <= val <= 50):
+                    return False, "max_positions_total muss zwischen 1 und 50 liegen."
+                settings.MAX_POSITIONS_TOTAL = val
+                settings.MAX_OPEN_TRADES = val
+                # RiskEngine nutzt diesen harten Gate für check_signal().
+                hard_cap = val
+                if settings.TRADING_MODE == "live" and bool(getattr(settings, "LIVE_TEST_MODE", False)):
+                    hard_cap = min(hard_cap, 1)
+                self.risk.max_open_trades = hard_cap
+                # Portfolio-Layer separat synchron halten.
+                self.risk.portfolio.cfg.max_positions_total = val
+                changed.append(f"MAX_POSITIONS_TOTAL={val}")
+
+            if "max_position_notional" in changes:
+                val = float(changes["max_position_notional"])
+                if not (5.0 <= val <= 1_000_000.0):
+                    return False, "max_position_notional muss zwischen 5 und 1_000_000 liegen."
+                settings.MAX_POSITION_NOTIONAL = val
+                self.risk.portfolio.cfg.max_position_notional = val
+                changed.append(f"MAX_POSITION_NOTIONAL={val:.2f}")
+
+            if "min_position_notional" in changes:
+                val = float(changes["min_position_notional"])
+                if not (1.0 <= val <= 100_000.0):
+                    return False, "min_position_notional muss zwischen 1 und 100_000 liegen."
+                settings.MIN_POSITION_NOTIONAL = val
+                self.risk.portfolio.cfg.min_position_notional = val
+                changed.append(f"MIN_POSITION_NOTIONAL={val:.2f}")
+
             if "daily_loss_limit_pct" in changes:
                 val = float(changes["daily_loss_limit_pct"])
                 if not (0.1 <= val <= 100.0):
@@ -2811,6 +2842,37 @@ class MultiStrategyBot:
                 settings.MAX_TOTAL_OPEN_RISK_PCT = val
                 self.risk.portfolio.cfg.max_total_open_risk_pct = val
                 changed.append(f"MAX_TOTAL_OPEN_RISK_PCT={val:.2f}")
+
+            if "max_positions_total" in changes:
+                val = int(changes["max_positions_total"])
+                if not (1 <= val <= 50):
+                    return False, "max_positions_total muss zwischen 1 und 50 liegen."
+                settings.MAX_POSITIONS_TOTAL = val
+                settings.MAX_OPEN_TRADES = val
+                # RiskEngine nutzt diesen harten Gate für check_signal().
+                hard_cap = val
+                if settings.TRADING_MODE == "live" and bool(getattr(settings, "LIVE_TEST_MODE", False)):
+                    hard_cap = min(hard_cap, 1)
+                self.risk.max_open_trades = hard_cap
+                # Portfolio-Layer separat synchron halten.
+                self.risk.portfolio.cfg.max_positions_total = val
+                changed.append(f"MAX_POSITIONS_TOTAL={val}")
+
+            if "max_position_notional" in changes:
+                val = float(changes["max_position_notional"])
+                if not (5.0 <= val <= 1_000_000.0):
+                    return False, "max_position_notional muss zwischen 5 und 1_000_000 liegen."
+                settings.MAX_POSITION_NOTIONAL = val
+                self.risk.portfolio.cfg.max_position_notional = val
+                changed.append(f"MAX_POSITION_NOTIONAL={val:.2f}")
+
+            if "min_position_notional" in changes:
+                val = float(changes["min_position_notional"])
+                if not (1.0 <= val <= 100_000.0):
+                    return False, "min_position_notional muss zwischen 1 und 100_000 liegen."
+                settings.MIN_POSITION_NOTIONAL = val
+                self.risk.portfolio.cfg.min_position_notional = val
+                changed.append(f"MIN_POSITION_NOTIONAL={val:.2f}")
 
             if "daily_loss_limit_pct" in changes:
                 val = float(changes["daily_loss_limit_pct"])

@@ -161,6 +161,10 @@ class Settings:
     AMPEL_GREEN_MAX_LOSING_STREAK: int = int(
         os.getenv("AMPEL_GREEN_MAX_LOSING_STREAK", "2")
     )
+    # Falls die letzten geschlossenen Trades zu alt sind, wird RED nicht forciert,
+    # damit der Bot nicht in einem dauerhaften "Red-Lock" ohne neue Daten hängen bleibt.
+    AMPEL_STALE_DATA_HOURS: float = float(os.getenv("AMPEL_STALE_DATA_HOURS", "8"))
+    AMPEL_STALE_FORCE_YELLOW: bool = _env_bool("AMPEL_STALE_FORCE_YELLOW", default=True)
     AMPEL_AUTO_ENABLED: bool = _env_bool("AMPEL_AUTO_ENABLED", default=True)
     AMPEL_AUTO_INTERVAL_SEC: int = int(os.getenv("AMPEL_AUTO_INTERVAL_SEC", "180"))
 

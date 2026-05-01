@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Dict, Optional, Tuple, Any, List
@@ -1473,11 +1474,25 @@ class TelegramControlPanel:
             return 99.0 if wins > 0 else 0.0
         return float(wins / losses)
 
-    def _collect_closed_pnls(self, lookback: int) -> List[float]:
+    @staticmethod
+    def _parse_db_timestamp(raw: Any) -> Optional[datetime]:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _collect_closed_metrics(self, lookback: int) -> Tuple[List[float], Optional[datetime]]:
         if not self._repo.available:
-            return []
+            return [], None
         rows = self._repo.get_recent_trades(limit=max(10, int(lookback) * 3), status="closed")
         pnls: List[float] = []
+        latest_closed_at: Optional[datetime] = None
         for row in rows:
             value = row.get("pnl_abs")
             if value is None:
@@ -1486,16 +1501,32 @@ class TelegramControlPanel:
                 pnls.append(float(value))
             except Exception:
                 continue
+            ts = self._parse_db_timestamp(
+                row.get("timestamp_close") or row.get("updated_at") or row.get("created_at")
+            )
+            if ts is not None and (latest_closed_at is None or ts > latest_closed_at):
+                latest_closed_at = ts
             if len(pnls) >= lookback:
                 break
-        return pnls
+        return pnls, latest_closed_at
 
     def _compute_ampel(self, lookback: Optional[int] = None) -> Dict[str, Any]:
         lookback_n = int(lookback or int(getattr(settings, "AMPEL_WINDOW_TRADES", 50) or 50))
         lookback_n = max(10, min(lookback_n, 300))
-        pnls = self._collect_closed_pnls(lookback_n)
+        pnls, latest_closed_at = self._collect_closed_metrics(lookback_n)
         n = len(pnls)
         min_trades = int(getattr(settings, "AMPEL_MIN_TRADES", 20) or 20)
+        stale_hours: Optional[float] = None
+        if latest_closed_at is not None:
+            stale_hours = max(
+                0.0,
+                (datetime.now(timezone.utc) - latest_closed_at).total_seconds() / 3600.0,
+            )
+        stale_limit_hours = float(getattr(settings, "AMPEL_STALE_DATA_HOURS", 8.0) or 0.0)
+        stale_data = bool(
+            stale_limit_hours > 0.0 and stale_hours is not None and stale_hours >= stale_limit_hours
+        )
+        stale_force_yellow = bool(getattr(settings, "AMPEL_STALE_FORCE_YELLOW", True))
         if n == 0:
             return {
                 "state": "YELLOW",
@@ -1510,6 +1541,8 @@ class TelegramControlPanel:
                 "expectancy_r": 0.0,
                 "losing_streak": 0,
                 "insufficient_data": True,
+                "stale_data": stale_data,
+                "last_closed_trade_age_h": round(stale_hours, 2) if stale_hours is not None else None,
             }
 
         wins = [p for p in pnls if p > 0.0]
@@ -1568,6 +1601,12 @@ class TelegramControlPanel:
                 state = "YELLOW"
                 reason = "metrics_mixed"
 
+        # Anti-Stall: Wenn die Datengrundlage alt ist, RED nicht hart erzwingen.
+        # Sonst kann der Bot in einem dauerhaften "RED -> keine Entries -> keine neuen Closed-Trades"-Loop hängen.
+        if state == "RED" and stale_data and stale_force_yellow:
+            state = "YELLOW"
+            reason = f"stale_data_force_yellow:{stale_hours:.1f}h"
+
         return {
             "state": state,
             "emoji": {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(state, "⚪"),
@@ -1581,6 +1620,8 @@ class TelegramControlPanel:
             "expectancy_r": expectancy_r,
             "losing_streak": losing_streak,
             "insufficient_data": n < min_trades,
+            "stale_data": stale_data,
+            "last_closed_trade_age_h": round(stale_hours, 2) if stale_hours is not None else None,
         }
 
     def _apply_ampel_guard(self, ampel: Dict[str, Any], *, source: str) -> Tuple[bool, str]:
@@ -1618,6 +1659,8 @@ class TelegramControlPanel:
             f"{ampel.get('emoji', '⚪')} <b>Ampel: {state}</b>\n"
             f"Action: <code>{action}</code> | Guard: <code>{action_txt}</code>\n"
             f"Trades: <code>{ampel.get('trades')}</code>/<code>{ampel.get('lookback')}</code>\n"
+            f"DataAge(h): <code>{ampel.get('last_closed_trade_age_h')}</code> | "
+            f"Stale: <code>{ampel.get('stale_data')}</code>\n"
             f"Winrate: <code>{ampel.get('winrate')}%</code> | PF: <code>{ampel.get('pf')}</code>\n"
             f"AvgPnL: <code>{ampel.get('avg_pnl')}</code> | TotalPnL: <code>{ampel.get('total_pnl')}</code>\n"
             f"Expectancy(R): <code>{ampel.get('expectancy_r')}</code> | "

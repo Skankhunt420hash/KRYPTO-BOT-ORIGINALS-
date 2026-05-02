@@ -401,7 +401,7 @@ class Settings:
     MASTER_BRAIN_ENABLED: bool = _env_bool("MASTER_BRAIN_ENABLED", default=True)
     MASTER_BRAIN_MIN_TRADES: int = int(os.getenv("MASTER_BRAIN_MIN_TRADES", 20))
     MASTER_BRAIN_TARGET_WINRATE_PCT: float = float(
-        os.getenv("MASTER_BRAIN_TARGET_WINRATE_PCT", 50.0)
+        os.getenv("MASTER_BRAIN_TARGET_WINRATE_PCT", 70.0)
     )
     MASTER_BRAIN_FAIL_WINDOWS: int = int(os.getenv("MASTER_BRAIN_FAIL_WINDOWS", 2))
     MASTER_BRAIN_AUTO_PAUSE: bool = _env_bool("MASTER_BRAIN_AUTO_PAUSE", default=True)

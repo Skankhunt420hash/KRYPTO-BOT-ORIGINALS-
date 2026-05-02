@@ -1362,6 +1362,184 @@ class TelegramControlPanel:
         )
         self._send_text(chat_id, text)
 
+    def _send_ampel(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        gate = rt.get("risk_gate") or {}
+        brain = rt.get("brain") or {}
+        stale_count = 0
+        try:
+            stale_count = len((self._callbacks.get_market_status() or {}).get("stale_symbols") or [])
+        except Exception:
+            stale_count = 0
+
+        paused = bool(rt.get("paused", False))
+        risk_off = bool(rt.get("risk_off", False))
+        risky = bool(brain.get("risky_phase", False))
+        gate_reason = str(gate.get("last_gate_reason", "n/a"))
+        open_pos = int(gate.get("open_positions", rt.get("open_positions", 0)) or 0)
+        max_pos = int(gate.get("max_open_positions", getattr(settings, "MAX_POSITIONS_TOTAL", 0)) or 0)
+
+        if paused or risk_off or stale_count > 0:
+            state = "🔴 RED"
+            reason = "Pause/RiskOff oder stale Daten aktiv"
+        elif "DAILY LOSS" in gate_reason.upper() or "MAX TRADES" in gate_reason.upper():
+            state = "🔴 RED"
+            reason = gate_reason
+        elif risky or (open_pos >= max_pos and max_pos > 0):
+            state = "🟡 YELLOW"
+            reason = "Risky-Phase oder Positionslimit erreicht"
+        else:
+            state = "🟢 GREEN"
+            reason = "Bedingungen für neue Entries sind grundsätzlich ok"
+
+        self._send_text(
+            chat_id,
+            "🚦 <b>Ampel</b>\n"
+            f"State: <code>{state}</code>\n"
+            f"Reason: <code>{reason}</code>\n"
+            f"Gate: <code>{gate_reason}</code>\n"
+            f"Paused/RiskOff: <code>{paused}/{risk_off}</code>\n"
+            f"Open: <code>{open_pos}/{max_pos}</code>\n"
+            f"Brain risky: <code>{risky}</code>\n"
+            f"Stale symbols: <code>{stale_count}</code>",
+        )
+
+    def _send_ampel_debug(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        gate = rt.get("risk_gate") or {}
+        brain = rt.get("brain") or {}
+        master = {}
+        if self._callbacks.get_master_status:
+            try:
+                master = self._callbacks.get_master_status() or {}
+            except Exception:
+                master = {}
+        markets = {}
+        if self._callbacks.get_market_status:
+            try:
+                markets = self._callbacks.get_market_status() or {}
+            except Exception:
+                markets = {}
+        self._send_text(
+            chat_id,
+            "🚦 <b>Ampel Debug</b>\n"
+            f"Gate last: <code>{gate.get('last_gate_reason', 'n/a')}</code>\n"
+            f"Startup OK: <code>{gate.get('recovery_startup_ok', 'n/a')}</code>\n"
+            f"Blocked symbols: <code>{len(gate.get('recovery_blocked_symbols', []) or [])}</code>\n"
+            f"Paused/RiskOff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>\n"
+            f"Brain score/risky: <code>{brain.get('last_signal_score', 'n/a')}/{brain.get('risky_phase', 'n/a')}</code>\n"
+            f"Master enabled: <code>{master.get('enabled', 'n/a')}</code> | "
+            f"winrate: <code>{master.get('last_winrate_pct', 'n/a')}%</code>\n"
+            f"Master reason: <code>{master.get('last_reason', 'n/a')}</code>\n"
+            f"Stale symbols: <code>{len(markets.get('stale_symbols', []) or [])}</code>",
+        )
+
+    def _handle_ampelauto(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        action = parts[1].strip().lower() if len(parts) > 1 else "status"
+        if action == "status":
+            self._send_master_status(chat_id)
+            return
+        if action not in {"on", "off"}:
+            self._send_legacy_ampel_help(chat_id)
+            return
+        if not self._callbacks.apply_runtime_settings:
+            self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+            return
+        target = action == "on"
+        ok, msg = self._callbacks.apply_runtime_settings({"master_brain_enabled": target})
+        self._send_text(chat_id, f"{'✅' if ok else '⚠️'} AMPEL_AUTO enabled={target} | {msg}")
+
+    def _handle_ampel_min_trades(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 2:
+            self._send_text(chat_id, "Verwendung: /ampel_min_trades <anzahl>")
+            return
+        try:
+            val = int(parts[1].strip())
+        except Exception:
+            self._send_text(chat_id, f"Ungültige Zahl: {parts[1].strip()}")
+            return
+        if not self._callbacks.apply_runtime_settings:
+            self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.apply_runtime_settings({"master_brain_min_trades": val})
+        self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+
+    def _handle_setprofile(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 2:
+            self._send_text(chat_id, "Verwendung: /setprofile <growth|scalping|defensive|hf75>")
+            return
+        profile = parts[1].strip().lower()
+        presets = {
+            "growth": {
+                "daily_loss_limit_pct": 8.0,
+                "coin_cooldown_minutes": 6,
+                "strategy_cooldown_minutes": 3,
+                "duplicate_signal_minutes": 2,
+                "brain_min_score_to_trade": 0.42,
+                "brain_risky_phase_score": 0.32,
+                "brain_reward_weight": 0.20,
+                "brain_reward_window": 24,
+                "master_brain_target_winrate_pct": 70.0,
+            },
+            "scalping": {
+                "daily_loss_limit_pct": 9.0,
+                "coin_cooldown_minutes": 2,
+                "strategy_cooldown_minutes": 1,
+                "duplicate_signal_minutes": 1,
+                "brain_min_score_to_trade": 0.34,
+                "brain_risky_phase_score": 0.26,
+                "brain_reward_weight": 0.22,
+                "brain_reward_window": 16,
+                "master_brain_target_winrate_pct": 70.0,
+            },
+            "defensive": {
+                "daily_loss_limit_pct": 5.0,
+                "coin_cooldown_minutes": 15,
+                "strategy_cooldown_minutes": 8,
+                "duplicate_signal_minutes": 6,
+                "brain_min_score_to_trade": 0.52,
+                "brain_risky_phase_score": 0.40,
+                "brain_reward_weight": 0.16,
+                "brain_reward_window": 28,
+                "master_brain_target_winrate_pct": 70.0,
+            },
+            "hf75": {
+                "daily_loss_limit_pct": 10.0,
+                "coin_cooldown_minutes": 3,
+                "strategy_cooldown_minutes": 2,
+                "duplicate_signal_minutes": 1,
+                "brain_min_score_to_trade": 0.30,
+                "brain_risky_phase_score": 0.24,
+                "brain_reward_weight": 0.24,
+                "brain_reward_window": 14,
+                "master_brain_target_winrate_pct": 75.0,
+                "master_brain_fail_windows": 3,
+            },
+        }
+        if profile not in presets:
+            self._send_text(chat_id, f"Unbekanntes Profil: {profile}")
+            return
+        if not self._callbacks.apply_runtime_settings:
+            self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.apply_runtime_settings(presets[profile])
+        self._send_text(chat_id, f"{'✅' if ok else '⚠️'} Profil <code>{profile}</code> gesetzt.\n{msg}")
+
+    def _handle_testtrade(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        self._send_text(
+            chat_id,
+            "🧪 <b>Testtrade-Bridge</b>\n"
+            "Direkter Testtrade ist in diesem Build nicht als harte Market-Order verdrahtet.\n"
+            "Stattdessen Schnellcheck:\n"
+            f"• running: <code>{rt.get('running', False)}</code>\n"
+            f"• paused/riskoff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>\n"
+            "Nutze /unlock und danach /markets + /ampeldebug für sofortige Diagnostik.",
+        )
+
     def _handle_unlock(self, chat_id: str) -> None:
         runtime_control.resume_entries()
         runtime_control.disable_risk_off()

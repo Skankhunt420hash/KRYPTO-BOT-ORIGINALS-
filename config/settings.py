@@ -171,6 +171,21 @@ class Settings:
     RECOVERY_MAX_OPEN_TRADES_RESTORE: int = int(
         os.getenv("RECOVERY_MAX_OPEN_TRADES_RESTORE", 100)
     )
+    # Startup-Gate zyklisch neu prüfen, damit temporäre Boot-Fehler
+    # den Bot nicht dauerhaft blockieren.
+    STARTUP_GATE_RECHECK_SEC: int = int(
+        os.getenv("STARTUP_GATE_RECHECK_SEC", 180)
+    )
+    # Recovery-Blocks auf Symbolen laufen nach TTL aus, wenn keine
+    # offene Position dazu mehr existiert.
+    RECOVERY_BLOCK_SYMBOL_TTL_MINUTES: int = int(
+        os.getenv("RECOVERY_BLOCK_SYMBOL_TTL_MINUTES", 120)
+    )
+    # Bei sauberem Startup stale Pause/RiskOff aus Recovery-Datei automatisch lösen.
+    RECOVERY_AUTO_RESUME_ON_CLEAN_STARTUP: bool = _env_bool(
+        "RECOVERY_AUTO_RESUME_ON_CLEAN_STARTUP",
+        default=True,
+    )
     # Exchange-Read-Retry (nur read-only Calls, keine Mehrfachorders)
     EXCHANGE_READ_RETRY_MAX: int = int(os.getenv("EXCHANGE_READ_RETRY_MAX", 2))
     EXCHANGE_READ_RETRY_BACKOFF_SEC: float = float(
@@ -337,6 +352,16 @@ class Settings:
     # Mindesthistorie, bevor das Bitter-Gate hart blockiert.
     BRAIN_BITTER_TREAT_MIN_TRADES: int = int(
         os.getenv("BRAIN_BITTER_TREAT_MIN_TRADES", 8)
+    )
+    # Zusätzliche Guardrails, damit das Bitter-Gate nicht dauerhaft alles blockiert.
+    BRAIN_BITTER_TREAT_MIN_LOSING_STREAK: int = int(
+        os.getenv("BRAIN_BITTER_TREAT_MIN_LOSING_STREAK", 3)
+    )
+    BRAIN_BITTER_TREAT_MAX_RECENCY_WR_PCT: float = float(
+        os.getenv("BRAIN_BITTER_TREAT_MAX_RECENCY_WR_PCT", 45.0)
+    )
+    BRAIN_BITTER_TREAT_MAX_STALE_HOURS: float = float(
+        os.getenv("BRAIN_BITTER_TREAT_MAX_STALE_HOURS", 6.0)
     )
 
     # ------------------------------------------------------------------

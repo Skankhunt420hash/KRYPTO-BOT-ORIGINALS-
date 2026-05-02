@@ -440,7 +440,10 @@ class TradingBot:
             self.perf_tracker.refresh()
         except Exception:
             pass
-        for symbol in self.pairs:
+        cycle_symbols = list(
+            dict.fromkeys(list(self.pairs) + list(self.risk.open_positions.keys()))
+        )
+        for symbol in cycle_symbols:
             try:
                 self._process_pair(symbol)
             except Exception as e:
@@ -959,6 +962,44 @@ class MultiStrategyBot:
             issues.append(f"ticker_check_failed:{type(e).__name__}")
         return issues
 
+    @staticmethod
+    def _is_soft_startup_issue(issue: str) -> bool:
+        """
+        Soft-Issues dürfen den Bot nicht dauerhaft blockieren.
+        Diese Probleme sind oft temporär (API/Ticker/Netz).
+        """
+        txt = str(issue or "").strip().lower()
+        return (
+            txt.startswith("ticker_check_failed:")
+            or txt.startswith("no_market_price:")
+            or txt.startswith("exchange_connection_failed:")
+            or txt.startswith("exchange_markets_unavailable")
+        )
+
+    def _reevaluate_startup_gate(self) -> None:
+        """
+        Re-evaluiert ein aktives Startup-Gate zur Laufzeit.
+        Ziel: Kein permanenter Lock, wenn sich externe Bedingungen wieder normalisieren.
+        """
+        if self._startup_checks_ok:
+            return
+        try:
+            issues = self._startup_sanity_checks()
+            if issues:
+                self._startup_block_reason = " | ".join(issues)
+                return
+
+            self._startup_checks_ok = True
+            self._startup_block_reason = ""
+            self._recovery_blocked_symbols.clear()
+            runtime_control.resume_entries()
+            runtime_control.disable_risk_off()
+            runtime_state.append_log("RECOVERY startup_gate_auto_unlocked")
+            self.tg.notify_risk_off(False, "startup_gate_auto_unlocked")
+            logger.warning("[green]STARTUP-GATE GELÖST[/green] Recovery automatisch entsperrt.")
+        except Exception as e:
+            logger.warning("Startup-Gate-Recheck fehlgeschlagen: %s", e)
+
     def _recover_after_restart(self) -> None:
         self._restore_control_state_from_file()
         restored_positions = self._recover_open_positions_from_db()
@@ -1015,6 +1056,81 @@ class MultiStrategyBot:
             risk_off=runtime_control.get_snapshot().get("risk_off", False),
             notes=self._startup_block_reason,
         )
+
+    def _reevaluate_startup_gate(self) -> None:
+        """
+        Verhindert, dass der Bot nach einem temporären Startup-Problem
+        dauerhaft im Startup-Block hängen bleibt.
+        """
+        if self._startup_checks_ok:
+            return
+        try:
+            issues = self._startup_sanity_checks()
+            hard_issues = [i for i in issues if not self._is_soft_startup_issue(i)]
+            if not hard_issues:
+                self._startup_checks_ok = True
+                self._startup_block_reason = ""
+                # Recovery-Blocker sind konservativ nur für den ersten Start gedacht.
+                # Wenn die Startup-Prüfung wieder sauber ist, sollen Symbole wieder laufen.
+                self._recovery_blocked_symbols.clear()
+                ctrl = runtime_control.get_snapshot()
+                if ctrl.get("paused"):
+                    runtime_control.resume_entries()
+                if ctrl.get("risk_off"):
+                    runtime_control.disable_risk_off()
+                runtime_state.append_log("RECOVERY startup_gate_auto_healed")
+                logger.warning(
+                    "STARTUP-GATE AUTO-HEAL: Startup-Block aufgehoben, Entries wieder aktiv."
+                )
+                self.tg.notify_info(
+                    "RECOVERY_AUTO_HEAL",
+                    "Startup-Block automatisch aufgehoben. Bot läuft wieder normal.",
+                )
+                return
+
+            new_reason = " | ".join(hard_issues)
+            if new_reason != self._startup_block_reason:
+                self._startup_block_reason = new_reason
+                runtime_state.append_log(f"RECOVERY startup_block_update {new_reason}")
+        except Exception as e:
+            logger.warning(f"Startup-Gate-Reevaluation fehlgeschlagen: {e}")
+
+    def _reevaluate_startup_gate(self) -> None:
+        """
+        Verhindert, dass der Bot nach einem temporären Startup-Problem
+        dauerhaft im Startup-Block hängen bleibt.
+        """
+        if self._startup_checks_ok:
+            return
+        try:
+            issues = self._startup_sanity_checks()
+            if not issues:
+                self._startup_checks_ok = True
+                self._startup_block_reason = ""
+                # Recovery-Blocker sind konservativ nur für den ersten Start gedacht.
+                # Wenn die Startup-Prüfung wieder sauber ist, sollen Symbole wieder laufen.
+                self._recovery_blocked_symbols.clear()
+                ctrl = runtime_control.get_snapshot()
+                if ctrl.get("paused"):
+                    runtime_control.resume_entries()
+                if ctrl.get("risk_off"):
+                    runtime_control.disable_risk_off()
+                runtime_state.append_log("RECOVERY startup_gate_auto_healed")
+                logger.warning(
+                    "STARTUP-GATE AUTO-HEAL: Startup-Block aufgehoben, Entries wieder aktiv."
+                )
+                self.tg.notify_info(
+                    "RECOVERY_AUTO_HEAL",
+                    "Startup-Block automatisch aufgehoben. Bot läuft wieder normal.",
+                )
+                return
+
+            new_reason = " | ".join(issues)
+            if new_reason != self._startup_block_reason:
+                self._startup_block_reason = new_reason
+                runtime_state.append_log(f"RECOVERY startup_block_update {new_reason}")
+        except Exception as e:
+            logger.warning(f"Startup-Gate-Reevaluation fehlgeschlagen: {e}")
 
     def _live_allowed_symbols(self) -> List[str]:
         raw = str(getattr(settings, "LIVE_ALLOWED_SYMBOLS", "") or "").strip()
@@ -1974,6 +2090,7 @@ class MultiStrategyBot:
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
+        self._reevaluate_startup_gate()
         if not self._startup_checks_ok:
             reason = self._startup_block_reason or "startup_checks_failed"
             logger.error(
@@ -2019,7 +2136,16 @@ class MultiStrategyBot:
         except Exception as e:
             logger.warning(f"Scorer-Refresh fehlgeschlagen (nicht kritisch): {e}")
 
-        for symbol in self.pairs:
+        cycle_symbols = list(
+            dict.fromkeys(list(self.pairs) + list(self.risk.open_positions.keys()))
+        )
+        extra_symbols = [s for s in self.risk.open_positions.keys() if s not in self.pairs]
+        if extra_symbols:
+            logger.info(
+                "Exit-Überwachung erweitert um offene Symbole außerhalb Pair-Liste: %s",
+                ", ".join(extra_symbols[:20]),
+            )
+        for symbol in cycle_symbols:
             try:
                 self._process_pair(symbol)
             except Exception as e:

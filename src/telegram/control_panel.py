@@ -405,6 +405,20 @@ class TelegramControlPanel:
                 self._send_master_status(chat_id)
             elif cmd == "/masterheal":
                 self._handle_autoheal(chat_id)
+            elif cmd == "/repair":
+                self._handle_autoheal(chat_id)
+            elif cmd == "/unlock":
+                self._handle_unlock(chat_id)
+            elif cmd == "/safemode":
+                self._handle_safemode(chat_id)
+            elif cmd == "/recovery":
+                self._send_recovery(chat_id)
+            elif cmd == "/snapshot":
+                self._handle_snapshot(chat_id)
+            elif cmd == "/setmaster":
+                self._handle_setmaster(chat_id, text)
+            elif cmd == "/ops":
+                self._send_ops(chat_id)
             elif cmd == "/stop_bot":
                 self._handle_stop_bot(chat_id)
             elif cmd == "/start_bot":
@@ -528,7 +542,8 @@ class TelegramControlPanel:
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;\n"
-            "🧠 <b>Diagnose</b>: /config /brain /markets /autoheal /masterstatus /masterheal\n"
+            "🧠 <b>Diagnose</b>: /config /brain /markets /autoheal /masterstatus /masterheal /recovery /snapshot\n"
+            "🛠 <b>Ops</b>: /repair /unlock /safemode /ops /setmaster &lt;key&gt; &lt;value&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
         )
@@ -1320,4 +1335,90 @@ class TelegramControlPanel:
             f"Last Snapshot: <code>{data.get('last_snapshot_file', 'n/a')}</code>"
         )
         self._send_text(chat_id, text)
+
+    def _handle_unlock(self, chat_id: str) -> None:
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+        runtime_state.append_log("TELEGRAM /unlock -> pause+riskoff aufgehoben")
+        self._send_text(chat_id, "✅ Unlock ausgeführt: Pause/Risk-Off aufgehoben.")
+
+    def _handle_safemode(self, chat_id: str) -> None:
+        runtime_control.pause_entries()
+        runtime_control.enable_risk_off()
+        runtime_state.update_engine(paused=True, risk_off=True)
+        runtime_state.append_log("TELEGRAM /safemode -> pause+riskoff gesetzt")
+        self._send_text(chat_id, "🛡 SafeMode aktiv: Neue Entries pausiert und Risk-Off gesetzt.")
+
+    def _send_recovery(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        gate = rt.get("risk_gate") or {}
+        text = (
+            "🧯 <b>Recovery-Status</b>\n"
+            f"Startup OK: <code>{gate.get('recovery_startup_ok', 'n/a')}</code>\n"
+            f"Startup Reason: <code>{gate.get('recovery_startup_reason', 'n/a')}</code>\n"
+            f"Blocked Symbols: <code>{len(gate.get('recovery_blocked_symbols', []) or [])}</code>\n"
+            f"Paused/RiskOff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>\n"
+            f"Last Gate: <code>{gate.get('last_gate_reason', 'n/a')}</code>"
+        )
+        self._send_text(chat_id, text)
+
+    def _handle_snapshot(self, chat_id: str) -> None:
+        if not self._callbacks.request_auto_heal:
+            self._send_text(chat_id, "⚠️ Snapshot/Autoheal Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.request_auto_heal()
+        self._send_text(
+            chat_id,
+            f"{'✅' if ok else '⚠️'} Snapshot-Heal ausgeführt.\n<code>{msg}</code>",
+        )
+
+    def _handle_setmaster(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setmaster <key> <value>\n"
+                "Keys: enabled, min_trades, target_winrate, fail_windows, auto_pause",
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "enabled": ("master_brain_enabled", lambda x: str(x).strip().lower() in {"1", "true", "yes", "on"}),
+            "min_trades": ("master_brain_min_trades", int),
+            "target_winrate": ("master_brain_target_winrate_pct", float),
+            "fail_windows": ("master_brain_fail_windows", int),
+            "auto_pause": ("master_brain_auto_pause", lambda x: str(x).strip().lower() in {"1", "true", "yes", "on"}),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter master-Key: {key}")
+            return
+        runtime_key, caster = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _send_ops(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        self._send_text(
+            chat_id,
+            "🛠 <b>Ops-Panel</b>\n"
+            "• /repair oder /autoheal: automatische Reparatur + Snapshot\n"
+            "• /unlock: Pause/Risk-Off aufheben\n"
+            "• /safemode: Pause/Risk-Off setzen\n"
+            "• /recovery: Startup-/Recovery-Blocker anzeigen\n"
+            "• /snapshot: sofort Snapshot+Heal triggern\n"
+            "• /setrisk max_positions 8\n"
+            "• /setmaster target_winrate 55\n"
+            f"Aktuell pause/riskoff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>",
+        )
+
 

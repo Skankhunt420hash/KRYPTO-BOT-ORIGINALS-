@@ -2584,6 +2584,29 @@ class MultiStrategyBot:
                     v = max(-1.0, min(0.0, v))
                     settings.BRAIN_BITTER_TREAT_BLOCK_THRESHOLD = v
                     changed.append(f"BRAIN_BITTER_TREAT_BLOCK_THRESHOLD={v:.3f}")
+                elif k == "master_brain_enabled":
+                    v = bool(value)
+                    settings.MASTER_BRAIN_ENABLED = v
+                    changed.append(f"MASTER_BRAIN_ENABLED={v}")
+                elif k == "master_brain_min_trades":
+                    v = int(value)
+                    v = max(5, min(500, v))
+                    settings.MASTER_BRAIN_MIN_TRADES = v
+                    changed.append(f"MASTER_BRAIN_MIN_TRADES={v}")
+                elif k == "master_brain_target_winrate_pct":
+                    v = float(value)
+                    v = max(1.0, min(99.0, v))
+                    settings.MASTER_BRAIN_TARGET_WINRATE_PCT = v
+                    changed.append(f"MASTER_BRAIN_TARGET_WINRATE_PCT={v:.2f}")
+                elif k == "master_brain_fail_windows":
+                    v = int(value)
+                    v = max(1, min(20, v))
+                    settings.MASTER_BRAIN_FAIL_WINDOWS = v
+                    changed.append(f"MASTER_BRAIN_FAIL_WINDOWS={v}")
+                elif k == "master_brain_auto_pause":
+                    v = bool(value)
+                    settings.MASTER_BRAIN_AUTO_PAUSE = v
+                    changed.append(f"MASTER_BRAIN_AUTO_PAUSE={v}")
                 else:
                     return False, f"Unbekannter Runtime-Key: {k}"
             if not changed:

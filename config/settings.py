@@ -167,6 +167,15 @@ class Settings:
     AMPEL_STALE_FORCE_YELLOW: bool = _env_bool("AMPEL_STALE_FORCE_YELLOW", default=True)
     AMPEL_AUTO_ENABLED: bool = _env_bool("AMPEL_AUTO_ENABLED", default=True)
     AMPEL_AUTO_INTERVAL_SEC: int = int(os.getenv("AMPEL_AUTO_INTERVAL_SEC", "180"))
+    # Anti-Spam für Auto-Ampel-Meldungen:
+    # gleiche Zustandsmeldung (z.B. RED-Hold) nur alle N Sekunden erneut senden.
+    AMPEL_AUTO_NOTIFY_COOLDOWN_SEC: int = int(
+        _first_non_empty(
+            "AMPEL_AUTO_NOTIFY_COOLDOWN_SEC",
+            "AMPEL_NOTIFY_COOLDOWN_SEC",
+            default="1800",
+        )
+    )
 
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)

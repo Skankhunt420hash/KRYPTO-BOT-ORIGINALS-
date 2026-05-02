@@ -138,7 +138,12 @@ class TelegramControlPanel:
         self._ampel_auto_interval_sec: int = int(
             getattr(settings, "AMPEL_AUTO_INTERVAL_SEC", 180)
         )
+        self._ampel_auto_notify_cooldown_sec: int = int(
+            getattr(settings, "AMPEL_AUTO_NOTIFY_COOLDOWN_SEC", 1800)
+        )
         self._last_ampel_auto_ts: float = 0.0
+        self._last_ampel_auto_notify_state: str = ""
+        self._last_ampel_auto_notify_ts: float = 0.0
         # Latch gegen Red-Loop-Spam:
         # Wenn Ampel einmal auf RED gestellt hat, wird die Sperre gehalten,
         # ohne bei jedem Tick erneut Pause/RiskOff-Notifications zu senden.
@@ -1784,10 +1789,20 @@ class TelegramControlPanel:
         changed, action = self._apply_ampel_guard(ampel, source="ampel_auto")
         if changed and self._chat_id:
             try:
-                self._send_text(
-                    self._chat_id,
-                    "🚦 <b>AmpelAuto Aktion</b>\n" + self._format_ampel_text(ampel, action),
-                )
+                state = str(ampel.get("state", "UNKNOWN")).upper()
+                notify_now = True
+                # Anti-Spam: gleiche Aktion für denselben Ampel-State nicht ständig wiederholen.
+                if not force and state == self._last_ampel_auto_notify_state:
+                    elapsed = now - self._last_ampel_auto_notify_ts
+                    if elapsed < float(self._ampel_auto_notify_cooldown_sec):
+                        notify_now = False
+                if notify_now:
+                    self._send_text(
+                        self._chat_id,
+                        "🚦 <b>AmpelAuto Aktion</b>\n" + self._format_ampel_text(ampel, action),
+                    )
+                    self._last_ampel_auto_notify_state = state
+                    self._last_ampel_auto_notify_ts = now
             except Exception:
                 pass
 
@@ -1799,7 +1814,8 @@ class TelegramControlPanel:
                 chat_id,
                 "🚦 <b>AmpelAuto</b>\n"
                 f"enabled=<code>{self._ampel_auto_enabled}</code>\n"
-                f"interval=<code>{self._ampel_auto_interval_sec}s</code>",
+                f"interval=<code>{self._ampel_auto_interval_sec}s</code>\n"
+                f"notify_cooldown=<code>{self._ampel_auto_notify_cooldown_sec}s</code>",
             )
             return
         if mode in ("on", "enable", "1", "true"):

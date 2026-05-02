@@ -139,6 +139,13 @@ class TelegramControlPanel:
             getattr(settings, "AMPEL_AUTO_INTERVAL_SEC", 180)
         )
         self._last_ampel_auto_ts: float = 0.0
+        # Latch gegen Red-Loop-Spam:
+        # Wenn Ampel einmal auf RED gestellt hat, wird die Sperre gehalten,
+        # ohne bei jedem Tick erneut Pause/RiskOff-Notifications zu senden.
+        ctrl_boot = runtime_control.get_snapshot()
+        self._ampel_guard_latched_red: bool = bool(
+            ctrl_boot.get("paused") and ctrl_boot.get("risk_off")
+        )
         token_state = "set" if bool(self._token) else "missing"
         chat_state = "set" if bool(self._chat_id) else "missing"
         logger.info(
@@ -1695,30 +1702,52 @@ class TelegramControlPanel:
 
     def _apply_ampel_guard(self, ampel: Dict[str, Any], *, source: str) -> Tuple[bool, str]:
         state = str(ampel.get("state", "YELLOW")).upper()
-        if state == "RED":
-            runtime_control.pause_entries()
-            runtime_control.enable_risk_off()
-            runtime_state.update_engine(paused=True, risk_off=True)
-            runtime_state.append_log(f"AMPEL {source} RED -> pause+risk_off")
-            try:
-                self._notifier.notify_bot_paused(f"ampel:{source}:red")
-                self._notifier.notify_risk_off(True, f"ampel:{source}:red")
-            except Exception:
-                pass
-            return True, "red_pause_risk_off"
-
         ctrl = runtime_control.get_snapshot()
-        if bool(ctrl.get("paused")) or bool(ctrl.get("risk_off")):
-            runtime_control.resume_entries()
-            runtime_control.disable_risk_off()
-            runtime_state.update_engine(paused=False, risk_off=False)
-            runtime_state.append_log(f"AMPEL {source} {state} -> resume+risk_on")
-            try:
-                self._notifier.notify_bot_resumed(f"ampel:{source}:{state.lower()}")
-                self._notifier.notify_risk_off(False, f"ampel:{source}:{state.lower()}")
-            except Exception:
-                pass
-            return True, f"{state.lower()}_resume_risk_on"
+
+        if state == "RED":
+            need_pause = not bool(ctrl.get("paused"))
+            need_risk_off = not bool(ctrl.get("risk_off"))
+            if need_pause:
+                runtime_control.pause_entries()
+            if need_risk_off:
+                runtime_control.enable_risk_off()
+
+            if need_pause or need_risk_off:
+                runtime_state.update_engine(paused=True, risk_off=True)
+                runtime_state.append_log(f"AMPEL {source} RED -> pause+risk_off")
+                self._ampel_guard_latched_red = True
+                try:
+                    self._notifier.notify_bot_paused(f"ampel:{source}:red")
+                    self._notifier.notify_risk_off(True, f"ampel:{source}:red")
+                except Exception:
+                    pass
+                return True, "red_pause_risk_off"
+
+            # Bereits gesperrt: nur halten, kein erneuter Spam.
+            self._ampel_guard_latched_red = True
+            return False, "red_hold_latched"
+
+        # Auto-Resume nur wenn die Sperre auch von Ampel gesetzt wurde.
+        if self._ampel_guard_latched_red:
+            had_pause = bool(ctrl.get("paused"))
+            had_risk_off = bool(ctrl.get("risk_off"))
+            if had_pause:
+                runtime_control.resume_entries()
+            if had_risk_off:
+                runtime_control.disable_risk_off()
+
+            self._ampel_guard_latched_red = False
+            if had_pause or had_risk_off:
+                runtime_state.update_engine(paused=False, risk_off=False)
+                runtime_state.append_log(f"AMPEL {source} {state} -> resume+risk_on")
+                try:
+                    self._notifier.notify_bot_resumed(f"ampel:{source}:{state.lower()}")
+                    self._notifier.notify_risk_off(False, f"ampel:{source}:{state.lower()}")
+                except Exception:
+                    pass
+                return True, f"{state.lower()}_resume_risk_on"
+            return False, f"{state.lower()}_latch_cleared"
+
         return False, f"{state.lower()}_no_change"
 
     def _format_ampel_text(self, ampel: Dict[str, Any], action: str) -> str:
@@ -1960,6 +1989,7 @@ class TelegramControlPanel:
 
     def _handle_pause(self, chat_id: str) -> None:
         runtime_control.pause_entries()
+        self._ampel_guard_latched_red = False
         runtime_state.update_engine(paused=True)
         runtime_state.append_log("TELEGRAM /pause -> entries pausiert")
         logger.warning("Telegram-Aktion: /pause -> neue Entries pausiert")
@@ -1971,6 +2001,7 @@ class TelegramControlPanel:
 
     def _handle_resume(self, chat_id: str) -> None:
         runtime_control.resume_entries()
+        self._ampel_guard_latched_red = False
         runtime_state.update_engine(paused=False)
         runtime_state.append_log("TELEGRAM /resume -> entries aktiviert")
         logger.info("Telegram-Aktion: /resume -> Entries wieder aktiv")
@@ -1979,6 +2010,7 @@ class TelegramControlPanel:
 
     def _handle_riskoff(self, chat_id: str) -> None:
         runtime_control.enable_risk_off()
+        self._ampel_guard_latched_red = False
         runtime_state.update_engine(risk_off=True)
         runtime_state.append_log("TELEGRAM /riskoff -> risk_off aktiv")
         logger.warning("Telegram-Aktion: /riskoff -> Risk-Off aktiviert")
@@ -1987,6 +2019,7 @@ class TelegramControlPanel:
 
     def _handle_riskon(self, chat_id: str) -> None:
         runtime_control.disable_risk_off()
+        self._ampel_guard_latched_red = False
         runtime_state.update_engine(risk_off=False)
         runtime_state.append_log("TELEGRAM /riskon -> risk_off deaktiviert")
         logger.info("Telegram-Aktion: /riskon -> Risk-Off deaktiviert")

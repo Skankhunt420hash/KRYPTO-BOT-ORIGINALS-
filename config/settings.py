@@ -82,7 +82,7 @@ class Settings:
     MAX_POSITION_SIZE_PERCENT: float = float(
         os.getenv("MAX_POSITION_SIZE_PERCENT", 2.0)
     )
-    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 5))
+    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 8))
     STOP_LOSS_PERCENT: float = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
     TAKE_PROFIT_PERCENT: float = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
     TRAILING_STOP: bool = os.getenv("TRAILING_STOP", "false").lower() == "true"
@@ -395,7 +395,16 @@ class Settings:
     MAX_TOTAL_OPEN_RISK_PCT: float = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", 10.0))
 
     # Max. gleichzeitige Positionen gesamt / pro Symbol / pro Strategie
-    MAX_POSITIONS_TOTAL: int = int(os.getenv("MAX_POSITIONS_TOTAL", 5))
+    MAX_POSITIONS_TOTAL: int = int(os.getenv("MAX_POSITIONS_TOTAL", 8))
+
+    # Master-Brain Watchdog: überwacht Underperformance und startet Auto-Heal + Snapshot.
+    MASTER_BRAIN_ENABLED: bool = _env_bool("MASTER_BRAIN_ENABLED", default=True)
+    MASTER_BRAIN_MIN_TRADES: int = int(os.getenv("MASTER_BRAIN_MIN_TRADES", 20))
+    MASTER_BRAIN_TARGET_WINRATE_PCT: float = float(
+        os.getenv("MASTER_BRAIN_TARGET_WINRATE_PCT", 50.0)
+    )
+    MASTER_BRAIN_FAIL_WINDOWS: int = int(os.getenv("MASTER_BRAIN_FAIL_WINDOWS", 2))
+    MASTER_BRAIN_AUTO_PAUSE: bool = _env_bool("MASTER_BRAIN_AUTO_PAUSE", default=True)
     MAX_POSITIONS_PER_SYMBOL: int = int(os.getenv("MAX_POSITIONS_PER_SYMBOL", 1))
     MAX_STRATEGY_POSITIONS: int = int(os.getenv("MAX_STRATEGY_POSITIONS", 2))
 

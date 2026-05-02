@@ -21,7 +21,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
 
@@ -64,6 +64,10 @@ class PanelCallbacks:
     request_bot_start: Optional[Callable[[], Tuple[bool, str]]] = None
     request_bot_restart: Optional[Callable[[], Tuple[bool, str]]] = None
     get_bot_status: Optional[Callable[[], Dict]] = None
+    apply_runtime_settings: Optional[Callable[[Dict[str, Any]], Tuple[bool, str]]] = None
+    request_auto_heal: Optional[Callable[[], Tuple[bool, str]]] = None
+    get_market_status: Optional[Callable[[], Dict]] = None
+    get_master_status: Optional[Callable[[], Dict]] = None
 
 
 class TelegramControlPanel:
@@ -385,6 +389,22 @@ class TelegramControlPanel:
                 self._handle_setmode(chat_id, text)
             elif cmd == "/setstrategy":
                 self._handle_setstrategy(chat_id, text)
+            elif cmd == "/setrisk":
+                self._handle_setrisk(chat_id, text)
+            elif cmd == "/setbrain":
+                self._handle_setbrain(chat_id, text)
+            elif cmd == "/config":
+                self._send_config(chat_id)
+            elif cmd == "/brain":
+                self._send_brain(chat_id)
+            elif cmd == "/markets":
+                self._send_markets(chat_id)
+            elif cmd == "/autoheal":
+                self._handle_autoheal(chat_id)
+            elif cmd == "/masterstatus":
+                self._send_master_status(chat_id)
+            elif cmd == "/masterheal":
+                self._handle_autoheal(chat_id)
             elif cmd == "/stop_bot":
                 self._handle_stop_bot(chat_id)
             elif cmd == "/start_bot":
@@ -507,7 +527,8 @@ class TelegramControlPanel:
             "<b>KRYPTO-BOT Control Center</b>\n"
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
-            "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper\n"
+            "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;\n"
+            "🧠 <b>Diagnose</b>: /config /brain /markets /autoheal /masterstatus /masterheal\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
         )
@@ -1139,4 +1160,164 @@ class TelegramControlPanel:
             "Hinweis: Meta-Selector berücksichtigt dies als Bonus, "
             "Risk-Gates bleiben unverändert aktiv."
         )
+
+    def _handle_setrisk(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setrisk <key> <value>\n"
+                "Keys: max_positions, daily_loss_limit_pct, coin_cooldown_minutes, strategy_cooldown_minutes, duplicate_signal_minutes"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "max_positions": ("max_positions_total", int, 1, 50),
+            "daily_loss_limit_pct": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "coin_cooldown_minutes": ("coin_cooldown_minutes", int, 0, 240),
+            "strategy_cooldown_minutes": ("strategy_cooldown_minutes", int, 0, 240),
+            "duplicate_signal_minutes": ("duplicate_signal_minutes", int, 0, 240),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setrisk-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _handle_setbrain(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setbrain <key> <value>\n"
+                "Keys: min_score, risky_score, perf_weight, reward_weight, reward_window, bitter_threshold"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "min_score": ("brain_min_score_to_trade", float, 0.05, 1.0),
+            "risky_score": ("brain_risky_phase_score", float, 0.05, 1.0),
+            "perf_weight": ("perf_selector_weight", float, 0.0, 1.0),
+            "reward_weight": ("brain_reward_weight", float, 0.0, 1.0),
+            "reward_window": ("brain_reward_window", int, 2, 80),
+            "bitter_threshold": ("brain_bitter_treat_block_threshold", float, -1.0, 0.0),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setbrain-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _send_config(self, chat_id: str) -> None:
+        text = (
+            "⚙️ <b>Runtime-Konfiguration</b>\n"
+            f"MAX_POSITIONS_TOTAL: <code>{getattr(settings, 'MAX_POSITIONS_TOTAL', 'n/a')}</code>\n"
+            f"MAX_OPEN_TRADES: <code>{getattr(settings, 'MAX_OPEN_TRADES', 'n/a')}</code>\n"
+            f"DAILY_LOSS_LIMIT_PCT: <code>{getattr(settings, 'DAILY_LOSS_LIMIT_PCT', 'n/a')}</code>\n"
+            f"BRAIN_MIN_SCORE_TO_TRADE: <code>{getattr(settings, 'BRAIN_MIN_SCORE_TO_TRADE', 'n/a')}</code>\n"
+            f"BRAIN_RISKY_PHASE_SCORE: <code>{getattr(settings, 'BRAIN_RISKY_PHASE_SCORE', 'n/a')}</code>\n"
+            f"BRAIN_REWARD_WEIGHT: <code>{getattr(settings, 'BRAIN_REWARD_WEIGHT', 'n/a')}</code>\n"
+            f"BRAIN_REWARD_WINDOW: <code>{getattr(settings, 'BRAIN_REWARD_WINDOW', 'n/a')}</code>\n"
+            f"BRAIN_BITTER_TREAT_BLOCK_THRESHOLD: <code>{getattr(settings, 'BRAIN_BITTER_TREAT_BLOCK_THRESHOLD', 'n/a')}</code>"
+        )
+        self._send_text(chat_id, text)
+
+    def _send_brain(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        ranking = list(brain.get("last_strategy_ranking") or [])
+        lines = [
+            "🧠 <b>Brain-Status</b>",
+            f"Regime: <code>{brain.get('last_regime', 'n/a')}</code>",
+            f"Score: <code>{brain.get('last_signal_score', 'n/a')}</code>",
+            f"Decision: <code>{brain.get('last_decision_reason', 'n/a')}</code>",
+            f"Risky: <code>{brain.get('risky_phase', 'n/a')}</code>",
+        ]
+        if ranking:
+            top = ranking[0]
+            lines.append(
+                f"Top: <code>{top.get('strategy')} {top.get('side')} score={top.get('brain_score')}</code>"
+            )
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_markets(self, chat_id: str) -> None:
+        if not self._callbacks.get_market_status:
+            self._send_text(chat_id, "⚠️ Market-Status Callback nicht angebunden.")
+            return
+        try:
+            data = self._callbacks.get_market_status() or {}
+        except Exception as e:
+            logger.error("Market-Status Callback-Fehler: %s", e)
+            self._send_text(chat_id, "⚠️ Konnte Market-Status nicht lesen.")
+            return
+        pairs = data.get("pairs") or []
+        stale = data.get("stale_symbols") or []
+        text = (
+            "📈 <b>Market-Status</b>\n"
+            f"Pairs aktiv: <code>{data.get('pair_count', len(pairs))}</code>\n"
+            f"Open Positions: <code>{data.get('open_positions', 0)}</code>\n"
+            f"Stale Symbols: <code>{len(stale)}</code>\n"
+            f"Sample Pairs: <code>{', '.join(pairs[:8]) if pairs else 'n/a'}</code>"
+        )
+        self._send_text(chat_id, text)
+
+    def _handle_autoheal(self, chat_id: str) -> None:
+        if not self._callbacks.request_auto_heal:
+            self._send_text(chat_id, "⚠️ Autoheal-Callback nicht angebunden.")
+            return
+        try:
+            ok, msg = self._callbacks.request_auto_heal()
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+        except Exception as e:
+            logger.error("Autoheal-Callback-Fehler: %s", e)
+            self._send_text(chat_id, "⚠️ Autoheal fehlgeschlagen.")
+
+    def _send_master_status(self, chat_id: str) -> None:
+        if not self._callbacks.get_master_status:
+            self._send_text(chat_id, "⚠️ Master-Status Callback nicht angebunden.")
+            return
+        try:
+            data = self._callbacks.get_master_status() or {}
+        except Exception as e:
+            logger.error("Master-Status Callback-Fehler: %s", e)
+            self._send_text(chat_id, "⚠️ Konnte Master-Status nicht lesen.")
+            return
+        text = (
+            "🧠 <b>Master-Status</b>\n"
+            f"Enabled: <code>{data.get('enabled', False)}</code>\n"
+            f"Min Trades: <code>{data.get('min_trades', 'n/a')}</code>\n"
+            f"Target Winrate: <code>{data.get('target_winrate_pct', 'n/a')}%</code>\n"
+            f"Last Winrate: <code>{data.get('last_winrate_pct', 'n/a')}%</code>\n"
+            f"Consecutive Fails: <code>{data.get('consecutive_fail_windows', 0)}</code>\n"
+            f"Auto Pause: <code>{data.get('auto_paused', False)}</code>\n"
+            f"Last Reason: <code>{data.get('last_reason', 'n/a')}</code>\n"
+            f"Last Snapshot: <code>{data.get('last_snapshot_file', 'n/a')}</code>"
+        )
+        self._send_text(chat_id, text)
 

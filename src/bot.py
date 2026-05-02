@@ -65,6 +65,11 @@ class TradingBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                request_bot_restart=self._request_bot_restart_from_panel,
+                apply_runtime_settings=self._apply_runtime_settings_from_panel,
+                request_auto_heal=self._request_auto_heal,
+                get_market_status=self._get_market_status_from_panel,
+                get_master_status=self._get_master_status_from_panel,
             ),
         )
         self.running = False
@@ -665,6 +670,126 @@ class TradingBot:
             "(Telegram kann keinen sicheren Cold-Start auslösen)."
         )
 
+    def _request_bot_restart_from_panel(self) -> Tuple[bool, str]:
+        runtime_control.pause_entries()
+        runtime_control.enable_risk_off()
+        runtime_state.update_engine(paused=True, risk_off=True)
+        runtime_state.append_log("TELEGRAM /botrestart -> safe_restart_marked")
+        self._sync_runtime_state()
+        return (
+            True,
+            "Safe-Restart markiert: Entries pausiert + Risk-Off aktiv. "
+            "Bitte Service per systemd neu starten.",
+        )
+
+    def _apply_runtime_settings_from_panel(self, updates: Dict[str, float]) -> Tuple[bool, str]:
+        if not isinstance(updates, dict) or not updates:
+            return False, "Keine Runtime-Parameter übergeben."
+        changed: List[str] = []
+        for key, value in updates.items():
+            k = str(key or "").strip().lower()
+            try:
+                if k == "max_positions_total":
+                    v = max(1, min(50, int(value)))
+                    setattr(settings, "MAX_OPEN_TRADES", v)
+                    setattr(settings, "MAX_POSITIONS_TOTAL", v)
+                    if hasattr(self.risk, "max_open_trades"):
+                        self.risk.max_open_trades = v
+                    changed.append(f"MAX_POSITIONS_TOTAL={v}")
+                elif k == "daily_loss_limit_pct":
+                    v = max(0.1, min(100.0, float(value)))
+                    setattr(settings, "DAILY_LOSS_LIMIT_PCT", v)
+                    changed.append(f"DAILY_LOSS_LIMIT_PCT={v:.2f}")
+                elif k == "coin_cooldown_minutes":
+                    v = max(0, min(240, int(value)))
+                    setattr(settings, "COIN_COOLDOWN_MINUTES", v)
+                    changed.append(f"COIN_COOLDOWN_MINUTES={v}")
+                elif k == "strategy_cooldown_minutes":
+                    v = max(0, min(240, int(value)))
+                    setattr(settings, "STRATEGY_COOLDOWN_MINUTES", v)
+                    changed.append(f"STRATEGY_COOLDOWN_MINUTES={v}")
+                elif k == "duplicate_signal_minutes":
+                    v = max(0, min(240, int(value)))
+                    setattr(settings, "DUPLICATE_SIGNAL_MINUTES", v)
+                    changed.append(f"DUPLICATE_SIGNAL_MINUTES={v}")
+                elif k == "brain_min_score_to_trade":
+                    v = max(0.05, min(1.0, float(value)))
+                    setattr(settings, "BRAIN_MIN_SCORE_TO_TRADE", v)
+                    changed.append(f"BRAIN_MIN_SCORE_TO_TRADE={v:.3f}")
+                elif k == "brain_risky_phase_score":
+                    v = max(0.05, min(1.0, float(value)))
+                    setattr(settings, "BRAIN_RISKY_PHASE_SCORE", v)
+                    changed.append(f"BRAIN_RISKY_PHASE_SCORE={v:.3f}")
+                elif k == "perf_selector_weight":
+                    v = max(0.0, min(1.0, float(value)))
+                    setattr(settings, "PERF_SELECTOR_WEIGHT", v)
+                    changed.append(f"PERF_SELECTOR_WEIGHT={v:.3f}")
+                elif k == "brain_reward_weight":
+                    v = max(0.0, min(1.0, float(value)))
+                    setattr(settings, "BRAIN_REWARD_WEIGHT", v)
+                    changed.append(f"BRAIN_REWARD_WEIGHT={v:.3f}")
+                elif k == "brain_reward_window":
+                    v = max(2, min(80, int(value)))
+                    setattr(settings, "BRAIN_REWARD_WINDOW", v)
+                    changed.append(f"BRAIN_REWARD_WINDOW={v}")
+                elif k == "brain_bitter_treat_block_threshold":
+                    v = max(-1.0, min(0.0, float(value)))
+                    setattr(settings, "BRAIN_BITTER_TREAT_BLOCK_THRESHOLD", v)
+                    changed.append(f"BRAIN_BITTER_TREAT_BLOCK_THRESHOLD={v:.3f}")
+                else:
+                    return False, f"Unbekannter Runtime-Key: {k}"
+            except Exception:
+                return False, f"Ungültiger Wert für {k}: {value}"
+        self._sync_runtime_state()
+        return True, "Runtime-Parameter aktualisiert: " + ", ".join(changed)
+
+    def _request_auto_heal(self) -> Tuple[bool, str]:
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+        self._sync_runtime_state()
+        return True, "Autoheal ausgeführt: Pause und Risk-Off aufgehoben."
+
+    def _get_market_status_from_panel(self) -> Dict:
+        return {
+            "pair_count": len(self.pairs),
+            "pairs": list(self.pairs),
+            "open_positions": len(self.risk.open_positions),
+            "stale_symbols": [],
+        }
+
+    def _get_master_status_from_panel(self) -> Dict:
+        return {
+            "enabled": False,
+            "min_trades": int(getattr(settings, "MASTER_BRAIN_MIN_TRADES", 20)),
+            "target_winrate_pct": float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 50.0)),
+            "last_winrate_pct": 0.0,
+            "consecutive_fail_windows": 0,
+            "auto_paused": bool(runtime_control.get_snapshot().get("paused", False)),
+            "last_reason": "single_strategy_mode",
+            "last_snapshot_file": "n/a",
+        }
+
+    def _run_master_watchdog(self) -> None:
+        return
+
+    def _save_master_snapshot(self, reason: str) -> Tuple[bool, str]:
+        try:
+            out_dir = Path("data/master_snapshots")
+            out_dir.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "ts": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "reason": reason,
+                "mode": settings.TRADING_MODE,
+                "runtime": runtime_state.snapshot(),
+                "risk_stats": self.risk.get_stats(),
+            }
+            out_path = out_dir / f"master_snapshot_{int(time.time())}.json"
+            out_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+            return True, str(out_path)
+        except Exception as e:
+            return False, f"snapshot_error:{e}"
+
     def stop(self):
         self.running = False
         if self.panel:
@@ -748,6 +873,11 @@ class MultiStrategyBot:
         self._active_strategy_runtime: str = "AUTO"
         self._last_selector_snapshot: Dict = {}
         self._last_brain_snapshot: Dict = {}
+        self._master_last_winrate_pct: float = 0.0
+        self._master_fail_windows: int = 0
+        self._master_auto_paused: bool = False
+        self._master_last_reason: str = "init"
+        self._master_last_snapshot_file: str = "n/a"
 
         # Performance-Tracking und adaptives Scoring
         self.perf_tracker = PerformanceTracker()
@@ -770,6 +900,11 @@ class MultiStrategyBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                request_bot_restart=self._request_bot_restart_from_panel,
+                apply_runtime_settings=self._apply_runtime_settings_from_panel,
+                request_auto_heal=self._request_auto_heal,
+                get_market_status=self._get_market_status_from_panel,
+                get_master_status=self._get_master_status_from_panel,
             ),
         )
 
@@ -2168,6 +2303,8 @@ class MultiStrategyBot:
         self._sync_runtime_state()
         self._persist_recovery_state()
 
+        self._run_master_watchdog()
+
         # Health-Monitor auswerten (Watchdog-Reaktionen, Snapshots)
         self.health.check_and_react()
 
@@ -2367,6 +2504,267 @@ class MultiStrategyBot:
         return False, (
             "Multi-Bot läuft aktuell nicht. Bitte Bot-Prozess lokal starten "
             "(Telegram kann keinen sicheren Cold-Start auslösen)."
+        )
+
+    def _request_bot_restart_from_panel(self) -> Tuple[bool, str]:
+        runtime_control.pause_entries()
+        runtime_control.enable_risk_off()
+        runtime_state.update_engine(paused=True, risk_off=True)
+        runtime_state.append_log("TELEGRAM /botrestart -> safe_restart_marked")
+        self._sync_runtime_state()
+        return (
+            True,
+            "Safe-Restart markiert: Entries pausiert + Risk-Off aktiv. "
+            "Bitte Service per systemd neu starten.",
+        )
+
+    def _apply_runtime_settings_from_panel(self, updates: Dict[str, float]) -> Tuple[bool, str]:
+        if not isinstance(updates, dict) or not updates:
+            return False, "Keine Runtime-Updates übergeben."
+        changed: List[str] = []
+        try:
+            for key, value in updates.items():
+                k = str(key).strip().lower()
+                if k == "max_positions_total":
+                    v = int(value)
+                    v = max(1, min(50, v))
+                    settings.MAX_POSITIONS_TOTAL = v
+                    settings.MAX_OPEN_TRADES = v
+                    self.risk.max_open_trades = v
+                    if hasattr(self.risk, "portfolio") and getattr(self.risk, "portfolio", None):
+                        self.risk.portfolio.cfg.max_positions_total = v
+                    changed.append(f"MAX_POSITIONS_TOTAL={v}")
+                elif k == "daily_loss_limit_pct":
+                    v = float(value)
+                    v = max(0.1, min(100.0, v))
+                    settings.DAILY_LOSS_LIMIT_PCT = v
+                    changed.append(f"DAILY_LOSS_LIMIT_PCT={v:.2f}")
+                elif k == "coin_cooldown_minutes":
+                    v = int(value)
+                    v = max(0, min(240, v))
+                    settings.COIN_COOLDOWN_MINUTES = v
+                    changed.append(f"COIN_COOLDOWN_MINUTES={v}")
+                elif k == "strategy_cooldown_minutes":
+                    v = int(value)
+                    v = max(0, min(240, v))
+                    settings.STRATEGY_COOLDOWN_MINUTES = v
+                    changed.append(f"STRATEGY_COOLDOWN_MINUTES={v}")
+                elif k == "duplicate_signal_minutes":
+                    v = int(value)
+                    v = max(0, min(240, v))
+                    settings.DUPLICATE_SIGNAL_MINUTES = v
+                    changed.append(f"DUPLICATE_SIGNAL_MINUTES={v}")
+                elif k == "brain_min_score_to_trade":
+                    v = float(value)
+                    v = max(0.05, min(1.0, v))
+                    settings.BRAIN_MIN_SCORE_TO_TRADE = v
+                    changed.append(f"BRAIN_MIN_SCORE_TO_TRADE={v:.3f}")
+                elif k == "brain_risky_phase_score":
+                    v = float(value)
+                    v = max(0.05, min(1.0, v))
+                    settings.BRAIN_RISKY_PHASE_SCORE = v
+                    changed.append(f"BRAIN_RISKY_PHASE_SCORE={v:.3f}")
+                elif k == "perf_selector_weight":
+                    v = float(value)
+                    v = max(0.0, min(1.0, v))
+                    settings.PERF_SELECTOR_WEIGHT = v
+                    changed.append(f"PERF_SELECTOR_WEIGHT={v:.3f}")
+                elif k == "brain_reward_weight":
+                    v = float(value)
+                    v = max(0.0, min(1.0, v))
+                    settings.BRAIN_REWARD_WEIGHT = v
+                    changed.append(f"BRAIN_REWARD_WEIGHT={v:.3f}")
+                elif k == "brain_reward_window":
+                    v = int(value)
+                    v = max(2, min(80, v))
+                    settings.BRAIN_REWARD_WINDOW = v
+                    changed.append(f"BRAIN_REWARD_WINDOW={v}")
+                elif k == "brain_bitter_treat_block_threshold":
+                    v = float(value)
+                    v = max(-1.0, min(0.0, v))
+                    settings.BRAIN_BITTER_TREAT_BLOCK_THRESHOLD = v
+                    changed.append(f"BRAIN_BITTER_TREAT_BLOCK_THRESHOLD={v:.3f}")
+                else:
+                    return False, f"Unbekannter Runtime-Key: {k}"
+            if not changed:
+                return False, "Keine gültigen Runtime-Keys angewendet."
+            runtime_state.append_log("TELEGRAM runtime_update: " + ", ".join(changed))
+            self._sync_runtime_state()
+            return True, "Runtime-Parameter aktualisiert: " + ", ".join(changed)
+        except Exception as e:
+            return False, f"Runtime-Update fehlgeschlagen: {e}"
+
+    def _save_master_snapshot(self, reason: str) -> Tuple[bool, str]:
+        try:
+            snap = runtime_state.snapshot()
+            perf = snap.get("performance") or {}
+            day = perf.get("daily_summary")
+            if self.perf_repo.available and not day:
+                day = self.perf_repo.update_daily_summary(mode=settings.TRADING_MODE) or {}
+            payload = {
+                "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                "reason": reason,
+                "mode": settings.TRADING_MODE,
+                "risk_gate": self.risk.get_gate_status(),
+                "runtime": {
+                    "running": snap.get("running"),
+                    "paused": snap.get("paused"),
+                    "risk_off": snap.get("risk_off"),
+                    "open_positions": snap.get("open_positions"),
+                    "last_signal": snap.get("last_signal"),
+                    "last_decision": snap.get("last_decision"),
+                },
+                "brain": self._last_brain_snapshot,
+                "daily_summary": day or {},
+            }
+            out_dir = Path(getattr(settings, "MASTER_SNAPSHOT_DIR", "data/master_snapshots"))
+            out_dir.mkdir(parents=True, exist_ok=True)
+            out_path = out_dir / f"master_snapshot_{int(time.time())}.json"
+            out_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+            self._master_last_snapshot_file = str(out_path)
+            runtime_state.update_app_context(
+                {
+                    "master_snapshot_file": str(out_path),
+                    "master_snapshot_reason": reason,
+                }
+            )
+            return True, str(out_path)
+        except Exception as e:
+            return False, f"Snapshot fehlgeschlagen: {e}"
+
+    def _request_auto_heal(self) -> Tuple[bool, str]:
+        details: List[str] = []
+        try:
+            self._reevaluate_startup_gate()
+            if self._startup_checks_ok:
+                details.append("startup_gate_ok")
+            else:
+                details.append("startup_gate_blocked")
+
+            stale_symbols: List[str] = []
+            try:
+                hs = self.health.get_snapshot() if self.health else {}
+                ages = hs.get("data_ages_sec") or {}
+                stale_timeout = float(getattr(settings, "DATA_STALE_TIMEOUT_SEC", 600))
+                stale_symbols = [
+                    sym for sym, age in ages.items() if float(age or 0.0) > stale_timeout
+                ]
+            except Exception:
+                stale_symbols = []
+
+            if stale_symbols:
+                runtime_control.pause_entries()
+                runtime_control.enable_risk_off()
+                details.append(f"stale_data_pause:{len(stale_symbols)}")
+            else:
+                if len(self.risk.open_positions) < int(self.risk.max_open_trades):
+                    runtime_control.resume_entries()
+                    runtime_control.disable_risk_off()
+                    details.append("entries_reenabled")
+                else:
+                    details.append(
+                        f"entries_hold_open_positions:{len(self.risk.open_positions)}/{self.risk.max_open_trades}"
+                    )
+
+            snap_ok, snap_msg = self._save_master_snapshot("manual_autoheal")
+            details.append("snapshot_saved" if snap_ok else f"snapshot_error:{snap_msg}")
+            self._sync_runtime_state()
+            return True, " | ".join(details)
+        except Exception as e:
+            return False, f"Autoheal fehlgeschlagen: {e}"
+
+    def _get_market_status_from_panel(self) -> Dict:
+        stale_symbols: List[str] = []
+        try:
+            hs = self.health.get_snapshot() if self.health else {}
+            ages = hs.get("data_ages_sec") or {}
+            stale_timeout = float(getattr(settings, "DATA_STALE_TIMEOUT_SEC", 600))
+            stale_symbols = [
+                sym for sym, age in ages.items() if float(age or 0.0) > stale_timeout
+            ]
+        except Exception:
+            stale_symbols = []
+        return {
+            "pair_count": len(self.pairs),
+            "pairs": list(self.pairs),
+            "open_positions": len(self.risk.open_positions),
+            "stale_symbols": stale_symbols,
+        }
+
+    def _get_master_status_from_panel(self) -> Dict:
+        return {
+            "enabled": bool(getattr(settings, "MASTER_BRAIN_ENABLED", True)),
+            "min_trades": int(getattr(settings, "MASTER_BRAIN_MIN_TRADES", 20)),
+            "target_winrate_pct": float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 50.0)),
+            "last_winrate_pct": float(self._master_last_winrate_pct),
+            "consecutive_fail_windows": int(self._master_fail_windows),
+            "auto_paused": bool(self._master_auto_paused),
+            "last_reason": self._master_last_reason,
+            "last_snapshot_file": self._master_last_snapshot_file,
+        }
+
+    def _run_master_watchdog(self) -> None:
+        if not bool(getattr(settings, "MASTER_BRAIN_ENABLED", True)):
+            return
+        closed = self.repo.get_recent_trades(
+            limit=int(getattr(settings, "MASTER_BRAIN_MIN_TRADES", 20)),
+            status="closed",
+            current_mode_only=True,
+        )
+        min_trades = int(getattr(settings, "MASTER_BRAIN_MIN_TRADES", 20))
+        if len(closed) < min_trades:
+            self._master_last_reason = f"insufficient_closed_trades:{len(closed)}/{min_trades}"
+            return
+        wins = 0
+        for row in closed:
+            try:
+                if float(row.get("pnl_abs") or 0.0) > 0:
+                    wins += 1
+            except Exception:
+                pass
+        winrate = (wins / len(closed) * 100.0) if closed else 0.0
+        self._master_last_winrate_pct = round(winrate, 2)
+        target = float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 50.0))
+        if winrate >= target:
+            self._master_fail_windows = 0
+            if self._master_auto_paused:
+                runtime_control.resume_entries()
+                runtime_control.disable_risk_off()
+                self._master_auto_paused = False
+                self._master_last_reason = f"recovered_winrate:{winrate:.2f}%"
+                runtime_state.append_log(f"MASTER recovered winrate={winrate:.2f}%")
+                self.tg.send(
+                    f"🟢 <b>MASTER AUTOHEAL</b>\nWinrate wieder stabil: {winrate:.2f}% (Target {target:.2f}%).\nEntries wurden freigegeben."
+                )
+            else:
+                self._master_last_reason = f"healthy_winrate:{winrate:.2f}%"
+            return
+
+        self._master_fail_windows += 1
+        fail_threshold = int(getattr(settings, "MASTER_BRAIN_FAIL_WINDOWS", 2))
+        self._master_last_reason = (
+            f"under_target_winrate:{winrate:.2f}%<{target:.2f}% "
+            f"(window_fail={self._master_fail_windows}/{fail_threshold})"
+        )
+        if self._master_fail_windows < fail_threshold:
+            return
+
+        if bool(getattr(settings, "MASTER_BRAIN_AUTO_PAUSE", True)):
+            runtime_control.pause_entries()
+            runtime_control.enable_risk_off()
+            self._master_auto_paused = True
+        snap_ok, snap_msg = self._save_master_snapshot("auto_watchdog_under_target_winrate")
+        if snap_ok:
+            self._master_last_snapshot_file = snap_msg
+        self._master_last_reason += f" | snapshot={snap_msg if snap_ok else 'failed'}"
+        runtime_state.append_log(
+            f"MASTER auto_pause winrate={winrate:.2f}% target={target:.2f}%"
+        )
+        self.tg.send(
+            "🛑 <b>MASTER AUTOHEAL</b>\n"
+            f"Winrate unter Ziel: {winrate:.2f}% &lt; {target:.2f}%.\n"
+            "Entries pausiert + Risk-Off aktiviert.\n"
+            f"Snapshot: {snap_msg if snap_ok else 'fehlgeschlagen'}"
         )
 
     def stop(self):

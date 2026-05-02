@@ -145,6 +145,12 @@ class TelegramControlPanel:
         self._last_ampel_auto_notify_state: str = ""
         self._last_ampel_auto_notify_action: str = ""
         self._last_ampel_auto_notify_ts: float = 0.0
+        self._ampel_last_state: str = "UNKNOWN"
+        self._ampel_last_reason: str = "init"
+        self._ampel_last_action: str = "none"
+        self._ampel_last_eval_ts: float = 0.0
+        self._ampel_red_started_ts: float = 0.0
+        self._ampel_red_loop_trip_count: int = 0
         # Latch gegen Red-Loop-Spam:
         # Wenn Ampel einmal auf RED gestellt hat, wird die Sperre gehalten,
         # ohne bei jedem Tick erneut Pause/RiskOff-Notifications zu senden.
@@ -407,6 +413,8 @@ class TelegramControlPanel:
                 self._send_ampel(chat_id)
             elif cmd == "ampelauto":
                 self._handle_ampelauto(chat_id, text)
+            elif cmd == "ampeldebug":
+                self._send_ampel_debug(chat_id)
             elif cmd in ("testtrade", "testtrades"):
                 self._handle_testtrade(chat_id, text)
             elif cmd == "mode":
@@ -679,6 +687,7 @@ class TelegramControlPanel:
             "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
             "🩹 <b>Auto-Heal</b>: /autoheal status | /autoheal on | /autoheal off | /autoheal now\n"
             "🚦 <b>Ampel</b>: /ampel | /ampelauto status | /ampelauto on | /ampelauto off | /ampelauto now\n"
+            "🧪 <b>Ampel Debug</b>: /ampeldebug\n"
             "🎚 <b>Profile</b>: /profiles, /setprofile &lt;growth|continuous|defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "ℹ️ /botrestart nutzt Callback oder automatisch Stop+Start-Fallback.\n"
@@ -1709,8 +1718,14 @@ class TelegramControlPanel:
     def _apply_ampel_guard(self, ampel: Dict[str, Any], *, source: str) -> Tuple[bool, str]:
         state = str(ampel.get("state", "YELLOW")).upper()
         ctrl = runtime_control.get_snapshot()
+        now = time.monotonic()
+        self._ampel_last_eval_ts = now
+        self._ampel_last_state = state
+        self._ampel_last_reason = str(ampel.get("reason", "n/a"))
 
         if state == "RED":
+            if self._ampel_red_started_ts <= 0.0:
+                self._ampel_red_started_ts = now
             need_pause = not bool(ctrl.get("paused"))
             need_risk_off = not bool(ctrl.get("risk_off"))
             if need_pause:
@@ -1722,15 +1737,18 @@ class TelegramControlPanel:
                 runtime_state.update_engine(paused=True, risk_off=True)
                 runtime_state.append_log(f"AMPEL {source} RED -> pause+risk_off")
                 self._ampel_guard_latched_red = True
+                self._ampel_red_loop_trip_count += 1
                 try:
                     self._notifier.notify_bot_paused(f"ampel:{source}:red")
                     self._notifier.notify_risk_off(True, f"ampel:{source}:red")
                 except Exception:
                     pass
+                self._ampel_last_action = "red_pause_risk_off"
                 return True, "red_pause_risk_off"
 
             # Bereits gesperrt: nur halten, kein erneuter Spam.
             self._ampel_guard_latched_red = True
+            self._ampel_last_action = "red_hold_latched"
             return False, "red_hold_latched"
 
         # Auto-Resume nur wenn die Sperre auch von Ampel gesetzt wurde.
@@ -1751,9 +1769,15 @@ class TelegramControlPanel:
                     self._notifier.notify_risk_off(False, f"ampel:{source}:{state.lower()}")
                 except Exception:
                     pass
+                self._ampel_last_action = f"{state.lower()}_resume_risk_on"
+                self._ampel_red_started_ts = 0.0
                 return True, f"{state.lower()}_resume_risk_on"
+            self._ampel_last_action = f"{state.lower()}_latch_cleared"
+            self._ampel_red_started_ts = 0.0
             return False, f"{state.lower()}_latch_cleared"
 
+        self._ampel_last_action = f"{state.lower()}_no_change"
+        self._ampel_red_started_ts = 0.0
         return False, f"{state.lower()}_no_change"
 
     def _format_ampel_text(self, ampel: Dict[str, Any], action: str) -> str:
@@ -1787,10 +1811,40 @@ class TelegramControlPanel:
             return
         self._last_ampel_auto_ts = now
         ampel = self._compute_ampel()
+        state = str(ampel.get("state", "UNKNOWN")).upper()
+        # Hard anti-loop fail-safe:
+        # Wenn wir zu lange in RED stecken und keine frischen closed-trade Daten reinkommen,
+        # lösen wir die Ampel-Sperre temporär (YELLOW), damit wieder Daten entstehen können.
+        if state == "RED":
+            if self._ampel_red_started_ts <= 0.0:
+                self._ampel_red_started_ts = now
+            red_hold_sec = now - self._ampel_red_started_ts
+            stale_data = bool(ampel.get("stale_data", False))
+            max_red_hold_sec = int(
+                max(0, int(getattr(settings, "AMPEL_RED_LOOP_MAX_MINUTES", 0) or 0)) * 60
+            )
+            if (
+                bool(getattr(settings, "AMPEL_RED_LOOP_BREAKER_ENABLED", True))
+                and stale_data
+                and max_red_hold_sec > 0
+                and red_hold_sec >= float(max_red_hold_sec)
+            ):
+                ampel["state"] = "YELLOW"
+                ampel["emoji"] = "🟡"
+                ampel["reason"] = (
+                    f"red_loop_fail_safe:{int(red_hold_sec)}s:"
+                    f"max={int(max_red_hold_sec)}"
+                )
+                runtime_state.append_log(
+                    "AMPEL fail-safe -> YELLOW "
+                    f"(red_hold={int(red_hold_sec)}s stale={stale_data})"
+                )
+                state = "YELLOW"
+
         changed, action = self._apply_ampel_guard(ampel, source="ampel_auto")
         if changed and self._chat_id:
             try:
-                state = str(ampel.get("state", "UNKNOWN")).upper()
+                state = str(ampel.get("state", state)).upper()
                 action_key = str(action or "").strip().lower()
                 prev_state = str(self._last_ampel_auto_notify_state or "").upper()
                 prev_action = str(self._last_ampel_auto_notify_action or "").lower()
@@ -1815,6 +1869,43 @@ class TelegramControlPanel:
                     self._last_ampel_auto_notify_ts = now
             except Exception:
                 pass
+
+    def _send_ampel_debug(self, chat_id: str) -> None:
+        now = time.monotonic()
+        ctrl = runtime_control.get_snapshot()
+        since_eval = (
+            int(now - self._ampel_last_eval_ts)
+            if self._ampel_last_eval_ts > 0.0
+            else -1
+        )
+        red_hold = (
+            int(now - self._ampel_red_started_ts)
+            if self._ampel_red_started_ts > 0.0
+            else 0
+        )
+        notify_wait = 0
+        if self._last_ampel_auto_notify_ts > 0.0:
+            elapsed = now - self._last_ampel_auto_notify_ts
+            notify_wait = max(0, int(self._ampel_auto_notify_cooldown_sec - elapsed))
+        self._send_text(
+            chat_id,
+            "🧪 <b>Ampel Debug</b>\n"
+            f"state=<code>{self._ampel_last_state}</code> | "
+            f"reason=<code>{self._ampel_last_reason}</code>\n"
+            f"last_action=<code>{self._ampel_last_action}</code> | "
+            f"latch_red=<code>{self._ampel_guard_latched_red}</code>\n"
+            f"red_hold_sec=<code>{red_hold}</code> | "
+            f"red_trip_count=<code>{self._ampel_red_loop_trip_count}</code>\n"
+            f"pause/riskoff=<code>{ctrl.get('paused')}/{ctrl.get('risk_off')}</code>\n"
+            f"auto_enabled=<code>{self._ampel_auto_enabled}</code> | "
+            f"interval=<code>{self._ampel_auto_interval_sec}s</code>\n"
+            f"notify_state/action=<code>{self._last_ampel_auto_notify_state}/"
+            f"{self._last_ampel_auto_notify_action}</code>\n"
+            f"notify_cooldown=<code>{self._ampel_auto_notify_cooldown_sec}s</code> | "
+            f"notify_wait=<code>{notify_wait}s</code>\n"
+            f"eval_ago=<code>{since_eval}s</code> | "
+            f"red_max_hold=<code>{int(getattr(settings, 'AMPEL_RED_LOOP_MAX_MINUTES', 0))}m</code>"
+        )
 
     def _handle_ampelauto(self, chat_id: str, text: str) -> None:
         parts = self._split_command_parts(text)

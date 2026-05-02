@@ -176,6 +176,16 @@ class Settings:
             default="1800",
         )
     )
+    # Hard-Loop-Schutz:
+    # Wenn Ampel über längere Zeit auf RED hängt und keine neuen Closed-Trades
+    # nachkommen, wird der Guard temporär auf YELLOW entsperrt.
+    AMPEL_RED_LOOP_MAX_MINUTES: int = int(
+        os.getenv("AMPEL_RED_LOOP_MAX_MINUTES", "90")
+    )
+    AMPEL_RED_LOOP_BREAKER_ENABLED: bool = _env_bool(
+        "AMPEL_RED_LOOP_BREAKER_ENABLED",
+        default=True,
+    )
 
     PAPER_TRADING_BALANCE: float = float(
         os.getenv("PAPER_TRADING_BALANCE", 10000.0)

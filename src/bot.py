@@ -30,6 +30,7 @@ from src.utils.win_chance import (
     compute_trade_win_chance_pct,
     effective_entry_win_chance_pct,
     historical_win_rate_block_reason,
+    bitter_reward_block_reason,
 )
 
 logger = setup_logger("bot", settings.LOG_LEVEL)
@@ -219,6 +220,33 @@ class TradingBot:
                     symbol=symbol,
                     decision="blocked_historical_win_rate",
                     reason=hist_r,
+                    strategy=self.strategy.name,
+                )
+                return
+            bitter_r = bitter_reward_block_reason(
+                self.strategy.name, self.perf_tracker
+            )
+            if bitter_r:
+                logger.info(
+                    f"[yellow]SKIP bitteres Reward-Gate[/yellow] {symbol} | {bitter_r}"
+                )
+                self.repo.save_rejected_signal(
+                    symbol=symbol,
+                    timeframe=settings.TIMEFRAME,
+                    strategy_name=self.strategy.name,
+                    side="long",
+                    entry_price=current_price,
+                    stop_loss=sl_pre,
+                    take_profit=tp_pre,
+                    rr_planned=round(rr_pre, 2),
+                    confidence=conf_pct_gate,
+                    regime="UNKNOWN",
+                    reason_rejected=bitter_r,
+                )
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="blocked_bitter_reward",
+                    reason=bitter_r,
                     strategy=self.strategy.name,
                 )
                 return
@@ -1588,6 +1616,47 @@ class MultiStrategyBot:
                 allow_trade=False,
                 reject_reason=hist_reason,
                 last_decision_reason=hist_reason,
+                market_context=market_ctx,
+            )
+            return
+
+        bitter_reason = bitter_reward_block_reason(
+            best.strategy_name, self.perf_tracker
+        )
+        if bitter_reason:
+            logger.info(
+                f"[yellow]SKIP bitteres Reward-Gate[/yellow] {symbol} | "
+                f"{best.strategy_name} | {bitter_reason}"
+            )
+            self.repo.save_rejected_signal(
+                symbol=symbol,
+                timeframe=best.timeframe,
+                strategy_name=best.strategy_name,
+                side=best.side.value,
+                entry_price=best.entry,
+                stop_loss=best.stop_loss,
+                take_profit=best.take_profit,
+                rr_planned=best.rr,
+                confidence=best.confidence,
+                regime=best.regime,
+                reason_rejected=bitter_reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_bitter_reward",
+                reason=bitter_reason,
+                strategy=best.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=regime.value,
+                ranking=ranking,
+                chosen_strategy=best.strategy_name,
+                signal_score=signal_score,
+                risk_decision="bitter_reward_block",
+                allow_trade=False,
+                reject_reason=bitter_reason,
+                last_decision_reason=bitter_reason,
                 market_context=market_ctx,
             )
             return

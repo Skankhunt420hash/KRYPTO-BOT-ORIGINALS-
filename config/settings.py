@@ -313,6 +313,31 @@ class Settings:
     BRAIN_RISKY_PHASE_SCORE: float = float(
         os.getenv("BRAIN_RISKY_PHASE_SCORE", 0.35)
     )
+    # Kurzfristiges Reward-System für den Brain-Score:
+    # beeinflusst die Strategieauswahl anhand jüngster Outcomes.
+    BRAIN_REWARD_WEIGHT: float = float(os.getenv("BRAIN_REWARD_WEIGHT", 0.18))
+    BRAIN_REWARD_WINDOW: int = int(os.getenv("BRAIN_REWARD_WINDOW", 16))
+    # Anteil des Reward-Bias direkt im Brain-Ranking.
+    BRAIN_REWARD_BRAIN_WEIGHT: float = float(
+        os.getenv("BRAIN_REWARD_BRAIN_WEIGHT", 0.12)
+    )
+    # Positive Trades ("süßes Leckerli") verstärken funktionierende Muster.
+    BRAIN_POSITIVE_TREAT_MULTIPLIER: float = float(
+        os.getenv("BRAIN_POSITIVE_TREAT_MULTIPLIER", 1.35)
+    )
+    # Negative Trades ("bitteres Leckerli") bestrafen schlechte Muster stärker.
+    BRAIN_BITTER_TREAT_MULTIPLIER: float = float(
+        os.getenv("BRAIN_BITTER_TREAT_MULTIPLIER", 2.25)
+    )
+    # Harte Sperre bei sehr negativem Reward-Bias.
+    # Beispiel: -0.55 => starke Verlustserie für diese Strategie.
+    BRAIN_BITTER_TREAT_BLOCK_THRESHOLD: float = float(
+        os.getenv("BRAIN_BITTER_TREAT_BLOCK_THRESHOLD", -0.55)
+    )
+    # Mindesthistorie, bevor das Bitter-Gate hart blockiert.
+    BRAIN_BITTER_TREAT_MIN_TRADES: int = int(
+        os.getenv("BRAIN_BITTER_TREAT_MIN_TRADES", 8)
+    )
 
     # ------------------------------------------------------------------
     # Portfolio Risk Engine & Position Sizing

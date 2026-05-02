@@ -135,6 +135,7 @@ class IntelligenceBrain:
             losing_streak = int(metrics.losing_streak) if metrics else 0
             drawdown = float(metrics.max_drawdown_pct) if metrics else 0.0
             recency_wr = float(metrics.recency_win_rate) if metrics else 0.5
+            reward_bias = float(metrics.reward_bias) if metrics else 0.0
 
             trend_quality = regime_fit
             momentum_quality = _clamp(float(sig.confidence) / 100.0)
@@ -145,6 +146,7 @@ class IntelligenceBrain:
             streak_penalty = min(losing_streak / 6.0, 1.0) * 0.10
             dd_penalty = min(drawdown / 35.0, 1.0) * 0.08
 
+            reward_w = float(getattr(settings, "BRAIN_REWARD_BRAIN_WEIGHT", 0.08) or 0.08)
             brain_score = (
                 trend_quality * 0.20
                 + momentum_quality * 0.18
@@ -153,6 +155,7 @@ class IntelligenceBrain:
                 + rr_quality * 0.15
                 + perf_score * 0.17
                 + recency_wr * 0.08
+                + reward_bias * reward_w
             ) - streak_penalty - dd_penalty
 
             priority_adj = 0.0
@@ -178,6 +181,7 @@ class IntelligenceBrain:
                         "rr_quality": round(rr_quality, 3),
                         "perf_score": round(perf_score, 3),
                         "recency_win_rate": round(recency_wr, 3),
+                        "reward_bias": round(reward_bias, 3),
                         "priority_adj": round(priority_adj, 3),
                         "streak_penalty": round(streak_penalty, 3),
                         "drawdown_penalty": round(dd_penalty, 3),

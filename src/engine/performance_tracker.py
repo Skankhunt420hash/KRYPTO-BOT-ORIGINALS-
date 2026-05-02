@@ -51,6 +51,10 @@ class StrategyMetrics:
 
     recency_win_rate: float = 0.5   # Exponentiell-gewichtete Win-Rate (0–1)
     losing_streak: int = 0          # Aktuelle aufeinanderfolgende Verluste
+    # Reward-Signale für kontrollierte, kurzfristige Verhaltensanpassung.
+    # Wertebereich: [-1.0, +1.0]
+    recent_reward_signal: float = 0.0
+    reward_bias: float = 0.0
 
     last_trade_timestamp: str = ""
 
@@ -209,6 +213,22 @@ class PerformanceTracker:
         recency_wr = _recency_win_rate(recent, self.recency_decay)
         streak = _losing_streak(pnls)
         max_dd = _max_drawdown(pnls)
+        reward_window = int(getattr(settings, "BRAIN_REWARD_WINDOW", 12))
+        reward_signal = _recent_reward_signal(
+            pnls,
+            window=min(max(2, reward_window), self.rolling_window),
+        )
+        pos_mult = float(getattr(settings, "BRAIN_POSITIVE_TREAT_MULTIPLIER", 1.0) or 1.0)
+        neg_mult = float(getattr(settings, "BRAIN_BITTER_TREAT_MULTIPLIER", 1.0) or 1.0)
+        if reward_signal >= 0:
+            reward_signal = _clamp(reward_signal * max(0.1, pos_mult), -1.0, 1.0)
+        else:
+            reward_signal = _clamp(reward_signal * max(0.1, neg_mult), -1.0, 1.0)
+        reward_bias = _clamp(
+            (reward_signal * 0.7) + (((recency_wr - 0.5) * 2.0) * 0.3),
+            -1.0,
+            1.0,
+        )
         last_ts = trades[-1].get("timestamp_close", "") if trades else ""
 
         return StrategyMetrics(
@@ -227,6 +247,8 @@ class PerformanceTracker:
             avg_rr_realized=round(avg_rr, 2),
             recency_win_rate=round(recency_wr, 4),
             losing_streak=streak,
+            recent_reward_signal=round(reward_signal, 4),
+            reward_bias=round(reward_bias, 4),
             last_trade_timestamp=last_ts,
         )
 
@@ -279,3 +301,28 @@ def _losing_streak(pnls: List[float]) -> int:
         else:
             break
     return streak
+
+
+def _clamp(value: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, value))
+
+
+def _recent_reward_signal(pnls: List[float], window: int = 12) -> float:
+    """
+    Kurzfristiges Reward-Signal im Bereich [-1, +1].
+    Positiv bei frischer Gewinner-Serie mit gesundem PnL, negativ umgekehrt.
+    """
+    if not pnls:
+        return 0.0
+    recent = pnls[-max(1, int(window)):]
+    n = len(recent)
+    if n == 0:
+        return 0.0
+
+    win_ratio = sum(1 for p in recent if p > 0) / n
+    win_signal = (win_ratio - 0.5) * 2.0  # [-1..+1]
+    pnl_sum = float(sum(recent))
+    pnl_norm = pnl_sum / (sum(abs(p) for p in recent) + 1e-9)  # [-1..+1]
+
+    # Win-Qualität etwas stärker als reiner PnL-Saldo gewichten.
+    return _clamp((win_signal * 0.65) + (pnl_norm * 0.35), -1.0, 1.0)

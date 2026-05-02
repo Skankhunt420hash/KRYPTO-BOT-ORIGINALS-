@@ -1904,7 +1904,9 @@ class TelegramControlPanel:
             f"notify_cooldown=<code>{self._ampel_auto_notify_cooldown_sec}s</code> | "
             f"notify_wait=<code>{notify_wait}s</code>\n"
             f"eval_ago=<code>{since_eval}s</code> | "
-            f"red_max_hold=<code>{int(getattr(settings, 'AMPEL_RED_LOOP_MAX_MINUTES', 0))}m</code>"
+            f"red_max_hold=<code>{int(getattr(settings, 'AMPEL_RED_LOOP_MAX_MINUTES', 0))}m</code>\n"
+            "Hinweis: Falls <code>risk_gate=CONTROL PAUSE</code> dauerhaft bleibt, "
+            "prüfe mit <code>/status</code>, ob <code>open=MAX</code> erreicht ist."
         )
 
     def _handle_ampelauto(self, chat_id: str, text: str) -> None:

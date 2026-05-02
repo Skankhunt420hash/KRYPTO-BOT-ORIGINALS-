@@ -418,7 +418,14 @@ class TradingBot:
             self.perf_tracker.refresh()
         except Exception:
             pass
-        for symbol in self.pairs:
+        cycle_symbols = list(dict.fromkeys(list(self.pairs) + list(self.risk.open_positions.keys())))
+        extra_symbols = [s for s in self.risk.open_positions.keys() if s not in self.pairs]
+        if extra_symbols:
+            logger.info(
+                "Exit-Überwachung erweitert um offene Symbole außerhalb Pair-Liste: %s",
+                ", ".join(extra_symbols[:20]),
+            )
+        for symbol in cycle_symbols:
             try:
                 self._process_pair(symbol)
             except Exception as e:
@@ -1597,7 +1604,8 @@ class MultiStrategyBot:
 
     def _process_pair(self, symbol: str):
         """Führt den vollständigen Analyse- und Ausführungszyklus für ein Pair durch."""
-        if symbol in self._recovery_blocked_symbols:
+        has_open_position = symbol in self.risk.open_positions
+        if symbol in self._recovery_blocked_symbols and not has_open_position:
             logger.warning(
                 f"[yellow]RECOVERY BLOCK[/yellow] {symbol} | "
                 "Symbol nach Neustart konservativ gesperrt"
@@ -1621,6 +1629,11 @@ class MultiStrategyBot:
                 market_context={},
             )
             return
+        if symbol in self._recovery_blocked_symbols and has_open_position:
+            logger.warning(
+                f"[yellow]RECOVERY BLOCK (exit-only)[/yellow] {symbol} | "
+                "Offene Position wird weiter verwaltet, neue Entries bleiben gesperrt"
+            )
         df = self.exchange.fetch_ohlcv(symbol)
         if df.empty:
             logger.warning(f"{symbol} | Keine OHLCV-Daten erhalten – übersprungen")
@@ -2532,7 +2545,14 @@ class MultiStrategyBot:
         except Exception as e:
             logger.warning(f"Scorer-Refresh fehlgeschlagen (nicht kritisch): {e}")
 
-        for symbol in self.pairs:
+        cycle_symbols = list(dict.fromkeys(list(self.pairs) + list(self.risk.open_positions.keys())))
+        extra_symbols = [s for s in self.risk.open_positions.keys() if s not in self.pairs]
+        if extra_symbols:
+            logger.info(
+                "Exit-Überwachung erweitert um offene Symbole außerhalb Pair-Liste: %s",
+                ", ".join(extra_symbols[:20]),
+            )
+        for symbol in cycle_symbols:
             try:
                 self._process_pair(symbol)
             except Exception as e:

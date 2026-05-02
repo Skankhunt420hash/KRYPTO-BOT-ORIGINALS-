@@ -143,6 +143,7 @@ class TelegramControlPanel:
         )
         self._last_ampel_auto_ts: float = 0.0
         self._last_ampel_auto_notify_state: str = ""
+        self._last_ampel_auto_notify_action: str = ""
         self._last_ampel_auto_notify_ts: float = 0.0
         # Latch gegen Red-Loop-Spam:
         # Wenn Ampel einmal auf RED gestellt hat, wird die Sperre gehalten,
@@ -1790,18 +1791,27 @@ class TelegramControlPanel:
         if changed and self._chat_id:
             try:
                 state = str(ampel.get("state", "UNKNOWN")).upper()
-                notify_now = True
-                # Anti-Spam: gleiche Aktion für denselben Ampel-State nicht ständig wiederholen.
-                if not force and state == self._last_ampel_auto_notify_state:
+                action_key = str(action or "").strip().lower()
+                prev_state = str(self._last_ampel_auto_notify_state or "").upper()
+                prev_action = str(self._last_ampel_auto_notify_action or "").lower()
+
+                # State-Wechsel soll immer sofort rausgehen.
+                state_changed = state != prev_state
+                same_signature = (state == prev_state) and (action_key == prev_action)
+
+                notify_now = force or state_changed
+                # Ohne State-Wechsel: nur zyklisch per Cooldown berichten.
+                if not notify_now and same_signature:
                     elapsed = now - self._last_ampel_auto_notify_ts
-                    if elapsed < float(self._ampel_auto_notify_cooldown_sec):
-                        notify_now = False
+                    if elapsed >= float(self._ampel_auto_notify_cooldown_sec):
+                        notify_now = True
                 if notify_now:
                     self._send_text(
                         self._chat_id,
                         "🚦 <b>AmpelAuto Aktion</b>\n" + self._format_ampel_text(ampel, action),
                     )
                     self._last_ampel_auto_notify_state = state
+                    self._last_ampel_auto_notify_action = action_key
                     self._last_ampel_auto_notify_ts = now
             except Exception:
                 pass

@@ -405,6 +405,18 @@ class TelegramControlPanel:
                 self._send_master_status(chat_id)
             elif cmd == "/masterheal":
                 self._handle_autoheal(chat_id)
+            elif cmd in ("/ampel", "/ampelstatus"):
+                self._send_ampel(chat_id)
+            elif cmd == "/ampeldebug":
+                self._send_ampel_debug(chat_id)
+            elif cmd == "/ampelauto":
+                self._handle_ampelauto(chat_id, text)
+            elif cmd in ("/ampel_min_trades", "/ampelmintrades"):
+                self._handle_ampel_min_trades(chat_id, text)
+            elif cmd == "/setprofile":
+                self._handle_setprofile(chat_id, text)
+            elif cmd in ("/testtrade", "/testtrades"):
+                self._handle_testtrade(chat_id)
             elif cmd == "/repair":
                 self._handle_autoheal(chat_id)
             elif cmd == "/unlock":
@@ -542,10 +554,24 @@ class TelegramControlPanel:
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;\n"
-            "🧠 <b>Diagnose</b>: /config /brain /markets /autoheal /masterstatus /masterheal /recovery /snapshot\n"
+            "🧠 <b>Diagnose</b>: /config /brain /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
+            "🚦 <b>Ampel</b>: /ampel /ampeldebug /ampelauto status|on|off /ampel_min_trades &lt;n&gt;\n"
+            "🧪 <b>Kompatibilität</b>: /setprofile &lt;growth|scalping|defensive|hf75&gt;, /testtrade, /testtrades\n"
             "🛠 <b>Ops</b>: /repair /unlock /safemode /ops /setmaster &lt;key&gt; &lt;value&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
+        )
+
+    def _send_legacy_ampel_help(self, chat_id: str) -> None:
+        self._send_text(
+            chat_id,
+            "🚦 <b>Ampel-Kommandos (Legacy-Bridge)</b>\n"
+            "In dieser Version läuft Ampel über das neue Ops/Risk-Panel:\n"
+            "• <code>/ampel</code> → Summary + Risk-Lage\n"
+            "• <code>/ampeldebug</code> → Recovery + Market + Master-Status\n"
+            "• <code>/ampelauto status</code> → Master-Status\n"
+            "• <code>/ampelauto on|off</code> → /setmaster enabled true|false\n"
+            "Tipp: Nutze zusätzlich <code>/ops</code> für Reparaturbefehle."
         )
 
     def _send_mode(self, chat_id: str) -> None:
@@ -1419,6 +1445,19 @@ class TelegramControlPanel:
             "• /setrisk max_positions 8\n"
             "• /setmaster target_winrate 55\n"
             f"Aktuell pause/riskoff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>",
+        )
+
+    def _send_legacy_info(self, chat_id: str) -> None:
+        self._send_text(
+            chat_id,
+            "ℹ️ <b>Legacy-Befehl erkannt</b>\n"
+            "Dieser Befehl wurde in der aktuellen Version nicht mehr als eigener Command geführt.\n"
+            "Nutze bitte stattdessen:\n"
+            "• /ops (Repair/Unlock/SafeMode)\n"
+            "• /masterstatus und /setmaster ...\n"
+            "• /brain, /setbrain ...\n"
+            "• /risk, /setrisk ...\n"
+            "Wenn du einen ganz bestimmten alten Befehl 1:1 zurück willst, sende den exakten Namen."
         )
 
 

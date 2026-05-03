@@ -402,6 +402,8 @@ class TelegramControlPanel:
                 self._send_config(chat_id)
             elif cmd == "/brain":
                 self._send_brain(chat_id)
+            elif cmd in ("/regime", "/marketregime", "/marktwetter"):
+                self._send_regime(chat_id)
             elif cmd == "/markets":
                 self._send_markets(chat_id)
             elif cmd == "/autoheal":
@@ -580,7 +582,7 @@ class TelegramControlPanel:
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;\n"
-            "🧠 <b>Diagnose</b>: /config /brain /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
+            "🧠 <b>Diagnose</b>: /config /brain /regime /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
             "🚦 <b>Ampel</b>: /ampel /ampeldebug /ampelauto status|on|off /ampel_min_trades &lt;n&gt;\n"
             "🧪 <b>Kompatibilität</b>: /setprofile &lt;growth|scalping|defensive|hf75&gt;, /testtrade, /testtrades\n"
             "🛠 <b>Ops</b>: /repair /unlock /safemode /ops /setmaster &lt;key&gt; &lt;value&gt; /closeoldest &lt;n&gt; [keep_newest]\n"
@@ -1369,6 +1371,40 @@ class TelegramControlPanel:
                 f"Top: <code>{top.get('strategy')} {top.get('side')} score={top.get('brain_score')}</code>"
             )
         self._send_text(chat_id, "\n".join(lines))
+
+    def _send_regime(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        app_ctx = rt.get("app_context") or {}
+        regime_ctx = app_ctx.get("regime_context") or {}
+        detected = app_ctx.get("detected_regime") or brain.get("last_regime") or "n/a"
+        if not regime_ctx:
+            self._send_text(
+                chat_id,
+                "🌦 <b>Markt-Regime</b>\n"
+                f"Phase: <code>{detected}</code>\n"
+                "Details: <code>n/a</code>\n"
+                "Hinweis: Noch kein vollständiger Regime-Kontext im Runtime-State.",
+            )
+            return
+
+        text = (
+            "🌦 <b>Markt-Regime</b>\n"
+            f"Phase: <code>{regime_ctx.get('regime', detected)}</code>\n"
+            f"Grund: <code>{regime_ctx.get('reason', 'n/a')}</code>\n"
+            f"Trend: <code>{regime_ctx.get('trend_direction', 'n/a')}</code>\n"
+            "Metriken:\n"
+            f"• ADX: <code>{regime_ctx.get('adx', 'n/a')}</code>\n"
+            f"• ATR%: <code>{regime_ctx.get('atr_pct', 'n/a')}</code>\n"
+            f"• EMA Slope%: <code>{regime_ctx.get('ema_slope_pct', 'n/a')}</code>\n"
+            f"• BB Width%: <code>{regime_ctx.get('bb_width_pct', 'n/a')}</code>\n"
+            f"• VolRatio: <code>{regime_ctx.get('volume_ratio', 'n/a')}</code>\n"
+            f"• Shock%: <code>{regime_ctx.get('shock_return_pct', 'n/a')}</code>\n"
+            f"• Cascade%: <code>{regime_ctx.get('cascade_move_pct', 'n/a')}</code>\n"
+            f"• Swing12%: <code>{regime_ctx.get('swing_12_pct', 'n/a')}</code>\n"
+            f"• Retrace%: <code>{regime_ctx.get('retrace_from_high_pct', 'n/a')}</code>"
+        )
+        self._send_text(chat_id, text)
 
     def _send_markets(self, chat_id: str) -> None:
         if not self._callbacks.get_market_status:

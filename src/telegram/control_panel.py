@@ -17,6 +17,7 @@ Wichtige Hinweise:
 
 from __future__ import annotations
 
+import html
 import threading
 import time
 from dataclasses import dataclass
@@ -463,24 +464,43 @@ class TelegramControlPanel:
             return False
         try:
             url = _API_BASE.format(token=self._token, method="sendMessage")
-            resp = requests.post(
-                url,
-                json={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
-                timeout=8,
-            )
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            resp = requests.post(url, json=payload, timeout=8)
             if resp.status_code == 200:
                 return True
+
             desc = ""
             try:
-                payload = resp.json()
-                desc = payload.get("description", "")
+                body = resp.json() or {}
+                desc = str(body.get("description", "") or "")
             except Exception:
                 desc = ""
+
+            # Häufigster Grund für ausbleibende /status-Antwort: ungültiges HTML.
+            # Fallback: escaped plain text ohne parse_mode erneut senden.
+            if resp.status_code == 400 and (
+                "can't parse entities" in desc.lower()
+                or "can't find end tag" in desc.lower()
+                or "unsupported start tag" in desc.lower()
+            ):
+                safe_text = html.escape(str(text or ""))
+                fallback = {
+                    "chat_id": chat_id,
+                    "text": safe_text,
+                    "disable_web_page_preview": True,
+                }
+                resp2 = requests.post(url, json=fallback, timeout=8)
+                if resp2.status_code == 200:
+                    logger.warning(
+                        "Telegram-Panel HTML parse fallback aktiv (%s).", desc
+                    )
+                    return True
+
             logger.warning(
                 f"Telegram-Panel sendMessage HTTP {resp.status_code}"
                 f"{f' ({desc})' if desc else ''}"

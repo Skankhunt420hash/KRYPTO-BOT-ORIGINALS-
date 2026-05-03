@@ -405,6 +405,44 @@ class Settings:
     )
     MASTER_BRAIN_FAIL_WINDOWS: int = int(os.getenv("MASTER_BRAIN_FAIL_WINDOWS", 2))
     MASTER_BRAIN_AUTO_PAUSE: bool = _env_bool("MASTER_BRAIN_AUTO_PAUSE", default=True)
+    # Entry-Cadence-Guard: verhindert lange Entry-Stillephasen, indem Entry-Filter
+    # kontrolliert gelockert werden, bis wieder Trades kommen.
+    ENTRY_CADENCE_GUARD_ENABLED: bool = _env_bool(
+        "ENTRY_CADENCE_GUARD_ENABLED", default=True
+    )
+    ENTRY_CADENCE_TARGET_TRADES_PER_DAY: int = int(
+        os.getenv("ENTRY_CADENCE_TARGET_TRADES_PER_DAY", 8)
+    )
+    ENTRY_CADENCE_INACTIVITY_MINUTES: int = int(
+        os.getenv("ENTRY_CADENCE_INACTIVITY_MINUTES", 120)
+    )
+    ENTRY_CADENCE_RELAX_MIN_CONF_STEP: float = float(
+        os.getenv("ENTRY_CADENCE_RELAX_MIN_CONF_STEP", 4.0)
+    )
+    ENTRY_CADENCE_RELAX_MIN_RR_STEP: float = float(
+        os.getenv("ENTRY_CADENCE_RELAX_MIN_RR_STEP", 0.08)
+    )
+    ENTRY_CADENCE_RELAX_MIN_WIN_CHANCE_STEP: float = float(
+        os.getenv("ENTRY_CADENCE_RELAX_MIN_WIN_CHANCE_STEP", 3.0)
+    )
+    ENTRY_CADENCE_RELAX_BRAIN_SCORE_STEP: float = float(
+        os.getenv("ENTRY_CADENCE_RELAX_BRAIN_SCORE_STEP", 0.03)
+    )
+    ENTRY_CADENCE_MIN_CONFIDENCE_FLOOR: float = float(
+        os.getenv("ENTRY_CADENCE_MIN_CONFIDENCE_FLOOR", 30.0)
+    )
+    ENTRY_CADENCE_MIN_RR_FLOOR: float = float(
+        os.getenv("ENTRY_CADENCE_MIN_RR_FLOOR", 1.10)
+    )
+    ENTRY_CADENCE_MIN_WIN_CHANCE_FLOOR: float = float(
+        os.getenv("ENTRY_CADENCE_MIN_WIN_CHANCE_FLOOR", 58.0)
+    )
+    ENTRY_CADENCE_BRAIN_SCORE_FLOOR: float = float(
+        os.getenv("ENTRY_CADENCE_BRAIN_SCORE_FLOOR", 0.20)
+    )
+    ENTRY_CADENCE_MASTER_OVERRIDE_MINUTES: int = int(
+        os.getenv("ENTRY_CADENCE_MASTER_OVERRIDE_MINUTES", 180)
+    )
     MAX_POSITIONS_PER_SYMBOL: int = int(os.getenv("MAX_POSITIONS_PER_SYMBOL", 1))
     MAX_STRATEGY_POSITIONS: int = int(os.getenv("MAX_STRATEGY_POSITIONS", 2))
 

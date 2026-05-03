@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from config.settings import settings
@@ -878,6 +879,17 @@ class MultiStrategyBot:
         self._master_auto_paused: bool = False
         self._master_last_reason: str = "init"
         self._master_last_snapshot_file: str = "n/a"
+        self._master_cadence_override_until_ts: float = 0.0
+        self._started_at_ts: float = time.time()
+        self._last_entry_open_ts: float = 0.0
+        self._entry_cadence_level: int = 0
+        self._entry_cadence_status: Dict[str, object] = {}
+        self._entry_cadence_baseline: Dict[str, float] = {
+            "min_confidence": float(getattr(settings, "MIN_CONFIDENCE", 40.0)),
+            "min_rr": float(getattr(settings, "MIN_RR", 1.5)),
+            "min_win_chance_pct": float(getattr(settings, "MIN_WIN_CHANCE_PCT", 80.0)),
+            "brain_min_score_to_trade": float(getattr(settings, "BRAIN_MIN_SCORE_TO_TRADE", 0.45)),
+        }
 
         # Performance-Tracking und adaptives Scoring
         self.perf_tracker = PerformanceTracker()
@@ -931,6 +943,13 @@ class MultiStrategyBot:
                     "SHORT_ONLY_TRADING ist an, aber SHORT_ENABLED=false – bitte SHORT_ENABLED=true setzen."
                 )
         self._recover_after_restart()
+        self._bootstrap_entry_cadence_from_history()
+        self._entry_cadence_status = {
+            "enabled": bool(getattr(settings, "ENTRY_CADENCE_GUARD_ENABLED", True)),
+            "level": 0,
+            "reason": "bootstrapped",
+        }
+        self._apply_entry_cadence_guard()
         self._sync_runtime_state()
         if self.perf_tracker.available:
             known = self.perf_tracker.known_strategies()
@@ -971,6 +990,213 @@ class MultiStrategyBot:
 
     def _recovery_state_path(self) -> Path:
         return Path(settings.STATE_RECOVERY_FILE)
+
+    @staticmethod
+    def _parse_db_timestamp(raw: object) -> Optional[datetime]:
+        txt = str(raw or "").strip()
+        if not txt:
+            return None
+        try:
+            # SQLite speichert naive UTC-ISO-Strings.
+            return datetime.fromisoformat(txt).replace(tzinfo=timezone.utc)
+        except Exception:
+            return None
+
+    def _bootstrap_entry_cadence_from_history(self) -> None:
+        """
+        Initialisiert die Entry-Cadence anhand der letzten Trades, damit ein
+        Bot-Restart nicht fälschlich als lange Inaktivität gewertet wird.
+        """
+        try:
+            rows = self.repo.get_recent_trades(limit=200, current_mode_only=True)
+            latest_ts = 0.0
+            for row in rows:
+                if str(row.get("status") or "").strip().lower() == "rejected":
+                    continue
+                dt = self._parse_db_timestamp(row.get("timestamp_open") or row.get("created_at"))
+                if not dt:
+                    continue
+                latest_ts = max(latest_ts, dt.timestamp())
+            self._last_entry_open_ts = latest_ts
+        except Exception:
+            self._last_entry_open_ts = 0.0
+
+    def _count_entries_today(self) -> int:
+        try:
+            rows = self.repo.get_recent_trades(limit=1500, current_mode_only=True)
+        except Exception:
+            return 0
+        today = datetime.now(timezone.utc).date()
+        count = 0
+        for row in rows:
+            st = str(row.get("status") or "").strip().lower()
+            if st == "rejected":
+                continue
+            dt = self._parse_db_timestamp(row.get("timestamp_open") or row.get("created_at"))
+            if not dt:
+                continue
+            if dt.date() == today:
+                count += 1
+        return count
+
+    def _update_entry_cadence_app_context(self, extra: Optional[Dict] = None) -> None:
+        snap = runtime_state.snapshot()
+        app_ctx = dict(snap.get("app_context") or {})
+        app_ctx["entry_cadence"] = dict(self._entry_cadence_status or {})
+        if extra:
+            app_ctx.update(extra)
+        runtime_state.update_app_context(app_ctx)
+
+    def _reset_entry_filters_to_baseline(self) -> None:
+        settings.MIN_CONFIDENCE = float(self._entry_cadence_baseline.get("min_confidence", settings.MIN_CONFIDENCE))
+        settings.MIN_RR = float(self._entry_cadence_baseline.get("min_rr", settings.MIN_RR))
+        settings.BRAIN_MIN_SCORE_TO_TRADE = float(
+            self._entry_cadence_baseline.get("brain_min_score_to_trade", settings.BRAIN_MIN_SCORE_TO_TRADE)
+        )
+        base_wc = float(self._entry_cadence_baseline.get("min_win_chance_pct", settings.MIN_WIN_CHANCE_PCT))
+        if base_wc <= 0:
+            settings.MIN_WIN_CHANCE_PCT = 0.0
+        else:
+            settings.MIN_WIN_CHANCE_PCT = base_wc
+
+    def _register_entry_opened(self, symbol: str, strategy_name: str) -> None:
+        self._last_entry_open_ts = time.time()
+        if self._entry_cadence_level > 0:
+            self._reset_entry_filters_to_baseline()
+            runtime_state.append_log("CADENCE relaxed_filters_reset_on_entry")
+        self._entry_cadence_level = 0
+        self._entry_cadence_status = {
+            "enabled": bool(getattr(settings, "ENTRY_CADENCE_GUARD_ENABLED", True)),
+            "level": 0,
+            "reason": "entry_opened",
+            "symbol": symbol,
+            "strategy": strategy_name,
+            "last_entry_minutes_ago": 0.0,
+        }
+        self._update_entry_cadence_app_context()
+
+    def _apply_entry_cadence_guard(self) -> None:
+        if not bool(getattr(settings, "ENTRY_CADENCE_GUARD_ENABLED", True)):
+            self._entry_cadence_level = 0
+            self._entry_cadence_status = {"enabled": False, "level": 0, "reason": "disabled"}
+            self._update_entry_cadence_app_context()
+            return
+
+        now_ts = time.time()
+        target_per_day = max(1, int(getattr(settings, "ENTRY_CADENCE_TARGET_TRADES_PER_DAY", 8)))
+        inactivity_trigger_min = max(10, int(getattr(settings, "ENTRY_CADENCE_INACTIVITY_MINUTES", 120)))
+        last_ts = self._last_entry_open_ts or self._started_at_ts
+        inactivity_min = max(0.0, (now_ts - last_ts) / 60.0)
+        entries_today = self._count_entries_today()
+        progress = entries_today / float(target_per_day)
+
+        level = 0
+        if progress < 0.75:
+            level = max(level, 1)
+        if progress < 0.50:
+            level = max(level, 2)
+        if progress < 0.25:
+            level = max(level, 3)
+        if inactivity_min >= inactivity_trigger_min:
+            extra = int((inactivity_min - inactivity_trigger_min) // max(inactivity_trigger_min, 1))
+            level = max(level, min(3, 1 + extra))
+
+        prev_level = int(self._entry_cadence_level)
+        self._entry_cadence_level = int(max(0, min(3, level)))
+
+        base_conf = float(self._entry_cadence_baseline.get("min_confidence", settings.MIN_CONFIDENCE))
+        base_rr = float(self._entry_cadence_baseline.get("min_rr", settings.MIN_RR))
+        base_wc = float(self._entry_cadence_baseline.get("min_win_chance_pct", settings.MIN_WIN_CHANCE_PCT))
+        base_brain = float(
+            self._entry_cadence_baseline.get("brain_min_score_to_trade", settings.BRAIN_MIN_SCORE_TO_TRADE)
+        )
+
+        lvl = float(self._entry_cadence_level)
+        settings.MIN_CONFIDENCE = max(
+            float(getattr(settings, "ENTRY_CADENCE_MIN_CONFIDENCE_FLOOR", 30.0)),
+            base_conf - lvl * float(getattr(settings, "ENTRY_CADENCE_RELAX_MIN_CONF_STEP", 4.0)),
+        )
+        settings.MIN_RR = max(
+            float(getattr(settings, "ENTRY_CADENCE_MIN_RR_FLOOR", 1.10)),
+            base_rr - lvl * float(getattr(settings, "ENTRY_CADENCE_RELAX_MIN_RR_STEP", 0.08)),
+        )
+        settings.BRAIN_MIN_SCORE_TO_TRADE = max(
+            float(getattr(settings, "ENTRY_CADENCE_BRAIN_SCORE_FLOOR", 0.20)),
+            base_brain - lvl * float(getattr(settings, "ENTRY_CADENCE_RELAX_BRAIN_SCORE_STEP", 0.03)),
+        )
+        if base_wc <= 0:
+            settings.MIN_WIN_CHANCE_PCT = 0.0
+        else:
+            settings.MIN_WIN_CHANCE_PCT = max(
+                float(getattr(settings, "ENTRY_CADENCE_MIN_WIN_CHANCE_FLOOR", 58.0)),
+                base_wc - lvl * float(getattr(settings, "ENTRY_CADENCE_RELAX_MIN_WIN_CHANCE_STEP", 3.0)),
+            )
+
+        self._entry_cadence_status = {
+            "enabled": True,
+            "level": int(self._entry_cadence_level),
+            "entries_today": int(entries_today),
+            "target_trades_per_day": int(target_per_day),
+            "inactivity_minutes": round(inactivity_min, 1),
+            "min_confidence_active": round(float(settings.MIN_CONFIDENCE), 3),
+            "min_rr_active": round(float(settings.MIN_RR), 3),
+            "min_win_chance_active": round(float(settings.MIN_WIN_CHANCE_PCT), 3),
+            "brain_min_score_active": round(float(settings.BRAIN_MIN_SCORE_TO_TRADE), 3),
+        }
+        self._update_entry_cadence_app_context()
+        if prev_level != self._entry_cadence_level:
+            runtime_state.append_log(
+                "CADENCE level_change "
+                f"{prev_level}->{self._entry_cadence_level} "
+                f"entries_today={entries_today}/{target_per_day} inactivity={inactivity_min:.1f}m"
+            )
+            if self._entry_cadence_level >= 2:
+                self.tg.send(
+                    "⚙️ <b>ENTRY CADENCE GUARD</b>\n"
+                    f"Level {self._entry_cadence_level} aktiv.\n"
+                    f"Entries heute: {entries_today}/{target_per_day} | "
+                    f"Inaktiv: {inactivity_min:.0f}min.\n"
+                    "Entry-Filter werden temporär gelockert, um Stalls zu vermeiden."
+                )
+
+    def _maybe_override_master_autopause_for_cadence(self) -> None:
+        if not bool(getattr(settings, "ENTRY_CADENCE_GUARD_ENABLED", True)):
+            return
+        if not bool(getattr(settings, "MASTER_BRAIN_ENABLED", True)):
+            return
+        if self._entry_cadence_level < 2:
+            return
+        now_ts = time.time()
+        last_ts = self._last_entry_open_ts or self._started_at_ts
+        inactivity_min = max(0.0, (now_ts - last_ts) / 60.0)
+        override_trigger = max(
+            int(getattr(settings, "ENTRY_CADENCE_MASTER_OVERRIDE_MINUTES", 180)),
+            int(getattr(settings, "ENTRY_CADENCE_INACTIVITY_MINUTES", 120)),
+        )
+        if inactivity_min < float(override_trigger):
+            return
+        ctrl = runtime_control.get_snapshot()
+        if not (bool(ctrl.get("paused")) or bool(ctrl.get("risk_off")) or self._master_auto_paused):
+            return
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        self._master_auto_paused = False
+        hold_minutes = max(30, int(getattr(settings, "ENTRY_CADENCE_INACTIVITY_MINUTES", 120)))
+        self._master_cadence_override_until_ts = now_ts + hold_minutes * 60
+        until_txt = datetime.fromtimestamp(
+            self._master_cadence_override_until_ts, tz=timezone.utc
+        ).strftime("%H:%M:%S UTC")
+        self._master_last_reason = (
+            f"cadence_override_active_until:{until_txt} inactivity={inactivity_min:.0f}m"
+        )
+        runtime_state.append_log(
+            "MASTER cadence_override "
+            f"inactivity={inactivity_min:.1f}m hold_until={until_txt}"
+        )
+        self.tg.send(
+            "🟢 <b>MASTER CADENCE OVERRIDE</b>\n"
+            f"Inaktivität {inactivity_min:.0f}min erkannt. Master-AutoPause temporär übersteuert bis {until_txt}."
+        )
 
     def _persist_recovery_state(self) -> None:
         if not settings.STATE_RECOVERY_ENABLED:
@@ -2000,6 +2226,7 @@ class MultiStrategyBot:
                 return
 
             self.risk.open_with_signal(best, amount)
+            self._register_entry_opened(symbol, best.strategy_name)
             _snap = self._last_brain_snapshot or {}
             _bs_raw = _snap.get("last_signal_score")
             _brain_f = float(_bs_raw) if _bs_raw is not None else None
@@ -2142,6 +2369,7 @@ class MultiStrategyBot:
             return
 
         self.risk.open_with_signal(signal, amount)
+        self._register_entry_opened(symbol, signal.strategy_name)
         _snap_s = self._last_brain_snapshot or {}
         _bs_raw_s = _snap_s.get("last_signal_score")
         _brain_fs = float(_bs_raw_s) if _bs_raw_s is not None else None
@@ -2271,6 +2499,8 @@ class MultiStrategyBot:
         except Exception as e:
             logger.warning(f"Scorer-Refresh fehlgeschlagen (nicht kritisch): {e}")
 
+        self._apply_entry_cadence_guard()
+
         cycle_symbols = list(
             dict.fromkeys(list(self.pairs) + list(self.risk.open_positions.keys()))
         )
@@ -2304,6 +2534,7 @@ class MultiStrategyBot:
         self._persist_recovery_state()
 
         self._run_master_watchdog()
+        self._maybe_override_master_autopause_for_cadence()
 
         # Health-Monitor auswerten (Watchdog-Reaktionen, Snapshots)
         self.health.check_and_react()
@@ -2715,6 +2946,15 @@ class MultiStrategyBot:
         }
 
     def _get_master_status_from_panel(self) -> Dict:
+        cadence = dict(self._entry_cadence_status or {})
+        override_until = "n/a"
+        if float(self._master_cadence_override_until_ts) > time.time():
+            try:
+                override_until = datetime.fromtimestamp(
+                    float(self._master_cadence_override_until_ts), tz=timezone.utc
+                ).strftime("%H:%M:%S UTC")
+            except Exception:
+                override_until = "active"
         return {
             "enabled": bool(getattr(settings, "MASTER_BRAIN_ENABLED", True)),
             "min_trades": int(getattr(settings, "MASTER_BRAIN_MIN_TRADES", 20)),
@@ -2724,11 +2964,25 @@ class MultiStrategyBot:
             "auto_paused": bool(self._master_auto_paused),
             "last_reason": self._master_last_reason,
             "last_snapshot_file": self._master_last_snapshot_file,
+            "cadence_level": int(cadence.get("level", 0) or 0),
+            "entries_today": int(cadence.get("entries_today", 0) or 0),
+            "target_trades_per_day": int(
+                cadence.get(
+                    "target_trades_per_day",
+                    int(getattr(settings, "ENTRY_CADENCE_TARGET_TRADES_PER_DAY", 8)),
+                )
+                or 0
+            ),
+            "cadence_override_until": override_until,
         }
 
     def _run_master_watchdog(self) -> None:
         if not bool(getattr(settings, "MASTER_BRAIN_ENABLED", True)):
             return
+        if self._master_cadence_override_until_ts and time.time() >= float(
+            self._master_cadence_override_until_ts
+        ):
+            self._master_cadence_override_until_ts = 0.0
         closed = self.repo.get_recent_trades(
             limit=int(getattr(settings, "MASTER_BRAIN_MIN_TRADES", 20)),
             status="closed",
@@ -2770,6 +3024,10 @@ class MultiStrategyBot:
             f"(window_fail={self._master_fail_windows}/{fail_threshold})"
         )
         if self._master_fail_windows < fail_threshold:
+            return
+
+        if time.time() < float(self._master_cadence_override_until_ts or 0.0):
+            self._master_last_reason += " | cadence_override_active"
             return
 
         if bool(getattr(settings, "MASTER_BRAIN_AUTO_PAUSE", True)):

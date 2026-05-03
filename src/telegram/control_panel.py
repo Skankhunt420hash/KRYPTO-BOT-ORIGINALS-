@@ -1357,6 +1357,9 @@ class TelegramControlPanel:
             f"Last Winrate: <code>{data.get('last_winrate_pct', 'n/a')}%</code>\n"
             f"Consecutive Fails: <code>{data.get('consecutive_fail_windows', 0)}</code>\n"
             f"Auto Pause: <code>{data.get('auto_paused', False)}</code>\n"
+            f"Cadence Level: <code>{data.get('cadence_level', 0)}</code> | "
+            f"Entries today: <code>{data.get('entries_today', 0)}/{data.get('target_trades_per_day', 'n/a')}</code>\n"
+            f"Cadence Override until: <code>{data.get('cadence_override_until', 'n/a')}</code>\n"
             f"Last Reason: <code>{data.get('last_reason', 'n/a')}</code>\n"
             f"Last Snapshot: <code>{data.get('last_snapshot_file', 'n/a')}</code>"
         )
@@ -1430,6 +1433,9 @@ class TelegramControlPanel:
             f"Brain score/risky: <code>{brain.get('last_signal_score', 'n/a')}/{brain.get('risky_phase', 'n/a')}</code>\n"
             f"Master enabled: <code>{master.get('enabled', 'n/a')}</code> | "
             f"winrate: <code>{master.get('last_winrate_pct', 'n/a')}%</code>\n"
+            f"Cadence level: <code>{master.get('cadence_level', 0)}</code> | "
+            f"entries: <code>{master.get('entries_today', 0)}/{master.get('target_trades_per_day', 'n/a')}</code>\n"
+            f"Cadence override until: <code>{master.get('cadence_override_until', 'n/a')}</code>\n"
             f"Master reason: <code>{master.get('last_reason', 'n/a')}</code>\n"
             f"Stale symbols: <code>{len(markets.get('stale_symbols', []) or [])}</code>",
         )

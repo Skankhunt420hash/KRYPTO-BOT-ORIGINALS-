@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -685,6 +686,12 @@ class TradingBot:
             "Bitte Service per systemd neu starten.",
         )
 
+    def _request_close_oldest_open_trades_from_panel(
+        self, close_count: int, keep_newest: int
+    ) -> Tuple[bool, str]:
+        _ = close_count, keep_newest
+        return False, "Close-Oldest ist nur im Multi-Strategy-Modus verfügbar."
+
     def _apply_runtime_settings_from_panel(self, updates: Dict[str, float]) -> Tuple[bool, str]:
         if not isinstance(updates, dict) or not updates:
             return False, "Keine Runtime-Parameter übergeben."
@@ -895,6 +902,7 @@ class MultiStrategyBot:
         self._self_reflection = SelfReflectionMemory()
         self._self_reflection_last_repair_ts: float = 0.0
         self._queued_forced_closes: List[Dict[str, str]] = []
+        self._forced_close_lock = threading.Lock()
 
         # Performance-Tracking und adaptives Scoring
         self.perf_tracker = PerformanceTracker()
@@ -1295,69 +1303,86 @@ class MultiStrategyBot:
     def _request_close_oldest_open_trades_from_panel(
         self, close_count: int, keep_newest: int
     ) -> Tuple[bool, str]:
-        return self._queue_close_oldest_from_panel(
+        ok, msg = self._queue_close_oldest_from_panel(
             close_count=close_count,
             keep_newest=keep_newest,
         )
+        if not ok:
+            return ok, msg
+        if self.running:
+            closed_now = self._run_forced_close_queue()
+            self._sync_runtime_state()
+            if closed_now > 0:
+                return True, f"{msg} Sofort geschlossen: {closed_now}."
+            return True, f"{msg} Ausführung im nächsten Zyklus."
+        return True, msg
 
-    def _run_forced_close_queue(self) -> None:
+    def _run_forced_close_queue(self) -> int:
         """
         Führt geplante Forced-Closes sicher im Bot-Thread aus.
         """
-        queue = list(self._queued_forced_closes)
-        if not queue:
-            return
-        self._queued_forced_closes = []
-        for item in queue:
-            symbol = str(item.get("symbol") or "").strip()
-            if not symbol:
-                continue
-            pos = self.risk.open_positions.get(symbol)
-            if not pos:
-                continue
-            # nutze zuletzt bekannten Mark-Preis; wenn nicht vorhanden, Entry als Fallback
-            mark = float(self._last_prices.get(symbol, getattr(pos, "entry_price", 0.0)) or 0.0)
-            if mark <= 0:
-                mark = float(getattr(pos, "entry_price", 0.0) or 0.0)
-            if mark <= 0:
-                continue
-            exit_side = "sell" if getattr(pos, "side", "long") == "long" else "buy"
-            exec_result = self.exec_engine.execute_exit(symbol, exit_side, float(getattr(pos, "amount", 0.0) or 0.0))
-            if not exec_result.success:
-                logger.warning(
-                    "FORCE_CLOSE Exit-Order Problem %s: %s (lokaler Close wird fortgesetzt)",
-                    symbol,
-                    exec_result.reason,
-                )
-            pnl = self.risk.close_position(symbol, mark)
-            trade_id = self._open_trade_ids.pop(symbol, None)
-            if trade_id is not None and pnl is not None:
-                try:
-                    entry_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
-                    amount = float(getattr(pos, "amount", 0.0) or 0.0)
-                    cost = entry_price * amount
-                    pnl_pct = (pnl / cost * 100.0) if cost > 0 else 0.0
-                    self.repo.close_trade(
-                        int(trade_id),
-                        mark,
-                        float(pnl),
-                        float(pnl_pct),
-                        "forced_close_oldest",
+        if not self._forced_close_lock.acquire(blocking=False):
+            return 0
+        try:
+            queue = list(self._queued_forced_closes)
+            if not queue:
+                return 0
+            self._queued_forced_closes = []
+            closed_count = 0
+            for item in queue:
+                symbol = str(item.get("symbol") or "").strip()
+                if not symbol:
+                    continue
+                pos = self.risk.open_positions.get(symbol)
+                if not pos:
+                    continue
+                # nutze zuletzt bekannten Mark-Preis; wenn nicht vorhanden, Entry als Fallback
+                mark = float(self._last_prices.get(symbol, getattr(pos, "entry_price", 0.0)) or 0.0)
+                if mark <= 0:
+                    mark = float(getattr(pos, "entry_price", 0.0) or 0.0)
+                if mark <= 0:
+                    continue
+                exit_side = "sell" if getattr(pos, "side", "long") == "long" else "buy"
+                exec_result = self.exec_engine.execute_exit(symbol, exit_side, float(getattr(pos, "amount", 0.0) or 0.0))
+                if not exec_result.success:
+                    logger.warning(
+                        "FORCE_CLOSE Exit-Order Problem %s: %s (lokaler Close wird fortgesetzt)",
+                        symbol,
+                        exec_result.reason,
                     )
-                    self.tg.notify_trade_closed(
-                        symbol=symbol,
-                        side=getattr(pos, "side", "long"),
-                        entry=entry_price,
-                        exit_price=mark,
-                        pnl=float(pnl),
-                        pnl_pct=float(pnl_pct),
-                        reason="forced_close_oldest",
-                        strategy=getattr(pos, "strategy_name", self._active_strategy_runtime),
-                        is_paper=settings.TRADING_MODE == "paper",
-                    )
-                except Exception as e:
-                    logger.warning("FORCE_CLOSE DB/Notify Fehler %s: %s", symbol, e)
-            runtime_state.append_log(f"FORCE_CLOSE_DONE {symbol} reason=forced_close_oldest")
+                pnl = self.risk.close_position(symbol, mark)
+                trade_id = self._open_trade_ids.pop(symbol, None)
+                if trade_id is not None and pnl is not None:
+                    try:
+                        entry_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
+                        amount = float(getattr(pos, "amount", 0.0) or 0.0)
+                        cost = entry_price * amount
+                        pnl_pct = (pnl / cost * 100.0) if cost > 0 else 0.0
+                        self.repo.close_trade(
+                            int(trade_id),
+                            mark,
+                            float(pnl),
+                            float(pnl_pct),
+                            "forced_close_oldest",
+                        )
+                        self.tg.notify_trade_closed(
+                            symbol=symbol,
+                            side=getattr(pos, "side", "long"),
+                            entry=entry_price,
+                            exit_price=mark,
+                            pnl=float(pnl),
+                            pnl_pct=float(pnl_pct),
+                            reason="forced_close_oldest",
+                            strategy=getattr(pos, "strategy_name", self._active_strategy_runtime),
+                            is_paper=settings.TRADING_MODE == "paper",
+                        )
+                    except Exception as e:
+                        logger.warning("FORCE_CLOSE DB/Notify Fehler %s: %s", symbol, e)
+                runtime_state.append_log(f"FORCE_CLOSE_DONE {symbol} reason=forced_close_oldest")
+                closed_count += 1
+            return closed_count
+        finally:
+            self._forced_close_lock.release()
 
     def _apply_self_reflection_repairs(self) -> None:
         if not bool(getattr(settings, "SELF_REFLECTION_ENABLED", True)):

@@ -120,8 +120,8 @@ class IntelligenceBrain:
 
     def _rank_strategies(self, *, regime: Regime, signals: List[EnhancedSignal]) -> List[Dict]:
         out: List[Dict] = []
-        regime_fits = REGIME_STRATEGY_FIT.get(regime, {})
-        dir_mults = DIRECTION_MULTIPLIER.get(regime, {})
+        regime_fits = REGIME_STRATEGY_FIT.get(regime, REGIME_STRATEGY_FIT.get(Regime.RANGE, {}))
+        dir_mults = DIRECTION_MULTIPLIER.get(regime, DIRECTION_MULTIPLIER.get(Regime.RANGE, {}))
         preferred = (runtime_control.get_snapshot().get("preferred_strategy") or "").strip()
         pref_bonus = settings.CONTROL_STRATEGY_PRIORITY_BONUS if preferred else 0.0
 
@@ -195,7 +195,13 @@ class IntelligenceBrain:
         return out
 
     def _is_risky_phase(self, regime: Regime, ranking: List[Dict]) -> bool:
-        if regime == Regime.HIGH_VOLATILITY:
+        high_risk_regimes = {
+            Regime.HIGH_VOLATILITY,
+            Regime.NEWS_SHOCK,
+            Regime.PUMP_DUMP_RISK,
+            Regime.LIQUIDATION_CASCADE,
+        }
+        if regime in high_risk_regimes:
             return True
         if not ranking:
             return True
@@ -216,9 +222,11 @@ class IntelligenceBrain:
     @staticmethod
     def _volatility_quality(*, sig: EnhancedSignal, regime: Regime) -> float:
         rr_score = _clamp(float(sig.rr) / 3.0)
-        if regime == Regime.HIGH_VOLATILITY:
+        if regime in (Regime.HIGH_VOLATILITY, Regime.NEWS_SHOCK, Regime.LIQUIDATION_CASCADE):
             return _clamp(0.4 + rr_score * 0.6)
-        if regime == Regime.LOW_VOLATILITY:
+        if regime in (Regime.LOW_VOLATILITY, Regime.LOW_VOL_TRAP):
             return _clamp(0.55 + rr_score * 0.45)
+        if regime in (Regime.PUMP_DUMP_RISK, Regime.MANIPULATION_PHASE):
+            return _clamp(0.45 + rr_score * 0.55)
         return _clamp(0.5 + rr_score * 0.5)
 

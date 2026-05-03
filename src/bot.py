@@ -899,6 +899,7 @@ class MultiStrategyBot:
         self._active_strategy_runtime: str = "AUTO"
         self._last_selector_snapshot: Dict = {}
         self._last_brain_snapshot: Dict = {}
+        self._last_regime_context: Dict = {}
         self._master_last_winrate_pct: float = 0.0
         self._master_fail_windows: int = 0
         self._master_auto_paused: bool = False
@@ -2082,6 +2083,13 @@ class MultiStrategyBot:
                 market_context=market_ctx,
             )
             return
+
+        self._last_regime_context = self.regime_engine.get_last_context()
+        snap = runtime_state.snapshot()
+        app_ctx = dict(snap.get("app_context") or {})
+        app_ctx["regime_context"] = dict(self._last_regime_context)
+        app_ctx["detected_regime"] = regime.value
+        runtime_state.update_app_context(app_ctx)
 
         logger.debug(f"{symbol} | Regime: [bold]{regime.value}[/bold] | Preis: {current_price:.4f}")
 

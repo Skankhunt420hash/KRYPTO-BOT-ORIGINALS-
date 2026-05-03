@@ -775,6 +775,20 @@ class TelegramControlPanel:
                 f"actionable={selector.get('actionable')} | eligible={selector.get('eligible')} | "
                 f"winner={selector.get('winner') or 'none'} | score={selector.get('winner_score') or 'n/a'}"
             )
+        app_ctx = rt.get("app_context") or {}
+        regime_ctx = app_ctx.get("regime_context") or {}
+        if regime_ctx:
+            parts.append(
+                f"🌦 <b>Regime-Marktphase:</b> {regime_ctx.get('regime', 'n/a')} | "
+                f"reason={regime_ctx.get('reason', 'n/a')}"
+            )
+            parts.append(
+                f"🌦 <b>Regime-Faktoren:</b> "
+                f"ADX={regime_ctx.get('adx', 'n/a')} | "
+                f"ATR%={regime_ctx.get('atr_pct', 'n/a')} | "
+                f"VolRatio={regime_ctx.get('volume_ratio', 'n/a')} | "
+                f"Shock%={regime_ctx.get('shock_return_pct', 'n/a')}"
+            )
         gate = rt.get("risk_gate") or {}
         if gate:
             parts.append(
@@ -1320,6 +1334,7 @@ class TelegramControlPanel:
         brain = rt.get("brain") or {}
         app_ctx = rt.get("app_context") or {}
         reflection = app_ctx.get("self_reflection") or {}
+        regime_ctx = app_ctx.get("regime_context") or {}
         ranking = list(brain.get("last_strategy_ranking") or [])
         lines = [
             "🧠 <b>Brain-Status</b>",
@@ -1328,6 +1343,18 @@ class TelegramControlPanel:
             f"Decision: <code>{brain.get('last_decision_reason', 'n/a')}</code>",
             f"Risky: <code>{brain.get('risky_phase', 'n/a')}</code>",
         ]
+        if regime_ctx:
+            lines.extend(
+                [
+                    f"Marktphase: <code>{regime_ctx.get('regime', 'n/a')}</code>",
+                    f"Phase-Grund: <code>{regime_ctx.get('reason', 'n/a')}</code>",
+                    "Phase-Metriken: "
+                    f"<code>ADX={regime_ctx.get('adx', 'n/a')} "
+                    f"ATR%={regime_ctx.get('atr_pct', 'n/a')} "
+                    f"VolRatio={regime_ctx.get('volume_ratio', 'n/a')} "
+                    f"Shock%={regime_ctx.get('shock_return_pct', 'n/a')}</code>",
+                ]
+            )
         if reflection:
             lines.extend(
                 [

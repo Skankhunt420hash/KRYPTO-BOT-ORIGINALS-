@@ -69,6 +69,7 @@ class TradingBot:
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
                 request_bot_restart=self._request_bot_restart_from_panel,
+                request_test_trade=self._trigger_test_trade_from_panel,
                 request_close_oldest_open_trades=self._request_close_oldest_open_trades_from_panel,
                 apply_runtime_settings=self._apply_runtime_settings_from_panel,
                 request_auto_heal=self._request_auto_heal,
@@ -685,6 +686,21 @@ class TradingBot:
             "Safe-Restart markiert: Entries pausiert + Risk-Off aktiv. "
             "Bitte Service per systemd neu starten.",
         )
+
+    def _trigger_test_trade_from_panel(self) -> Tuple[bool, str]:
+        try:
+            if not self.running:
+                return False, "Bot läuft nicht."
+            runtime_control.resume_entries()
+            runtime_control.disable_risk_off()
+            runtime_state.update_engine(paused=False, risk_off=False)
+            self._sync_runtime_state()
+            return True, (
+                "Testtrade-Bridge aktiv: Entries entsperrt. "
+                "Der nächste valide Zyklus-Signalpfad darf wieder eröffnen."
+            )
+        except Exception as e:
+            return False, f"Testtrade-Bridge fehlgeschlagen: {e}"
 
     def _request_close_oldest_open_trades_from_panel(
         self, close_count: int, keep_newest: int

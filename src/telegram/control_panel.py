@@ -72,6 +72,7 @@ class PanelCallbacks:
     request_close_oldest_open_trades: Optional[
         Callable[[int, int], Tuple[bool, str]]
     ] = None
+    request_test_trade: Optional[Callable[[], Tuple[bool, str]]] = None
 
 
 class TelegramControlPanel:
@@ -1570,6 +1571,10 @@ class TelegramControlPanel:
         self._send_text(chat_id, f"{'✅' if ok else '⚠️'} Profil <code>{profile}</code> gesetzt.\n{msg}")
 
     def _handle_testtrade(self, chat_id: str) -> None:
+        if self._callbacks.request_test_trade:
+            ok, msg = self._callbacks.request_test_trade()
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
         rt = self._safe_runtime_status()
         self._send_text(
             chat_id,

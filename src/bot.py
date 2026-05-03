@@ -916,6 +916,8 @@ class MultiStrategyBot:
             "min_win_chance_pct": float(getattr(settings, "MIN_WIN_CHANCE_PCT", 80.0)),
             "brain_min_score_to_trade": float(getattr(settings, "BRAIN_MIN_SCORE_TO_TRADE", 0.45)),
         }
+        self._mtf_cache: Dict[str, Dict[str, object]] = {}
+        self._last_mtf_context: Dict[str, object] = {}
         self._self_reflection = SelfReflectionMemory()
         self._self_reflection_last_repair_ts: float = 0.0
         self._queued_forced_closes: List[Dict[str, str]] = []
@@ -1848,6 +1850,196 @@ class MultiStrategyBot:
         except Exception:
             return {}
 
+    def _mtf_regime_for(self, symbol: str, timeframe: str) -> Tuple[str, Dict]:
+        cache_key = f"{symbol}::{timeframe}"
+        now_ts = time.time()
+        ttl_sec = max(
+            5,
+            int(
+                getattr(
+                    settings,
+                    "MTF_CACHE_TTL_SEC",
+                    getattr(settings, "MTF_FETCH_CACHE_TTL_SEC", 45),
+                )
+            ),
+        )
+        cached = self._mtf_cache.get(cache_key) or {}
+        cached_ts = float(cached.get("ts", 0.0) or 0.0)
+        if now_ts - cached_ts <= ttl_sec and cached.get("regime"):
+            return str(cached.get("regime")), dict(cached.get("context") or {})
+
+        lookback = int(
+            getattr(
+                settings,
+                "MTF_CANDLE_LIMIT",
+                getattr(settings, "MTF_FETCH_LIMIT", settings.CANDLE_LIMIT),
+            )
+        )
+        df_tf = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=lookback)
+        if df_tf.empty:
+            return "NO_DATA", {"reason": "no_data"}
+
+        re = RegimeEngine()
+        regime = re.detect(df_tf).value
+        ctx = re.get_last_context()
+        self._mtf_cache[cache_key] = {"ts": now_ts, "regime": regime, "context": ctx}
+        return regime, dict(ctx or {})
+
+    @staticmethod
+    def _tf_direction_hint(regime_name: str, ctx: Dict) -> int:
+        txt = str(regime_name or "").upper()
+        trend_dir = str((ctx or {}).get("trend_direction", "")).lower()
+        if "TREND_UP" in txt:
+            return 1
+        if "TREND_DOWN" in txt:
+            return -1
+        if "TREND_MARKET" in txt:
+            if trend_dir == "up":
+                return 1
+            if trend_dir == "down":
+                return -1
+        if "LIQUIDATION_CASCADE" in txt:
+            if trend_dir == "up":
+                return 1
+            if trend_dir == "down":
+                return -1
+        return 0
+
+    def _evaluate_mtf_guard(
+        self,
+        *,
+        symbol: str,
+        entry_side: Side,
+        entry_regime: str,
+        entry_context: Dict,
+    ) -> Tuple[bool, str, Dict]:
+        if not bool(getattr(settings, "MTF_KING_ENABLED", True)):
+            return True, "mtf_guard_disabled", {"enabled": False}
+
+        micro_tf = str(getattr(settings, "MTF_MICRO_TIMEFRAME", "5m") or "5m").strip()
+        setup_tf = str(getattr(settings, "MTF_SETUP_TIMEFRAME", "15m") or "15m").strip()
+        direction_tf = str(getattr(settings, "MTF_DIRECTION_TIMEFRAME", "1h") or "1h").strip()
+        context_tf = str(getattr(settings, "MTF_CONTEXT_TIMEFRAME", "4h") or "4h").strip()
+        frames = [micro_tf, setup_tf, direction_tf, context_tf]
+        strict_block = bool(getattr(settings, "MTF_STRICT_DIRECTION_CONTEXT_BLOCK", True))
+        min_support_ratio = float(getattr(settings, "MTF_MIN_SUPPORT_RATIO", 0.50))
+        max_opposing = max(0, int(getattr(settings, "MTF_MAX_OPPOSING_HIGHER_TFS", 2)))
+        strong_threshold = max(0.0, float(getattr(settings, "MTF_DIRECTION_STRONG_THRESHOLD", 0.18)))
+
+        side_val = entry_side.value if isinstance(entry_side, Side) else str(entry_side)
+        side_sign = 1 if side_val == Side.LONG.value else -1 if side_val == Side.SHORT.value else 0
+        if side_sign == 0:
+            return True, "mtf_side_none", {"enabled": True, "side": side_val}
+
+        rows: List[Dict[str, object]] = []
+        support_score = 0.0
+        opposing_total = 0
+        aligned_total = 0
+        unknown_total = 0
+        hard_opposing = 0
+        hard_aligned = 0
+
+        for tf in frames:
+            tf_regime, tf_ctx = self._mtf_regime_for(symbol, tf)
+            tf_sign = self._tf_direction_hint(tf_regime, tf_ctx)
+            slope = float((tf_ctx or {}).get("ema_slope_pct", 0.0) or 0.0)
+            relation = "neutral"
+            if tf_sign != 0:
+                relation = "aligned" if tf_sign == side_sign else "opposing"
+                if relation == "opposing":
+                    opposing_total += 1
+                    if tf in (direction_tf, context_tf):
+                        hard_opposing += 1
+                else:
+                    aligned_total += 1
+                    if tf in (direction_tf, context_tf):
+                        hard_aligned += 1
+            else:
+                if tf_regime == "NO_DATA":
+                    relation = "no_data"
+                    unknown_total += 1
+
+            # Kleinere TFs weniger Gewicht, Richtung/Kontext höher.
+            weight = 0.8
+            if tf == setup_tf:
+                weight = 1.0
+            elif tf == direction_tf:
+                weight = 1.4
+            elif tf == context_tf:
+                weight = 1.8
+
+            # Klares Gegensignal auf hohen TFs wird stärker bestraft.
+            strength_mult = 1.0
+            if abs(slope) >= strong_threshold:
+                strength_mult = 1.25
+            if relation == "aligned":
+                support_score += 1.0 * weight * strength_mult
+            elif relation == "opposing":
+                support_score -= 1.0 * weight * strength_mult
+
+            rows.append(
+                {
+                    "tf": tf,
+                    "regime": tf_regime,
+                    "trend": str((tf_ctx or {}).get("trend_direction", "n/a")),
+                    "relation": relation,
+                    "reason": str((tf_ctx or {}).get("reason", "n/a")),
+                }
+            )
+
+        context = {
+            "enabled": True,
+            "symbol": symbol,
+            "entry_side": side_val,
+            "entry_regime": entry_regime,
+            "entry_reason": str((entry_context or {}).get("reason", "n/a")),
+            "frames": rows,
+            "entry_timeframe": str(getattr(settings, "MTF_ENTRY_TIMEFRAME", settings.TIMEFRAME)),
+            "micro_timeframe": micro_tf,
+            "setup_timeframe": setup_tf,
+            "direction_timeframe": direction_tf,
+            "context_timeframe": context_tf,
+            "aligned_total": aligned_total,
+            "opposing_total": opposing_total,
+            "unknown_frames": unknown_total,
+            "opposing_hard": hard_opposing,
+            "aligned_hard": hard_aligned,
+            # Legacy-Felder für bestehende Telegram-Ansichten:
+            "hard_opposing": hard_opposing,
+            "hard_aligned": hard_aligned,
+            "support_score": round(float(support_score), 4),
+            "support_ratio": 0.5,
+            "min_support_ratio": round(float(min_support_ratio), 4),
+            "max_opposing_higher_tfs": int(max_opposing),
+            "strict_direction_context_block": bool(strict_block),
+            "direction_strong_threshold": round(float(strong_threshold), 4),
+        }
+        known_directional = aligned_total + opposing_total
+        support_ratio = (
+            float(aligned_total) / float(known_directional) if known_directional > 0 else 0.5
+        )
+        context["support_ratio"] = round(support_ratio, 4)
+
+        if strict_block and hard_opposing >= 1 and hard_aligned == 0:
+            return (
+                False,
+                "MTF HARD VETO: 1h/4h are clearly against entry",
+                context,
+            )
+        if opposing_total > max_opposing:
+            return (
+                False,
+                f"MTF BLOCK: too many opposing higher timeframes ({opposing_total}>{max_opposing})",
+                context,
+            )
+        if known_directional > 0 and support_ratio < min_support_ratio:
+            return (
+                False,
+                f"MTF BLOCK: support ratio too low ({support_ratio:.2f}<{min_support_ratio:.2f})",
+                context,
+            )
+        return True, "mtf_confirmed", context
+
     def _log_decision_cycle(
         self,
         *,
@@ -2139,6 +2331,71 @@ class MultiStrategyBot:
                 reject_reason=reason,
                 last_decision_reason=reason,
                 market_context=market_ctx,
+            )
+            return
+        mtf_allowed, mtf_reason, mtf_ctx = self._evaluate_mtf_guard(
+            symbol=symbol,
+            entry_side=best.side,
+            entry_regime=(best.regime or regime.value),
+            entry_context=self._last_regime_context,
+        )
+        mtf_ctx = dict(mtf_ctx or {})
+        mtf_ctx["allowed"] = bool(mtf_allowed)
+        mtf_ctx["reason"] = str(mtf_reason)
+        self._last_mtf_context = dict(mtf_ctx)
+        snap = runtime_state.snapshot()
+        app_ctx = dict(snap.get("app_context") or {})
+        app_ctx["mtf_context"] = dict(self._last_mtf_context)
+        runtime_state.update_app_context(app_ctx)
+        if not mtf_allowed:
+            logger.info(
+                f"[yellow]MTF BLOCKED[/yellow] {symbol} | "
+                f"Strategie: {best.strategy_name} | Grund: {mtf_reason}"
+            )
+            self.repo.save_rejected_signal(
+                symbol=symbol,
+                timeframe=best.timeframe,
+                strategy_name=best.strategy_name,
+                side=best.side.value,
+                entry_price=best.entry,
+                stop_loss=best.stop_loss,
+                take_profit=best.take_profit,
+                rr_planned=best.rr,
+                confidence=best.confidence,
+                regime=best.regime,
+                reason_rejected=mtf_reason,
+            )
+            self.tg.notify_trade_blocked(
+                symbol=symbol,
+                strategy=best.strategy_name,
+                side=best.side.value,
+                reason=mtf_reason,
+            )
+            self._record_trade_event(
+                event="blocked",
+                symbol=symbol,
+                side=best.side.value,
+                strategy=best.strategy_name,
+                pnl=None,
+                reason=mtf_reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_mtf",
+                reason=mtf_reason,
+                strategy=best.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=regime.value,
+                ranking=ranking,
+                chosen_strategy=best.strategy_name,
+                signal_score=signal_score,
+                risk_decision="mtf_block",
+                allow_trade=False,
+                reject_reason=mtf_reason,
+                last_decision_reason=mtf_reason,
+                market_context={**market_ctx, "mtf": mtf_ctx},
             )
             return
         self._active_strategy_runtime = best.strategy_name

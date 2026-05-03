@@ -234,6 +234,47 @@ class Settings:
     MIN_RR: float = float(os.getenv("MIN_RR", 1.5))
 
     # ------------------------------------------------------------------
+    # Multi-Timeframe-King (Entry klein, Erlaubnis groß)
+    # ------------------------------------------------------------------
+    # Prinzip:
+    # - Entry-Timeframe liefert Timing (z.B. 1m)
+    # - Höhere Timeframes (5m/15m/1h/4h) geben Freigabe oder Block
+    # - Ein Entry wird blockiert, wenn höhere Ebenen klar dagegen sprechen
+    MTF_KING_ENABLED: bool = _env_bool(
+        "MTF_KING_ENABLED", fallback="MTF_GATE_ENABLED", default=True
+    )
+    MTF_ENTRY_TIMEFRAME: str = _first_non_empty(
+        "MTF_ENTRY_TIMEFRAME", default="1m"
+    ).strip()
+    MTF_MICRO_TIMEFRAME: str = _first_non_empty(
+        "MTF_MICRO_TIMEFRAME", default="5m"
+    ).strip()
+    MTF_SETUP_TIMEFRAME: str = _first_non_empty(
+        "MTF_SETUP_TIMEFRAME", "MTF_CONFIRM_TIMEFRAME", default="15m"
+    ).strip()
+    MTF_DIRECTION_TIMEFRAME: str = _first_non_empty(
+        "MTF_DIRECTION_TIMEFRAME", default="1h"
+    ).strip()
+    MTF_CONTEXT_TIMEFRAME: str = _first_non_empty(
+        "MTF_CONTEXT_TIMEFRAME", default="4h"
+    ).strip()
+    MTF_CANDLE_LIMIT: int = int(
+        _first_non_empty("MTF_CANDLE_LIMIT", "MTF_FETCH_LIMIT", default="220")
+    )
+    MTF_CACHE_TTL_SEC: int = int(os.getenv("MTF_CACHE_TTL_SEC", 45))
+    # Bias-Heuristik je Timeframe:
+    # Trend gilt erst als klar, wenn EMA-Slope + EMA-Gap beide ausreichend sind.
+    MTF_BIAS_MIN_SLOPE_PCT: float = float(os.getenv("MTF_BIAS_MIN_SLOPE_PCT", 0.05))
+    MTF_BIAS_MIN_EMA_GAP_PCT: float = float(os.getenv("MTF_BIAS_MIN_EMA_GAP_PCT", 0.08))
+    # Gate-Logik:
+    # - harte Sperre, wenn 1h/4h klar entgegenstehen
+    # - zusätzlich Mindest-Support über alle höheren Ebenen
+    MTF_DIRECTION_STRONG_THRESHOLD: float = float(
+        os.getenv("MTF_DIRECTION_STRONG_THRESHOLD", 0.18)
+    )
+    MTF_MIN_SUPPORT_RATIO: float = float(os.getenv("MTF_MIN_SUPPORT_RATIO", 0.50))
+
+    # ------------------------------------------------------------------
     # Risk Engine Cooldowns & Limits
     # ------------------------------------------------------------------
 

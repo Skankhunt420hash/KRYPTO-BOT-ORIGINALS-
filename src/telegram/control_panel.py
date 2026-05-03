@@ -1404,6 +1404,27 @@ class TelegramControlPanel:
             f"• Swing12%: <code>{regime_ctx.get('swing_12_pct', 'n/a')}</code>\n"
             f"• Retrace%: <code>{regime_ctx.get('retrace_from_high_pct', 'n/a')}</code>"
         )
+        mtf = app_ctx.get("mtf_context") or {}
+        if mtf:
+            frames = list(mtf.get("frames") or [])
+            detail_lines = []
+            for row in frames:
+                detail_lines.append(
+                    f"• {row.get('tf', 'n/a')}: {row.get('relation', 'n/a')} | "
+                    f"{row.get('regime', 'n/a')} ({row.get('trend', 'n/a')})"
+                )
+            details = "\n".join(detail_lines) if detail_lines else "• n/a"
+            text += (
+                "\n\n🕒 <b>MTF-Gate</b>\n"
+                f"Allowed: <code>{mtf.get('allowed', 'n/a')}</code>\n"
+                f"Reason: <code>{mtf.get('reason', 'n/a')}</code>\n"
+                f"Entry TF: <code>{mtf.get('entry_timeframe', 'n/a')}</code> | "
+                f"Direction TF: <code>{mtf.get('direction_timeframe', 'n/a')}</code> | "
+                f"Context TF: <code>{mtf.get('context_timeframe', 'n/a')}</code>\n"
+                f"Opposing hard/total: <code>{mtf.get('opposing_hard', 0)}/{mtf.get('opposing_total', 0)}</code>\n"
+                "Frames:\n"
+                f"{details}"
+            )
         self._send_text(chat_id, text)
 
     def _send_markets(self, chat_id: str) -> None:

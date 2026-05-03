@@ -8,7 +8,7 @@ from src.utils.logger import setup_logger
 logger = setup_logger("strategy.stoch_rsi_mean_reversion")
 
 
-class StochRsiMeanReversionStrategy(EnhancedBaseStrategy):
+class StochRSIMeanReversionStrategy(EnhancedBaseStrategy):
     """
     Beliebter Ansatz: StochRSI Extrem + Mean-Reversion zurück zur BB-Mitte.
     """
@@ -109,5 +109,9 @@ class StochRsiMeanReversionStrategy(EnhancedBaseStrategy):
                 f"Kein StochRSI-Reversal | k={k:.1f} d={dline:.1f} BB=[{lower:.4f}..{upper:.4f}]",
             )
         except Exception as e:
-            logger.error("Fehler in StochRsiMeanReversionStrategy (%s): %s", symbol, e)
+            logger.error("Fehler in StochRSIMeanReversionStrategy (%s): %s", symbol, e)
             return self._no_signal(symbol, timeframe, f"Fehler: {e}")
+
+
+# Backward-Compatibility: alter Klassenname bleibt als Alias verfügbar.
+StochRsiMeanReversionStrategy = StochRSIMeanReversionStrategy

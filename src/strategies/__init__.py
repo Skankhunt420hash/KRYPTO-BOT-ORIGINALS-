@@ -10,7 +10,10 @@ from .trend_continuation import TrendContinuationStrategy
 from .ema_reclaim_breakout import EMAReclaimBreakoutStrategy
 from .liquidity_sweep_reversal import LiquiditySweepReversalStrategy
 from .rsi_macd_confluence import RSIMACDConfluenceStrategy
-from .stoch_rsi_mean_reversion import StochRSIMeanReversionStrategy
+from .stoch_rsi_mean_reversion import (
+    StochRSIMeanReversionStrategy,
+    StochRsiMeanReversionStrategy,
+)
 from .keltner_channel_breakout import KeltnerChannelBreakoutStrategy
 from .legacy_adapter import LegacyEnhancedAdapter
 

@@ -586,6 +586,8 @@ class TelegramControlPanel:
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
             "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;, /setmtf &lt;key&gt; &lt;value&gt;, /setoracle &lt;key&gt; &lt;value&gt;\n"
+            "🔮 <b>Oracle Quickref</b>: keys = enabled, no_trade_below, small_below, normal_below, small_mult, top_mult\n"
+            "🔮 <b>Beispiele</b>: /setoracle enabled true | /setoracle no_trade_below 60 | /setoracle small_mult 0.60 | /setoracle top_mult 1.10\n"
             "🧠 <b>Diagnose</b>: /config /brain /regime /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
             "🚦 <b>Ampel</b>: /ampel /ampeldebug /ampelauto status|on|off /ampel_min_trades &lt;n&gt;\n"
             "🧪 <b>Kompatibilität</b>: /setprofile &lt;growth|scalping|defensive|hf75&gt;, /testtrade, /testtrades\n"

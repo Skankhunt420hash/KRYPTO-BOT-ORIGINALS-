@@ -762,7 +762,7 @@ class TradingBot:
         return {
             "enabled": False,
             "min_trades": int(getattr(settings, "MASTER_BRAIN_MIN_TRADES", 20)),
-            "target_winrate_pct": float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 50.0)),
+            "target_winrate_pct": float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 70.0)),
             "last_winrate_pct": 0.0,
             "consecutive_fail_windows": 0,
             "auto_paused": bool(runtime_control.get_snapshot().get("paused", False)),
@@ -2718,7 +2718,7 @@ class MultiStrategyBot:
         return {
             "enabled": bool(getattr(settings, "MASTER_BRAIN_ENABLED", True)),
             "min_trades": int(getattr(settings, "MASTER_BRAIN_MIN_TRADES", 20)),
-            "target_winrate_pct": float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 50.0)),
+            "target_winrate_pct": float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 70.0)),
             "last_winrate_pct": float(self._master_last_winrate_pct),
             "consecutive_fail_windows": int(self._master_fail_windows),
             "auto_paused": bool(self._master_auto_paused),
@@ -2747,7 +2747,7 @@ class MultiStrategyBot:
                 pass
         winrate = (wins / len(closed) * 100.0) if closed else 0.0
         self._master_last_winrate_pct = round(winrate, 2)
-        target = float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 50.0))
+        target = float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 70.0))
         if winrate >= target:
             self._master_fail_windows = 0
             if self._master_auto_paused:

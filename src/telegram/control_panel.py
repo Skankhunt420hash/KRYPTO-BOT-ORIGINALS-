@@ -69,6 +69,9 @@ class PanelCallbacks:
     request_auto_heal: Optional[Callable[[], Tuple[bool, str]]] = None
     get_market_status: Optional[Callable[[], Dict]] = None
     get_master_status: Optional[Callable[[], Dict]] = None
+    request_close_oldest_open_trades: Optional[
+        Callable[[int, int], Tuple[bool, str]]
+    ] = None
 
 
 class TelegramControlPanel:
@@ -428,6 +431,8 @@ class TelegramControlPanel:
                 self._send_recovery(chat_id)
             elif cmd == "/snapshot":
                 self._handle_snapshot(chat_id)
+            elif cmd in ("/closeoldest", "/closeold", "/closeoldtrades"):
+                self._handle_close_oldest(chat_id, text)
             elif cmd == "/setmaster":
                 self._handle_setmaster(chat_id, text)
             elif cmd == "/ops":
@@ -577,7 +582,7 @@ class TelegramControlPanel:
             "🧠 <b>Diagnose</b>: /config /brain /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
             "🚦 <b>Ampel</b>: /ampel /ampeldebug /ampelauto status|on|off /ampel_min_trades &lt;n&gt;\n"
             "🧪 <b>Kompatibilität</b>: /setprofile &lt;growth|scalping|defensive|hf75&gt;, /testtrade, /testtrades\n"
-            "🛠 <b>Ops</b>: /repair /unlock /safemode /ops /setmaster &lt;key&gt; &lt;value&gt;\n"
+            "🛠 <b>Ops</b>: /repair /unlock /safemode /ops /setmaster &lt;key&gt; &lt;value&gt; /closeoldest &lt;n&gt; [keep_newest]\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
         )
@@ -1613,6 +1618,38 @@ class TelegramControlPanel:
             f"{'✅' if ok else '⚠️'} Snapshot-Heal ausgeführt.\n<code>{msg}</code>",
         )
 
+    def _handle_close_oldest(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        close_count = 5
+        keep_newest = 5
+        if len(parts) >= 2:
+            try:
+                close_count = int(parts[1].strip())
+            except Exception:
+                self._send_text(
+                    chat_id,
+                    "Ungültige Anzahl. Verwendung: /closeoldest <anzahl> [keep_newest]",
+                )
+                return
+        if len(parts) >= 3:
+            try:
+                keep_newest = int(parts[2].strip())
+            except Exception:
+                self._send_text(
+                    chat_id,
+                    "Ungültiger keep_newest-Wert. Verwendung: /closeoldest <anzahl> [keep_newest]",
+                )
+                return
+        close_count = max(1, min(20, close_count))
+        keep_newest = max(0, min(50, keep_newest))
+        if not self._callbacks.request_close_oldest_open_trades:
+            self._send_text(chat_id, "⚠️ Close-Oldest-Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.request_close_oldest_open_trades(
+            close_count, keep_newest
+        )
+        self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+
     def _handle_setmaster(self, chat_id: str, text: str) -> None:
         parts = text.split()
         if len(parts) < 3:
@@ -1656,6 +1693,7 @@ class TelegramControlPanel:
             "• /safemode: Pause/Risk-Off setzen\n"
             "• /recovery: Startup-/Recovery-Blocker anzeigen\n"
             "• /snapshot: sofort Snapshot+Heal triggern\n"
+            "• /closeoldest <n> [keep_newest]: älteste offene Trades schließen\n"
             "• /setrisk max_positions 8\n"
             "• /setmaster target_winrate 55\n"
             f"Aktuell pause/riskoff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>",

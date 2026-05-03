@@ -68,6 +68,7 @@ class TradingBot:
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
                 request_bot_restart=self._request_bot_restart_from_panel,
+                request_close_oldest_open_trades=self._request_close_oldest_open_trades_from_panel,
                 apply_runtime_settings=self._apply_runtime_settings_from_panel,
                 request_auto_heal=self._request_auto_heal,
                 get_market_status=self._get_market_status_from_panel,
@@ -893,6 +894,7 @@ class MultiStrategyBot:
         }
         self._self_reflection = SelfReflectionMemory()
         self._self_reflection_last_repair_ts: float = 0.0
+        self._queued_forced_closes: List[Dict[str, str]] = []
 
         # Performance-Tracking und adaptives Scoring
         self.perf_tracker = PerformanceTracker()
@@ -916,6 +918,7 @@ class MultiStrategyBot:
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
                 request_bot_restart=self._request_bot_restart_from_panel,
+                request_close_oldest_open_trades=self._request_close_oldest_open_trades_from_panel,
                 apply_runtime_settings=self._apply_runtime_settings_from_panel,
                 request_auto_heal=self._request_auto_heal,
                 get_market_status=self._get_market_status_from_panel,
@@ -1239,6 +1242,122 @@ class MultiStrategyBot:
             "master_enabled": bool(master_status.get("enabled", True)),
             "master_auto_paused": bool(master_status.get("auto_paused", False)),
         }
+
+    def _queue_close_oldest_from_panel(
+        self, close_count: int, keep_newest: int
+    ) -> Tuple[bool, str]:
+        """
+        Plant das Schließen der ältesten offenen Trades (nach timestamp_open),
+        lässt die neuesten keep_newest offen.
+        """
+        try:
+            close_n = max(1, int(close_count))
+            keep_n = max(0, int(keep_newest))
+        except Exception:
+            return False, "Ungültige Parameter."
+        open_rows = self.repo.get_open_trades(limit=500)
+        if not open_rows:
+            return False, "Keine offenen Trades in DB."
+        try:
+            ordered = sorted(
+                open_rows,
+                key=lambda r: (
+                    str(r.get("timestamp_open") or r.get("created_at") or ""),
+                    int(r.get("id") or 0),
+                ),
+            )
+        except Exception:
+            ordered = list(open_rows)
+        max_closable = max(0, len(ordered) - keep_n)
+        if max_closable <= 0:
+            return False, f"Nichts zu schließen: keep_newest={keep_n} deckt alle offenen Trades ab."
+        to_close = ordered[: min(close_n, max_closable)]
+        self._queued_forced_closes = [
+            {
+                "symbol": str(row.get("symbol") or ""),
+                "reason": "forced_close_oldest",
+            }
+            for row in to_close
+            if str(row.get("symbol") or "").strip()
+        ]
+        if not self._queued_forced_closes:
+            return False, "Keine validen Symbole zum Schließen gefunden."
+        runtime_state.append_log(
+            "FORCE_CLOSE_QUEUED oldest="
+            + ",".join(item["symbol"] for item in self._queued_forced_closes)
+        )
+        return (
+            True,
+            f"Forciertes Schließen geplant: {len(self._queued_forced_closes)} älteste Position(en), "
+            f"{keep_n} neueste bleiben offen.",
+        )
+
+    def _request_close_oldest_open_trades_from_panel(
+        self, close_count: int, keep_newest: int
+    ) -> Tuple[bool, str]:
+        return self._queue_close_oldest_from_panel(
+            close_count=close_count,
+            keep_newest=keep_newest,
+        )
+
+    def _run_forced_close_queue(self) -> None:
+        """
+        Führt geplante Forced-Closes sicher im Bot-Thread aus.
+        """
+        queue = list(self._queued_forced_closes)
+        if not queue:
+            return
+        self._queued_forced_closes = []
+        for item in queue:
+            symbol = str(item.get("symbol") or "").strip()
+            if not symbol:
+                continue
+            pos = self.risk.open_positions.get(symbol)
+            if not pos:
+                continue
+            # nutze zuletzt bekannten Mark-Preis; wenn nicht vorhanden, Entry als Fallback
+            mark = float(self._last_prices.get(symbol, getattr(pos, "entry_price", 0.0)) or 0.0)
+            if mark <= 0:
+                mark = float(getattr(pos, "entry_price", 0.0) or 0.0)
+            if mark <= 0:
+                continue
+            exit_side = "sell" if getattr(pos, "side", "long") == "long" else "buy"
+            exec_result = self.exec_engine.execute_exit(symbol, exit_side, float(getattr(pos, "amount", 0.0) or 0.0))
+            if not exec_result.success:
+                logger.warning(
+                    "FORCE_CLOSE Exit-Order Problem %s: %s (lokaler Close wird fortgesetzt)",
+                    symbol,
+                    exec_result.reason,
+                )
+            pnl = self.risk.close_position(symbol, mark)
+            trade_id = self._open_trade_ids.pop(symbol, None)
+            if trade_id is not None and pnl is not None:
+                try:
+                    entry_price = float(getattr(pos, "entry_price", 0.0) or 0.0)
+                    amount = float(getattr(pos, "amount", 0.0) or 0.0)
+                    cost = entry_price * amount
+                    pnl_pct = (pnl / cost * 100.0) if cost > 0 else 0.0
+                    self.repo.close_trade(
+                        int(trade_id),
+                        mark,
+                        float(pnl),
+                        float(pnl_pct),
+                        "forced_close_oldest",
+                    )
+                    self.tg.notify_trade_closed(
+                        symbol=symbol,
+                        side=getattr(pos, "side", "long"),
+                        entry=entry_price,
+                        exit_price=mark,
+                        pnl=float(pnl),
+                        pnl_pct=float(pnl_pct),
+                        reason="forced_close_oldest",
+                        strategy=getattr(pos, "strategy_name", self._active_strategy_runtime),
+                        is_paper=settings.TRADING_MODE == "paper",
+                    )
+                except Exception as e:
+                    logger.warning("FORCE_CLOSE DB/Notify Fehler %s: %s", symbol, e)
+            runtime_state.append_log(f"FORCE_CLOSE_DONE {symbol} reason=forced_close_oldest")
 
     def _apply_self_reflection_repairs(self) -> None:
         if not bool(getattr(settings, "SELF_REFLECTION_ENABLED", True)):
@@ -2631,6 +2750,8 @@ class MultiStrategyBot:
                 logger.error(f"Unerwarteter Fehler bei {symbol}: {e}")
                 self.health.record_error("error", f"{symbol}: {e}")
                 self.tg.notify_error(f"MultiStrategyBot:{symbol}", str(e))
+
+        self._run_forced_close_queue()
 
         stats = self.risk.get_stats()
         logger.info(

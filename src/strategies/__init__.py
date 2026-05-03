@@ -7,6 +7,14 @@ from .momentum_pullback import MomentumPullbackStrategy
 from .range_reversion import RangeReversionStrategy
 from .volatility_breakout import VolatilityBreakoutStrategy
 from .trend_continuation import TrendContinuationStrategy
+from .ema_reclaim_breakout import EMAReclaimBreakoutStrategy
+from .liquidity_sweep_reversal import LiquiditySweepReversalStrategy
+from .rsi_macd_confluence import RSIMACDConfluenceStrategy
+from .stoch_rsi_mean_reversion import (
+    StochRSIMeanReversionStrategy,
+    StochRsiMeanReversionStrategy,
+)
+from .keltner_channel_breakout import KeltnerChannelBreakoutStrategy
 from .legacy_adapter import LegacyEnhancedAdapter
 
 
@@ -39,6 +47,11 @@ def get_all_enhanced_strategies() -> list:
         RangeReversionStrategy(),
         VolatilityBreakoutStrategy(),
         TrendContinuationStrategy(),
+        EMAReclaimBreakoutStrategy(),
+        LiquiditySweepReversalStrategy(),
+        RSIMACDConfluenceStrategy(),
+        StochRSIMeanReversionStrategy(),
+        KeltnerChannelBreakoutStrategy(),
     ]
     legacy_wrapped = [
         LegacyEnhancedAdapter(RsiEmaStrategy()),
@@ -54,6 +67,11 @@ _ENHANCED_STRATEGY_REGISTRY = {
     "range_reversion":      RangeReversionStrategy,
     "volatility_breakout":  VolatilityBreakoutStrategy,
     "trend_continuation":   TrendContinuationStrategy,
+    "ema_reclaim_breakout": EMAReclaimBreakoutStrategy,
+    "liquidity_sweep_reversal": LiquiditySweepReversalStrategy,
+    "rsi_macd_confluence": RSIMACDConfluenceStrategy,
+    "stoch_rsi_mean_reversion": StochRSIMeanReversionStrategy,
+    "keltner_channel_breakout": KeltnerChannelBreakoutStrategy,
 }
 
 
@@ -88,6 +106,11 @@ __all__ = [
     "RangeReversionStrategy",
     "VolatilityBreakoutStrategy",
     "TrendContinuationStrategy",
+    "EMAReclaimBreakoutStrategy",
+    "LiquiditySweepReversalStrategy",
+    "RSIMACDConfluenceStrategy",
+    "StochRSIMeanReversionStrategy",
+    "KeltnerChannelBreakoutStrategy",
     "get_strategy",
     "get_all_enhanced_strategies",
     "get_enhanced_strategy",

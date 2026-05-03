@@ -120,8 +120,8 @@ class IntelligenceBrain:
 
     def _rank_strategies(self, *, regime: Regime, signals: List[EnhancedSignal]) -> List[Dict]:
         out: List[Dict] = []
-        regime_fits = REGIME_STRATEGY_FIT.get(regime, {})
-        dir_mults = DIRECTION_MULTIPLIER.get(regime, {})
+        regime_fits = REGIME_STRATEGY_FIT.get(regime, REGIME_STRATEGY_FIT.get(Regime.RANGE, {}))
+        dir_mults = DIRECTION_MULTIPLIER.get(regime, DIRECTION_MULTIPLIER.get(Regime.RANGE, {}))
         preferred = (runtime_control.get_snapshot().get("preferred_strategy") or "").strip()
         pref_bonus = settings.CONTROL_STRATEGY_PRIORITY_BONUS if preferred else 0.0
 
@@ -135,6 +135,7 @@ class IntelligenceBrain:
             losing_streak = int(metrics.losing_streak) if metrics else 0
             drawdown = float(metrics.max_drawdown_pct) if metrics else 0.0
             recency_wr = float(metrics.recency_win_rate) if metrics else 0.5
+            reward_bias = float(metrics.reward_bias) if metrics else 0.0
 
             trend_quality = regime_fit
             momentum_quality = _clamp(float(sig.confidence) / 100.0)
@@ -145,6 +146,7 @@ class IntelligenceBrain:
             streak_penalty = min(losing_streak / 6.0, 1.0) * 0.10
             dd_penalty = min(drawdown / 35.0, 1.0) * 0.08
 
+            reward_w = float(getattr(settings, "BRAIN_REWARD_BRAIN_WEIGHT", 0.08) or 0.08)
             brain_score = (
                 trend_quality * 0.20
                 + momentum_quality * 0.18
@@ -153,6 +155,7 @@ class IntelligenceBrain:
                 + rr_quality * 0.15
                 + perf_score * 0.17
                 + recency_wr * 0.08
+                + reward_bias * reward_w
             ) - streak_penalty - dd_penalty
 
             priority_adj = 0.0
@@ -178,6 +181,7 @@ class IntelligenceBrain:
                         "rr_quality": round(rr_quality, 3),
                         "perf_score": round(perf_score, 3),
                         "recency_win_rate": round(recency_wr, 3),
+                        "reward_bias": round(reward_bias, 3),
                         "priority_adj": round(priority_adj, 3),
                         "streak_penalty": round(streak_penalty, 3),
                         "drawdown_penalty": round(dd_penalty, 3),
@@ -191,7 +195,13 @@ class IntelligenceBrain:
         return out
 
     def _is_risky_phase(self, regime: Regime, ranking: List[Dict]) -> bool:
-        if regime == Regime.HIGH_VOLATILITY:
+        high_risk_regimes = {
+            Regime.HIGH_VOLATILITY,
+            Regime.NEWS_SHOCK,
+            Regime.PUMP_DUMP_RISK,
+            Regime.LIQUIDATION_CASCADE,
+        }
+        if regime in high_risk_regimes:
             return True
         if not ranking:
             return True
@@ -212,9 +222,11 @@ class IntelligenceBrain:
     @staticmethod
     def _volatility_quality(*, sig: EnhancedSignal, regime: Regime) -> float:
         rr_score = _clamp(float(sig.rr) / 3.0)
-        if regime == Regime.HIGH_VOLATILITY:
+        if regime in (Regime.HIGH_VOLATILITY, Regime.NEWS_SHOCK, Regime.LIQUIDATION_CASCADE):
             return _clamp(0.4 + rr_score * 0.6)
-        if regime == Regime.LOW_VOLATILITY:
+        if regime in (Regime.LOW_VOLATILITY, Regime.LOW_VOL_TRAP):
             return _clamp(0.55 + rr_score * 0.45)
+        if regime in (Regime.PUMP_DUMP_RISK, Regime.MANIPULATION_PHASE):
+            return _clamp(0.45 + rr_score * 0.55)
         return _clamp(0.5 + rr_score * 0.5)
 

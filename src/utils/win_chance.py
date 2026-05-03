@@ -113,3 +113,31 @@ def historical_win_rate_block_reason(
             f"(n={m.trade_count}, Strategie {strategy_name})"
         )
     return None
+
+
+def bitter_reward_block_reason(
+    strategy_name: str,
+    perf_tracker: Any,
+) -> Optional[str]:
+    """
+    Harte Sperre bei stark negativem Reward-Bias ("bitteres Leckerli").
+    Verhindert Wiederholung derselben klar schlechten Strategiemuster.
+    """
+    if not strategy_name or perf_tracker is None:
+        return None
+    if not getattr(perf_tracker, "available", False):
+        return None
+    m = perf_tracker.get_global(str(strategy_name).strip())
+    if m is None:
+        return None
+    min_n = int(getattr(settings, "BRAIN_BITTER_TREAT_MIN_TRADES", 8) or 8)
+    if int(getattr(m, "trade_count", 0)) < min_n:
+        return None
+    thr = float(getattr(settings, "BRAIN_BITTER_TREAT_BLOCK_THRESHOLD", -0.55) or -0.55)
+    reward_bias = float(getattr(m, "reward_bias", 0.0) or 0.0)
+    if reward_bias <= thr:
+        return (
+            f"BITTER_TREAT_BLOCK:{reward_bias:.3f}<={thr:.3f} "
+            f"(n={m.trade_count}, Strategie {strategy_name})"
+        )
+    return None

@@ -918,6 +918,7 @@ class MultiStrategyBot:
         }
         self._mtf_cache: Dict[str, Dict[str, object]] = {}
         self._last_mtf_context: Dict[str, object] = {}
+        self._last_oracle_context: Dict[str, object] = {}
         self._self_reflection = SelfReflectionMemory()
         self._self_reflection_last_repair_ts: float = 0.0
         self._queued_forced_closes: List[Dict[str, str]] = []
@@ -1850,6 +1851,10 @@ class MultiStrategyBot:
         except Exception:
             return {}
 
+    @staticmethod
+    def _clamp(value: float, lo: float, hi: float) -> float:
+        return max(lo, min(hi, float(value)))
+
     def _mtf_regime_for(self, symbol: str, timeframe: str) -> Tuple[str, Dict]:
         cache_key = f"{symbol}::{timeframe}"
         now_ts = time.time()
@@ -2039,6 +2044,129 @@ class MultiStrategyBot:
                 context,
             )
         return True, "mtf_confirmed", context
+
+    @staticmethod
+    def _oracle_regime_score(regime_name: str) -> float:
+        r = str(regime_name or "").upper()
+        if r in {"TREND_MARKET", "TREND_UP", "TREND_DOWN"}:
+            return 14.0
+        if r in {"SIDEWAYS_MARKET", "RANGE", "LOW_VOLATILITY"}:
+            return 12.0
+        if r in {"LOW_VOL_TRAP", "MANIPULATION_PHASE"}:
+            return 8.0
+        if r in {"NEWS_SHOCK", "PUMP_DUMP_RISK", "LIQUIDATION_CASCADE", "HIGH_VOLATILITY"}:
+            return 4.0
+        return 10.0
+
+    @staticmethod
+    def _oracle_chaos_penalty(regime_name: str, regime_ctx: Dict) -> float:
+        r = str(regime_name or "").upper()
+        shock = abs(float((regime_ctx or {}).get("shock_return_pct", 0.0) or 0.0))
+        vol_ratio = float((regime_ctx or {}).get("volume_ratio", 1.0) or 1.0)
+        wick = float((regime_ctx or {}).get("wick_ratio_5", 0.0) or 0.0)
+
+        penalty = 0.0
+        if r in {"NEWS_SHOCK", "PUMP_DUMP_RISK", "LIQUIDATION_CASCADE"}:
+            penalty += 10.0
+        if r in {"MANIPULATION_PHASE", "HIGH_VOLATILITY"}:
+            penalty += 6.0
+        if shock >= 2.0:
+            penalty += min(6.0, (shock - 2.0) * 1.8)
+        if vol_ratio >= 1.8:
+            penalty += min(4.0, (vol_ratio - 1.8) * 3.0)
+        if wick >= 2.5:
+            penalty += min(3.0, (wick - 2.5) * 1.2)
+        return max(0.0, min(20.0, penalty))
+
+    def _compute_oracle_score(
+        self,
+        *,
+        signal,
+        brain_snapshot: Dict,
+        market_ctx: Dict,
+        regime: str,
+        regime_ctx: Dict,
+        mtf_ctx: Dict,
+    ) -> Dict[str, object]:
+        conf = float(getattr(signal, "confidence", 0.0) or 0.0)
+        rr = float(getattr(signal, "rr", 0.0) or 0.0)
+        trend_val = abs(float(market_ctx.get("trend_20_50", 0.0) or 0.0))
+        vol_20 = float(market_ctx.get("volatility_20", 0.0) or 0.0)
+        vol_ratio = float((regime_ctx or {}).get("volume_ratio", 1.0) or 1.0)
+
+        # Trend 0..20
+        trend_points = max(0.0, min(20.0, trend_val * 1200.0))
+
+        # Volumen 0..15
+        volume_points = max(0.0, min(15.0, (vol_ratio - 0.8) * 12.0))
+
+        # Liquidität 0..15 (Proxy: moderate volatility is better)
+        liq_quality = max(0.0, min(1.0, 1.0 - abs(vol_20 - 0.015) / 0.02))
+        liquidity_points = liq_quality * 15.0
+
+        # RR 0..20
+        rr_points = max(0.0, min(20.0, rr / 3.0 * 20.0))
+
+        # Regime 0..15
+        regime_points = self._oracle_regime_score(regime)
+
+        # Multi-Timeframe 0..10
+        mtf_allowed = bool((mtf_ctx or {}).get("allowed", False))
+        support_ratio = float((mtf_ctx or {}).get("support_ratio", 0.5) or 0.5)
+        mtf_points = max(0.0, min(10.0, support_ratio * 10.0))
+        if not mtf_allowed:
+            mtf_points = max(0.0, mtf_points - 4.0)
+
+        # News/Chaos Risiko -0..20
+        chaos_penalty = self._oracle_chaos_penalty(regime, regime_ctx)
+
+        base = trend_points + volume_points + liquidity_points + rr_points + regime_points + mtf_points
+        score = max(0.0, min(100.0, round(base - chaos_penalty, 2)))
+
+        block_below = float(getattr(settings, "ORACLE_NO_TRADE_BELOW", 60.0))
+        small_below = float(getattr(settings, "ORACLE_SMALL_SIZE_BELOW", 75.0))
+        normal_below = float(getattr(settings, "ORACLE_NORMAL_SIZE_BELOW", 88.0))
+        small_factor = float(getattr(settings, "ORACLE_SMALL_POSITION_MULTIPLIER", 0.60))
+        top_factor = float(getattr(settings, "ORACLE_TOP_SETUP_MULTIPLIER", 1.00))
+
+        verdict = "no_trade"
+        pos_mult = 1.0
+        if score < block_below:
+            verdict = "no_trade"
+            pos_mult = 0.0
+        elif score < small_below:
+            verdict = "small"
+            pos_mult = max(0.1, min(1.0, small_factor))
+        elif score < normal_below:
+            verdict = "normal"
+            pos_mult = 1.0
+        else:
+            verdict = "top"
+            pos_mult = max(1.0, min(2.0, top_factor))
+
+        components = {
+            "trend": round(trend_points, 2),
+            "volume": round(volume_points, 2),
+            "liquidity": round(liquidity_points, 2),
+            "risk_reward": round(rr_points, 2),
+            "market_regime": round(regime_points, 2),
+            "multi_timeframe": round(mtf_points, 2),
+            "news_chaos_penalty": round(chaos_penalty, 2),
+            "confidence": round(conf, 2),
+            "brain_score": round(float(brain_snapshot.get("last_signal_score", 0.0) or 0.0), 4),
+        }
+        return {
+            "score": score,
+            "verdict": verdict,
+            "position_multiplier": round(pos_mult, 4),
+            "reason": f"oracle:{verdict}:score={score:.1f}",
+            "components": components,
+            "thresholds": {
+                "block_below": block_below,
+                "small_below": small_below,
+                "normal_below": normal_below,
+            },
+        }
 
     def _log_decision_cycle(
         self,
@@ -2411,7 +2539,79 @@ class MultiStrategyBot:
             regime=best.regime or regime.value,
         )
 
-        # 5. Risk-Engine prüfen (Cooldowns, Daily-Loss, Duplikat-Schutz)
+        # 5. Oracle-Score (optional): blockieren oder Positionsgröße staffeln
+        oracle_ctx: Dict[str, object] = {}
+        if bool(getattr(settings, "ORACLE_SCORE_ENABLED", True)):
+            oracle_ctx = self._compute_oracle_score(
+                signal=best,
+                brain_snapshot=brain_snapshot,
+                market_ctx=market_ctx,
+                regime=(best.regime or regime.value),
+                regime_ctx=self._last_regime_context,
+                mtf_ctx=self._last_mtf_context,
+            )
+            self._last_oracle_context = dict(oracle_ctx)
+            snap = runtime_state.snapshot()
+            app_ctx = dict(snap.get("app_context") or {})
+            app_ctx["oracle_score"] = dict(self._last_oracle_context)
+            runtime_state.update_app_context(app_ctx)
+            if str(oracle_ctx.get("verdict", "")).lower() in {"no_trade", "block"}:
+                oracle_reason = (
+                    f"ORACLE_BLOCK:{float(oracle_ctx.get('score', 0.0)):.1f}"
+                    f"<{float((oracle_ctx.get('thresholds') or {}).get('block_below', 60.0)):.1f}"
+                )
+                logger.info(
+                    f"[yellow]ORACLE BLOCKED[/yellow] {symbol} | "
+                    f"Strategie: {best.strategy_name} | {oracle_reason}"
+                )
+                self.repo.save_rejected_signal(
+                    symbol=symbol,
+                    timeframe=best.timeframe,
+                    strategy_name=best.strategy_name,
+                    side=best.side.value,
+                    entry_price=best.entry,
+                    stop_loss=best.stop_loss,
+                    take_profit=best.take_profit,
+                    rr_planned=best.rr,
+                    confidence=best.confidence,
+                    regime=best.regime,
+                    reason_rejected=oracle_reason,
+                )
+                self.tg.notify_trade_blocked(
+                    symbol=symbol,
+                    strategy=best.strategy_name,
+                    side=best.side.value,
+                    reason=oracle_reason,
+                )
+                self._record_trade_event(
+                    event="blocked",
+                    symbol=symbol,
+                    side=best.side.value,
+                    strategy=best.strategy_name,
+                    pnl=None,
+                    reason=oracle_reason,
+                )
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="blocked_oracle",
+                    reason=oracle_reason,
+                    strategy=best.strategy_name,
+                )
+                self._log_decision_cycle(
+                    symbol=symbol,
+                    regime=regime.value,
+                    ranking=ranking,
+                    chosen_strategy=best.strategy_name,
+                    signal_score=signal_score,
+                    risk_decision="oracle_block",
+                    allow_trade=False,
+                    reject_reason=oracle_reason,
+                    last_decision_reason=oracle_reason,
+                    market_context={**market_ctx, "oracle": oracle_ctx},
+                )
+                return
+
+        # 6. Risk-Engine prüfen (Cooldowns, Daily-Loss, Duplikat-Schutz)
         allowed, block_reason = self.risk.check_signal(best)
         if not allowed:
             logger.info(
@@ -2476,7 +2676,7 @@ class MultiStrategyBot:
                 )
             return
 
-        # 5b. Portfolio Risk Engine: Sizing + Exposure-Limits
+        # 6b. Portfolio Risk Engine: Sizing + Exposure-Limits
         pf_allowed, pf_reason, amount = self.risk.check_and_size(best)
         if not pf_allowed:
             logger.info(
@@ -2530,7 +2730,55 @@ class MultiStrategyBot:
             )
             return
 
-        # 5c. Harte Live-Schutzschicht direkt vor echter Order
+        if bool(getattr(settings, "ORACLE_SCORE_ENABLED", True)):
+            pos_mult = float((oracle_ctx or {}).get("position_multiplier", 1.0) or 1.0)
+            if pos_mult != 1.0:
+                old_amount = float(amount)
+                amount = max(0.0, float(amount) * pos_mult)
+                logger.info(
+                    "[ORACLE SIZING] %s | verdict=%s | score=%.2f | %.6f -> %.6f",
+                    symbol,
+                    str((oracle_ctx or {}).get("verdict", "n/a")),
+                    float((oracle_ctx or {}).get("score", 0.0)),
+                    old_amount,
+                    amount,
+                )
+                if amount <= 0.0:
+                    reason_zero = "ORACLE_SIZING_ZERO_AMOUNT"
+                    self.repo.save_rejected_signal(
+                        symbol=symbol,
+                        timeframe=best.timeframe,
+                        strategy_name=best.strategy_name,
+                        side=best.side.value,
+                        entry_price=best.entry,
+                        stop_loss=best.stop_loss,
+                        take_profit=best.take_profit,
+                        rr_planned=best.rr,
+                        confidence=best.confidence,
+                        regime=best.regime,
+                        reason_rejected=reason_zero,
+                    )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="blocked_oracle",
+                        reason=reason_zero,
+                        strategy=best.strategy_name,
+                    )
+                    self._log_decision_cycle(
+                        symbol=symbol,
+                        regime=regime.value,
+                        ranking=ranking,
+                        chosen_strategy=best.strategy_name,
+                        signal_score=signal_score,
+                        risk_decision="oracle_sizing_zero",
+                        allow_trade=False,
+                        reject_reason=reason_zero,
+                        last_decision_reason=reason_zero,
+                        market_context={**market_ctx, "oracle": oracle_ctx},
+                    )
+                    return
+
+        # 6c. Harte Live-Schutzschicht direkt vor echter Order
         if settings.TRADING_MODE == "live":
             free_capital, equity = self._live_capital_snapshot(best.symbol)
             live_allowed, live_reason = self.risk.check_live_hard_gate(
@@ -2594,7 +2842,7 @@ class MultiStrategyBot:
                 runtime_state.append_log(f"LIVE_GATE_BLOCK {symbol} {best.strategy_name} {live_reason}")
                 return
 
-        # 5d. Harte Mindest-Win-Rate aus Trade-Historie (optional)
+        # 6d. Harte Mindest-Win-Rate aus Trade-Historie (optional)
         hist_reason = historical_win_rate_block_reason(
             best.strategy_name, self.perf_tracker
         )
@@ -2677,7 +2925,7 @@ class MultiStrategyBot:
             )
             return
 
-        # 5e. Mindest-Gewinnchance (Heuristik + optional DB-Kalibrierung)
+        # 6e. Mindest-Gewinnchance (Heuristik + optional DB-Kalibrierung)
         min_wc = float(getattr(settings, "MIN_WIN_CHANCE_PCT", 0.0) or 0.0)
         if min_wc > 0:
             _bsr_gate = brain_snapshot.get("last_signal_score")
@@ -2728,7 +2976,7 @@ class MultiStrategyBot:
                 )
                 return
 
-        # 6. Signal registrieren (Duplikatschutz)
+        # 7. Signal registrieren (Duplikatschutz)
         self.risk.register_signal(best)
 
         # 7. Order ausführen via Execution Engine (Retry, Slippage, Fail-Safes)
@@ -3406,6 +3654,35 @@ class MultiStrategyBot:
                     v = max(0.0, min(1.0, v))
                     settings.MTF_MIN_SUPPORT_RATIO = v
                     changed.append(f"MTF_MIN_SUPPORT_RATIO={v:.3f}")
+                elif k == "oracle_score_enabled":
+                    v = bool(value)
+                    settings.ORACLE_SCORE_ENABLED = v
+                    changed.append(f"ORACLE_SCORE_ENABLED={v}")
+                elif k in {"oracle_no_trade_below", "oracle_block_below"}:
+                    v = float(value)
+                    v = max(0.0, min(100.0, v))
+                    settings.ORACLE_NO_TRADE_BELOW = v
+                    changed.append(f"ORACLE_NO_TRADE_BELOW={v:.1f}")
+                elif k in {"oracle_small_size_below", "oracle_small_below"}:
+                    v = float(value)
+                    v = max(0.0, min(100.0, v))
+                    settings.ORACLE_SMALL_SIZE_BELOW = v
+                    changed.append(f"ORACLE_SMALL_SIZE_BELOW={v:.1f}")
+                elif k in {"oracle_normal_size_below", "oracle_normal_below"}:
+                    v = float(value)
+                    v = max(0.0, min(100.0, v))
+                    settings.ORACLE_NORMAL_SIZE_BELOW = v
+                    changed.append(f"ORACLE_NORMAL_SIZE_BELOW={v:.1f}")
+                elif k in {"oracle_small_position_multiplier", "oracle_small_pos_factor"}:
+                    v = float(value)
+                    v = max(0.05, min(1.0, v))
+                    settings.ORACLE_SMALL_POSITION_MULTIPLIER = v
+                    changed.append(f"ORACLE_SMALL_POSITION_MULTIPLIER={v:.3f}")
+                elif k in {"oracle_top_setup_multiplier", "oracle_top_pos_factor", "oracle_top_threshold"}:
+                    v = float(value)
+                    v = max(0.5, min(2.0, v))
+                    settings.ORACLE_TOP_SETUP_MULTIPLIER = v
+                    changed.append(f"ORACLE_TOP_SETUP_MULTIPLIER={v:.3f}")
                 elif k == "master_brain_enabled":
                     v = bool(value)
                     settings.MASTER_BRAIN_ENABLED = v

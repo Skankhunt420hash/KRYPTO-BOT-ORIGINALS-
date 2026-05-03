@@ -400,6 +400,8 @@ class TelegramControlPanel:
                 self._handle_setbrain(chat_id, text)
             elif cmd == "/setmtf":
                 self._handle_setmtf(chat_id, text)
+            elif cmd == "/setoracle":
+                self._handle_setoracle(chat_id, text)
             elif cmd == "/config":
                 self._send_config(chat_id)
             elif cmd == "/brain":
@@ -583,7 +585,7 @@ class TelegramControlPanel:
             "<b>KRYPTO-BOT Control Center</b>\n"
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
-            "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;, /setmtf &lt;key&gt; &lt;value&gt;\n"
+            "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;, /setmtf &lt;key&gt; &lt;value&gt;, /setoracle &lt;key&gt; &lt;value&gt;\n"
             "🧠 <b>Diagnose</b>: /config /brain /regime /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
             "🚦 <b>Ampel</b>: /ampel /ampeldebug /ampelauto status|on|off /ampel_min_trades &lt;n&gt;\n"
             "🧪 <b>Kompatibilität</b>: /setprofile &lt;growth|scalping|defensive|hf75&gt;, /testtrade, /testtrades\n"
@@ -1365,6 +1367,50 @@ class TelegramControlPanel:
             return
         self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
 
+    def _handle_setoracle(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setoracle <key> <value>\n"
+                "Keys: enabled, no_trade_below, small_below, normal_below, small_mult, top_mult",
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "enabled": ("oracle_score_enabled", bool, None, None),
+            "no_trade_below": ("oracle_no_trade_below", float, 0.0, 100.0),
+            "small_below": ("oracle_small_size_below", float, 0.0, 100.0),
+            "normal_below": ("oracle_normal_size_below", float, 0.0, 100.0),
+            "small_mult": ("oracle_small_position_multiplier", float, 0.05, 1.0),
+            "top_mult": ("oracle_top_setup_multiplier", float, 0.5, 2.0),
+            # Legacy aliases (kompatibel zu älteren Texten)
+            "block_below": ("oracle_no_trade_below", float, 0.0, 100.0),
+            "small_size_below": ("oracle_small_size_below", float, 0.0, 100.0),
+            "normal_size_below": ("oracle_normal_size_below", float, 0.0, 100.0),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setoracle-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            if caster is bool:
+                val = value_raw.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if lo is not None and hi is not None and not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
     def _send_config(self, chat_id: str) -> None:
         text = (
             "⚙️ <b>Runtime-Konfiguration</b>\n"
@@ -1375,7 +1421,13 @@ class TelegramControlPanel:
             f"BRAIN_RISKY_PHASE_SCORE: <code>{getattr(settings, 'BRAIN_RISKY_PHASE_SCORE', 'n/a')}</code>\n"
             f"BRAIN_REWARD_WEIGHT: <code>{getattr(settings, 'BRAIN_REWARD_WEIGHT', 'n/a')}</code>\n"
             f"BRAIN_REWARD_WINDOW: <code>{getattr(settings, 'BRAIN_REWARD_WINDOW', 'n/a')}</code>\n"
-            f"BRAIN_BITTER_TREAT_BLOCK_THRESHOLD: <code>{getattr(settings, 'BRAIN_BITTER_TREAT_BLOCK_THRESHOLD', 'n/a')}</code>"
+            f"BRAIN_BITTER_TREAT_BLOCK_THRESHOLD: <code>{getattr(settings, 'BRAIN_BITTER_TREAT_BLOCK_THRESHOLD', 'n/a')}</code>\n"
+            f"ORACLE_ENABLED: <code>{getattr(settings, 'ORACLE_SCORE_ENABLED', 'n/a')}</code>\n"
+            f"ORACLE_NO_TRADE_BELOW: <code>{getattr(settings, 'ORACLE_NO_TRADE_BELOW', 'n/a')}</code>\n"
+            f"ORACLE_SMALL_SIZE_BELOW: <code>{getattr(settings, 'ORACLE_SMALL_SIZE_BELOW', 'n/a')}</code>\n"
+            f"ORACLE_NORMAL_SIZE_BELOW: <code>{getattr(settings, 'ORACLE_NORMAL_SIZE_BELOW', 'n/a')}</code>\n"
+            f"ORACLE_SMALL_POSITION_MULTIPLIER: <code>{getattr(settings, 'ORACLE_SMALL_POSITION_MULTIPLIER', 'n/a')}</code>\n"
+            f"ORACLE_TOP_SETUP_MULTIPLIER: <code>{getattr(settings, 'ORACLE_TOP_SETUP_MULTIPLIER', 'n/a')}</code>"
         )
         self._send_text(chat_id, text)
 
@@ -1393,6 +1445,16 @@ class TelegramControlPanel:
             f"Decision: <code>{brain.get('last_decision_reason', 'n/a')}</code>",
             f"Risky: <code>{brain.get('risky_phase', 'n/a')}</code>",
         ]
+        oracle = app_ctx.get("oracle_score") or {}
+        if oracle:
+            lines.extend(
+                [
+                    f"Oracle: <code>{oracle.get('score', 'n/a')}/100</code> | "
+                    f"Tier=<code>{oracle.get('verdict', oracle.get('tier', 'n/a'))}</code> | "
+                    f"Scale=<code>{oracle.get('position_multiplier', oracle.get('size_multiplier', 'n/a'))}</code>",
+                    f"Oracle reason: <code>{oracle.get('reason', 'n/a')}</code>",
+                ]
+            )
         if regime_ctx:
             lines.extend(
                 [

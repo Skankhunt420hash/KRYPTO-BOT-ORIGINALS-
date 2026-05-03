@@ -275,6 +275,38 @@ class Settings:
     MTF_MIN_SUPPORT_RATIO: float = float(os.getenv("MTF_MIN_SUPPORT_RATIO", 0.50))
 
     # ------------------------------------------------------------------
+    # Oracle Score (0..100) – finale Qualitätsbewertung je Entry
+    # ------------------------------------------------------------------
+    ORACLE_SCORE_ENABLED: bool = _env_bool("ORACLE_SCORE_ENABLED", default=True)
+    # Unterhalb: kein Trade
+    ORACLE_NO_TRADE_BELOW: float = float(
+        _first_non_empty("ORACLE_NO_TRADE_BELOW", "ORACLE_MIN_TRADE_SCORE", default="60.0")
+    )
+    # 60..75: kleine Position
+    ORACLE_SMALL_SIZE_BELOW: float = float(
+        _first_non_empty("ORACLE_SMALL_SIZE_BELOW", "ORACLE_SMALL_SIZE_MAX_SCORE", default="75.0")
+    )
+    # 75..88: normal, >=88: Top-Setup
+    ORACLE_NORMAL_SIZE_BELOW: float = float(
+        _first_non_empty("ORACLE_NORMAL_SIZE_BELOW", "ORACLE_NORMAL_SIZE_MAX_SCORE", default="88.0")
+    )
+    ORACLE_SMALL_POSITION_MULTIPLIER: float = float(
+        _first_non_empty(
+            "ORACLE_SMALL_POSITION_MULTIPLIER",
+            "ORACLE_SMALL_SIZE_MULTIPLIER",
+            default="0.60",
+        )
+    )
+    # Sicherheitshalber standardmäßig kein Upsize bei Top-Setup
+    ORACLE_TOP_SETUP_MULTIPLIER: float = float(
+        _first_non_empty(
+            "ORACLE_TOP_SETUP_MULTIPLIER",
+            "ORACLE_TOP_SIZE_MULTIPLIER",
+            default="1.00",
+        )
+    )
+
+    # ------------------------------------------------------------------
     # Risk Engine Cooldowns & Limits
     # ------------------------------------------------------------------
 

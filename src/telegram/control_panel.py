@@ -1292,6 +1292,8 @@ class TelegramControlPanel:
     def _send_brain(self, chat_id: str) -> None:
         rt = self._safe_runtime_status()
         brain = rt.get("brain") or {}
+        app_ctx = rt.get("app_context") or {}
+        reflection = app_ctx.get("self_reflection") or {}
         ranking = list(brain.get("last_strategy_ranking") or [])
         lines = [
             "🧠 <b>Brain-Status</b>",
@@ -1300,6 +1302,14 @@ class TelegramControlPanel:
             f"Decision: <code>{brain.get('last_decision_reason', 'n/a')}</code>",
             f"Risky: <code>{brain.get('risky_phase', 'n/a')}</code>",
         ]
+        if reflection:
+            lines.extend(
+                [
+                    f"Memory pattern: <code>{reflection.get('pattern', 'n/a')}</code>",
+                    f"Memory score: <code>{reflection.get('severity_score', 0.0)}</code>",
+                    f"Memory action: <code>{', '.join(reflection.get('repair_actions', []) or ['none'])}</code>",
+                ]
+            )
         if ranking:
             top = ranking[0]
             lines.append(

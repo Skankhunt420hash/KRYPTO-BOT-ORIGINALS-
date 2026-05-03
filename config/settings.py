@@ -443,6 +443,51 @@ class Settings:
     ENTRY_CADENCE_MASTER_OVERRIDE_MINUTES: int = int(
         os.getenv("ENTRY_CADENCE_MASTER_OVERRIDE_MINUTES", 180)
     )
+    # Selbstreflexion + Memory: erkennt wiederkehrende Ampel-/Gate-Probleme
+    # und startet kontrollierte Auto-Reparaturen.
+    SELF_REFLECTION_ENABLED: bool = _env_bool("SELF_REFLECTION_ENABLED", default=True)
+    SELF_REFLECTION_MEMORY_FILE: str = os.getenv(
+        "SELF_REFLECTION_MEMORY_FILE", "data/self_reflection_memory.json"
+    )
+    SELF_REFLECTION_WINDOW_MINUTES: int = int(
+        _first_non_empty(
+            "SELF_REFLECTION_WINDOW_MINUTES",
+            "SELF_REFLECTION_WINDOW",
+            default="240",
+        )
+    )
+    SELF_REFLECTION_ISSUE_THRESHOLD: int = int(
+        os.getenv("SELF_REFLECTION_ISSUE_THRESHOLD", 6)
+    )
+    SELF_REFLECTION_REPAIR_TRIGGER_SCORE: float = float(
+        os.getenv("SELF_REFLECTION_REPAIR_TRIGGER_SCORE", 0.60)
+    )
+    SELF_REFLECTION_MAX_EVENTS: int = int(
+        os.getenv("SELF_REFLECTION_MAX_EVENTS", 500)
+    )
+    SELF_REFLECTION_AMPEL_MIN_EVENTS: int = int(
+        os.getenv("SELF_REFLECTION_AMPEL_MIN_EVENTS", 4)
+    )
+    SELF_REFLECTION_COOLDOWN_MINUTES: int = int(
+        _first_non_empty(
+            "SELF_REFLECTION_COOLDOWN_MINUTES",
+            "SELF_REFLECTION_REPAIR_COOLDOWN_MINUTES",
+            default="30",
+        )
+    )
+    SELF_REFLECTION_REPAIR_COOLDOWN_MINUTES: int = int(
+        _first_non_empty(
+            "SELF_REFLECTION_REPAIR_COOLDOWN_MINUTES",
+            "SELF_REFLECTION_COOLDOWN_MINUTES",
+            default="30",
+        )
+    )
+    SELF_REFLECTION_MAX_REPAIRS_PER_DAY: int = int(
+        os.getenv("SELF_REFLECTION_MAX_REPAIRS_PER_DAY", 8)
+    )
+    SELF_REFLECTION_MAX_POSITIONS_CEIL: int = int(
+        os.getenv("SELF_REFLECTION_MAX_POSITIONS_CEIL", 12)
+    )
     MAX_POSITIONS_PER_SYMBOL: int = int(os.getenv("MAX_POSITIONS_PER_SYMBOL", 1))
     MAX_STRATEGY_POSITIONS: int = int(os.getenv("MAX_STRATEGY_POSITIONS", 2))
 

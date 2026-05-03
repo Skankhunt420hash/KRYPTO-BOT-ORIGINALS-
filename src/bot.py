@@ -18,6 +18,7 @@ from src.engine.performance_tracker import PerformanceTracker
 from src.engine.strategy_scorer import StrategyScorer
 from src.engine.execution_engine import ExecutionEngine
 from src.engine.health_monitor import HealthMonitor
+from src.engine.self_reflection_memory import SelfReflectionMemory
 from src.engine.runtime_control import runtime_control
 from src.engine.runtime_state import runtime_state
 from src.storage.trade_repository import TradeRepository
@@ -890,6 +891,8 @@ class MultiStrategyBot:
             "min_win_chance_pct": float(getattr(settings, "MIN_WIN_CHANCE_PCT", 80.0)),
             "brain_min_score_to_trade": float(getattr(settings, "BRAIN_MIN_SCORE_TO_TRADE", 0.45)),
         }
+        self._self_reflection = SelfReflectionMemory()
+        self._self_reflection_last_repair_ts: float = 0.0
 
         # Performance-Tracking und adaptives Scoring
         self.perf_tracker = PerformanceTracker()
@@ -1197,6 +1200,117 @@ class MultiStrategyBot:
             "🟢 <b>MASTER CADENCE OVERRIDE</b>\n"
             f"Inaktivität {inactivity_min:.0f}min erkannt. Master-AutoPause temporär übersteuert bis {until_txt}."
         )
+
+    def _build_reflection_context(self) -> Dict:
+        rt = runtime_state.snapshot()
+        gate = {}
+        try:
+            gate = self.risk.get_gate_status()
+        except Exception:
+            gate = {}
+        stale_symbols = 0
+        try:
+            hs = self.health.get_snapshot() if self.health else {}
+            ages = hs.get("data_ages_sec") or {}
+            stale_timeout = float(getattr(settings, "DATA_STALE_TIMEOUT_SEC", 600))
+            stale_symbols = len(
+                [sym for sym, age in ages.items() if float(age or 0.0) > stale_timeout]
+            )
+        except Exception:
+            stale_symbols = 0
+        master_status = self._get_master_status_from_panel()
+        return {
+            "paused": bool(rt.get("paused", False)),
+            "risk_off": bool(rt.get("risk_off", False)),
+            "open_positions": int(gate.get("open_positions", 0) or 0),
+            "max_open_positions": int(gate.get("max_open_positions", 0) or 0),
+            "gate_last_reason": str(gate.get("last_gate_reason", "n/a")),
+            "master_reason": str(master_status.get("last_reason", "n/a")),
+            "stale_symbols": int(stale_symbols),
+            "cadence_level": int((self._entry_cadence_status or {}).get("level", 0) or 0),
+            "entries_today": int((self._entry_cadence_status or {}).get("entries_today", 0) or 0),
+            "target_trades_per_day": int(
+                (self._entry_cadence_status or {}).get(
+                    "target_trades_per_day",
+                    int(getattr(settings, "ENTRY_CADENCE_TARGET_TRADES_PER_DAY", 8)),
+                )
+                or 0
+            ),
+            "master_enabled": bool(master_status.get("enabled", True)),
+            "master_auto_paused": bool(master_status.get("auto_paused", False)),
+        }
+
+    def _apply_self_reflection_repairs(self) -> None:
+        if not bool(getattr(settings, "SELF_REFLECTION_ENABLED", True)):
+            return
+        now_ts = time.time()
+        cooldown_sec = max(
+            60,
+            int(getattr(settings, "SELF_REFLECTION_REPAIR_COOLDOWN_MINUTES", 20)) * 60,
+        )
+        if now_ts - float(self._self_reflection_last_repair_ts) < float(cooldown_sec):
+            return
+        insight = self._self_reflection.latest_insight()
+        if not insight:
+            return
+        actions = list(insight.get("repair_actions") or [])
+        if not actions:
+            return
+        changed: List[str] = []
+        rt = runtime_state.snapshot()
+        gate = self.risk.get_gate_status()
+        if "unlock_entries" in actions:
+            if bool(rt.get("paused")) or bool(rt.get("risk_off")):
+                runtime_control.resume_entries()
+                runtime_control.disable_risk_off()
+                changed.append("unlock_entries")
+        if "reduce_master_strictness" in actions:
+            if bool(getattr(settings, "MASTER_BRAIN_ENABLED", True)):
+                min_trades = int(getattr(settings, "MASTER_BRAIN_MIN_TRADES", 20))
+                fail_windows = int(getattr(settings, "MASTER_BRAIN_FAIL_WINDOWS", 2))
+                settings.MASTER_BRAIN_MIN_TRADES = max(8, min_trades - 4)
+                settings.MASTER_BRAIN_FAIL_WINDOWS = min(8, fail_windows + 1)
+                settings.MASTER_BRAIN_AUTO_PAUSE = False
+                self._master_auto_paused = False
+                runtime_control.resume_entries()
+                runtime_control.disable_risk_off()
+                changed.append(
+                    "master_relaxed:min_trades-4,fail_windows+1,auto_pause=false"
+                )
+        if "increase_max_positions" in actions:
+            current = int(self.risk.max_open_trades)
+            target = int(getattr(settings, "SELF_REFLECTION_MAX_POSITIONS_CEIL", 12))
+            if current < target:
+                new_val = min(target, current + 1)
+                settings.MAX_OPEN_TRADES = new_val
+                settings.MAX_POSITIONS_TOTAL = new_val
+                self.risk.max_open_trades = new_val
+                if hasattr(self.risk, "portfolio") and getattr(self.risk, "portfolio", None):
+                    self.risk.portfolio.cfg.max_positions_total = new_val
+                changed.append(f"max_positions={new_val}")
+        if "clear_noncritical_risk_off" in actions:
+            reason = str(gate.get("last_gate_reason", ""))
+            if "DAILY LOSS" not in reason.upper():
+                runtime_control.disable_risk_off()
+                changed.append("risk_off_cleared")
+        if changed:
+            self._self_reflection_last_repair_ts = now_ts
+            runtime_state.append_log("SELF_REFLECTION_REPAIR " + ", ".join(changed))
+            self._self_reflection.remember(
+                event_type="self_repair",
+                severity="info",
+                details={
+                    "changes": list(changed),
+                    "pattern": str(insight.get("pattern", "n/a")),
+                    "reason": str(insight.get("reason", "n/a")),
+                },
+            )
+            self.tg.send(
+                "🛠 <b>SELF-REPAIR</b>\n"
+                f"Reflexionsmodus hat Reparatur ausgeführt:\n<code>{', '.join(changed)}</code>"
+            )
+            self._sync_runtime_state()
+            self._save_master_snapshot("self_reflection_auto_repair")
 
     def _persist_recovery_state(self) -> None:
         if not settings.STATE_RECOVERY_ENABLED:
@@ -2535,6 +2649,9 @@ class MultiStrategyBot:
 
         self._run_master_watchdog()
         self._maybe_override_master_autopause_for_cadence()
+        ctx = self._build_reflection_context()
+        self._self_reflection.observe(ctx)
+        self._apply_self_reflection_repairs()
 
         # Health-Monitor auswerten (Watchdog-Reaktionen, Snapshots)
         self.health.check_and_react()
@@ -2594,7 +2711,10 @@ class MultiStrategyBot:
             "selector": self._last_selector_snapshot,
             "risk_gate": gate_status,
             "brain": self._last_brain_snapshot,
-            "app_context": snap.get("app_context", {}),
+            "app_context": {
+                **(snap.get("app_context", {}) or {}),
+                "self_reflection": self._self_reflection.latest_insight(),
+            },
             "performance": snap.get("performance", {}),
         }
 

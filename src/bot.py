@@ -3362,6 +3362,50 @@ class MultiStrategyBot:
                     v = max(-1.0, min(0.0, v))
                     settings.BRAIN_BITTER_TREAT_BLOCK_THRESHOLD = v
                     changed.append(f"BRAIN_BITTER_TREAT_BLOCK_THRESHOLD={v:.3f}")
+                elif k == "mtf_king_enabled":
+                    v = bool(value)
+                    settings.MTF_KING_ENABLED = v
+                    changed.append(f"MTF_KING_ENABLED={v}")
+                elif k == "mtf_entry_timeframe":
+                    v = str(value).strip().lower()
+                    if not v:
+                        return False, "MTF_ENTRY_TIMEFRAME darf nicht leer sein."
+                    settings.MTF_ENTRY_TIMEFRAME = v
+                    changed.append(f"MTF_ENTRY_TIMEFRAME={v}")
+                elif k == "mtf_micro_timeframe":
+                    v = str(value).strip().lower()
+                    if not v:
+                        return False, "MTF_MICRO_TIMEFRAME darf nicht leer sein."
+                    settings.MTF_MICRO_TIMEFRAME = v
+                    changed.append(f"MTF_MICRO_TIMEFRAME={v}")
+                elif k == "mtf_setup_timeframe":
+                    v = str(value).strip().lower()
+                    if not v:
+                        return False, "MTF_SETUP_TIMEFRAME darf nicht leer sein."
+                    settings.MTF_SETUP_TIMEFRAME = v
+                    changed.append(f"MTF_SETUP_TIMEFRAME={v}")
+                elif k == "mtf_direction_timeframe":
+                    v = str(value).strip().lower()
+                    if not v:
+                        return False, "MTF_DIRECTION_TIMEFRAME darf nicht leer sein."
+                    settings.MTF_DIRECTION_TIMEFRAME = v
+                    changed.append(f"MTF_DIRECTION_TIMEFRAME={v}")
+                elif k == "mtf_context_timeframe":
+                    v = str(value).strip().lower()
+                    if not v:
+                        return False, "MTF_CONTEXT_TIMEFRAME darf nicht leer sein."
+                    settings.MTF_CONTEXT_TIMEFRAME = v
+                    changed.append(f"MTF_CONTEXT_TIMEFRAME={v}")
+                elif k == "mtf_direction_strong_threshold":
+                    v = float(value)
+                    v = max(0.0, min(2.0, v))
+                    settings.MTF_DIRECTION_STRONG_THRESHOLD = v
+                    changed.append(f"MTF_DIRECTION_STRONG_THRESHOLD={v:.3f}")
+                elif k == "mtf_min_support_ratio":
+                    v = float(value)
+                    v = max(0.0, min(1.0, v))
+                    settings.MTF_MIN_SUPPORT_RATIO = v
+                    changed.append(f"MTF_MIN_SUPPORT_RATIO={v:.3f}")
                 elif k == "master_brain_enabled":
                     v = bool(value)
                     settings.MASTER_BRAIN_ENABLED = v

@@ -398,6 +398,8 @@ class TelegramControlPanel:
                 self._handle_setrisk(chat_id, text)
             elif cmd == "/setbrain":
                 self._handle_setbrain(chat_id, text)
+            elif cmd == "/setmtf":
+                self._handle_setmtf(chat_id, text)
             elif cmd == "/config":
                 self._send_config(chat_id)
             elif cmd == "/brain":
@@ -581,7 +583,7 @@ class TelegramControlPanel:
             "<b>KRYPTO-BOT Control Center</b>\n"
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
             "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
-            "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;\n"
+            "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;, /setmtf &lt;key&gt; &lt;value&gt;\n"
             "🧠 <b>Diagnose</b>: /config /brain /regime /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
             "🚦 <b>Ampel</b>: /ampel /ampeldebug /ampelauto status|on|off /ampel_min_trades &lt;n&gt;\n"
             "🧪 <b>Kompatibilität</b>: /setprofile &lt;growth|scalping|defensive|hf75&gt;, /testtrade, /testtrades\n"
@@ -1309,6 +1311,52 @@ class TelegramControlPanel:
             self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
             return
         if not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _handle_setmtf(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setmtf <key> <value>\n"
+                "Keys: enabled, entry_tf, micro_tf, setup_tf, direction_tf, context_tf, min_support_ratio, direction_strong_threshold"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "enabled": ("mtf_king_enabled", bool, None, None),
+            "entry_tf": ("mtf_entry_timeframe", str, None, None),
+            "micro_tf": ("mtf_micro_timeframe", str, None, None),
+            "setup_tf": ("mtf_setup_timeframe", str, None, None),
+            "direction_tf": ("mtf_direction_timeframe", str, None, None),
+            "context_tf": ("mtf_context_timeframe", str, None, None),
+            "min_support_ratio": ("mtf_min_support_ratio", float, 0.0, 1.0),
+            "direction_strong_threshold": ("mtf_direction_strong_threshold", float, 0.0, 5.0),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setmtf-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            if caster is bool:
+                val = value_raw.strip().lower() in {"1", "true", "yes", "on"}
+            elif caster is str:
+                val = value_raw.strip()
+                if not val:
+                    raise ValueError("empty timeframe")
+            else:
+                val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if lo is not None and hi is not None and not (lo <= val <= hi):
             self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
             return
         if self._callbacks.apply_runtime_settings:

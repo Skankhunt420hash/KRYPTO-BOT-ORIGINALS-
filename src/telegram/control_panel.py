@@ -18,6 +18,7 @@ Wichtige Hinweise:
 from __future__ import annotations
 
 import html
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -36,6 +37,7 @@ from src.utils.telegram_notifier import TelegramNotifier
 logger = setup_logger("telegram.panel")
 
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
+_PAUSE_DURATION_RE = re.compile(r"^\s*(\d+)\s*([mhd])?\s*$", re.IGNORECASE)
 _STRATEGY_ALIASES = {
     "momentum_pullback": "MomentumPullback",
     "rangereversion": "RangeReversion",
@@ -49,6 +51,19 @@ _STRATEGY_ALIASES = {
     "combined": "Combined",
     "auto": "auto",
 }
+
+
+def _parse_pause_duration_seconds(raw: str) -> Optional[int]:
+    match = _PAUSE_DURATION_RE.match(str(raw or "").strip())
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = (match.group(2) or "m").lower()
+    mult = {"m": 60, "h": 3600, "d": 86400}.get(unit, 60)
+    seconds = amount * mult
+    if seconds <= 0:
+        return None
+    return min(seconds, 7 * 24 * 3600)
 
 
 @dataclass
@@ -379,9 +394,11 @@ class TelegramControlPanel:
             elif cmd == "/summary":
                 self._send_summary(chat_id)
             elif cmd == "/pause":
-                self._handle_pause(chat_id)
+                self._handle_pause(chat_id, text)
             elif cmd == "/resume":
                 self._handle_resume(chat_id)
+            elif cmd in ("/kill", "/panic", "/emergency"):
+                self._handle_kill(chat_id)
             elif cmd == "/riskoff":
                 self._handle_riskoff(chat_id)
             elif cmd == "/riskon":
@@ -408,8 +425,20 @@ class TelegramControlPanel:
                 self._send_brain(chat_id)
             elif cmd in ("/regime", "/marketregime", "/marktwetter"):
                 self._send_regime(chat_id)
+            elif cmd == "/why":
+                self._send_why(chat_id)
             elif cmd == "/markets":
                 self._send_markets(chat_id)
+            elif cmd == "/hotpairs":
+                self._send_hotpairs(chat_id)
+            elif cmd == "/confidence":
+                self._send_confidence(chat_id)
+            elif cmd == "/mistakes":
+                self._send_mistakes(chat_id)
+            elif cmd == "/journal":
+                self._send_journal(chat_id)
+            elif cmd == "/shadow":
+                self._send_shadow(chat_id)
             elif cmd == "/autoheal":
                 self._handle_autoheal(chat_id)
             elif cmd == "/masterstatus":
@@ -584,11 +613,11 @@ class TelegramControlPanel:
             chat_id,
             "<b>KRYPTO-BOT Control Center</b>\n"
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
-            "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
+            "🎛 <b>Steuerung</b>: /pause [30m|2h|1d] /resume /riskoff /riskon /kill /killswitch /killswitchoff\n"
             "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;, /setmtf &lt;key&gt; &lt;value&gt;, /setoracle &lt;key&gt; &lt;value&gt;\n"
             "🔮 <b>Oracle Quickref</b>: keys = enabled, no_trade_below, small_below, normal_below, small_mult, top_mult\n"
             "🔮 <b>Beispiele</b>: /setoracle enabled true | /setoracle no_trade_below 60 | /setoracle small_mult 0.60 | /setoracle top_mult 1.10\n"
-            "🧠 <b>Diagnose</b>: /config /brain /regime /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
+            "🧠 <b>Diagnose</b>: /config /brain /why /regime /hotpairs /confidence /mistakes /journal /shadow /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
             "🚦 <b>Ampel</b>: /ampel /ampeldebug /ampelauto status|on|off /ampel_min_trades &lt;n&gt;\n"
             "🧪 <b>Kompatibilität</b>: /setprofile &lt;growth|scalping|defensive|hf75&gt;, /testtrade, /testtrades\n"
             "🛠 <b>Ops</b>: /repair /unlock /safemode /ops /setmaster &lt;key&gt; &lt;value&gt; /closeoldest &lt;n&gt; [keep_newest]\n"
@@ -1103,16 +1132,23 @@ class TelegramControlPanel:
             f"PID-File: <code>{status.get('pidfile', 'n/a')}</code>"
         )
 
-    def _handle_pause(self, chat_id: str) -> None:
-        runtime_control.pause_entries()
-        runtime_state.update_engine(paused=True)
-        runtime_state.append_log("TELEGRAM /pause -> entries pausiert")
-        logger.warning("Telegram-Aktion: /pause -> neue Entries pausiert")
-        self._notifier.notify_bot_paused("telegram:/pause")
-        self._send_text(
-            chat_id,
-            "⏸️ Neue Entries wurden pausiert. Bestehende Positionen werden weiter verwaltet."
-        )
+    def _pause_resume_after(self, seconds: int, chat_id: str) -> None:
+        def _runner() -> None:
+            try:
+                time.sleep(max(1, int(seconds)))
+                runtime_control.resume_entries()
+                runtime_state.update_engine(paused=False)
+                runtime_state.append_log(f"TELEGRAM auto-resume nach /pause {seconds}s")
+                self._notifier.notify_bot_resumed("telegram:auto_resume")
+                self._send_text(
+                    chat_id,
+                    f"▶️ Auto-Resume aktiv: Pause nach {int(seconds/60)}m aufgehoben.",
+                )
+            except Exception as e:
+                logger.error("Auto-Resume Fehler: %s", e)
+
+        t = threading.Thread(target=_runner, name="tg-pause-auto-resume", daemon=True)
+        t.start()
 
     def _handle_resume(self, chat_id: str) -> None:
         runtime_control.resume_entries()
@@ -1177,6 +1213,171 @@ class TelegramControlPanel:
         except Exception as e:
             logger.error(f"Kill-Switch Deaktivierung fehlgeschlagen: {e}")
             self._send_text(chat_id, "⚠️ Kill-Switch konnte nicht deaktiviert werden.")
+
+    def _handle_pause(self, chat_id: str, text: str = "") -> None:
+        pause_seconds = _parse_pause_duration_seconds(text or "")
+        if pause_seconds is None and len(text.split()) > 1:
+            self._send_text(chat_id, "⚠️ Verwendung: /pause [30m|2h|1d]")
+            return
+
+        runtime_control.pause_entries()
+        runtime_state.update_engine(paused=True)
+        self._notifier.notify_bot_paused("telegram:/pause")
+
+        if pause_seconds and pause_seconds > 0:
+            runtime_state.append_log(
+                f"TELEGRAM /pause {pause_seconds}s -> entries pausiert"
+            )
+            logger.warning(
+                "Telegram-Aktion: /pause timed -> neue Entries pausiert (%ss)",
+                pause_seconds,
+            )
+            self._pause_resume_after(pause_seconds, chat_id)
+            self._send_text(
+                chat_id,
+                "⏸️ Neue Entries wurden pausiert.\n"
+                f"Auto-Resume in <code>{int(pause_seconds // 60)}m</code> geplant.\n"
+                "Bestehende Positionen werden weiter verwaltet.",
+            )
+            return
+
+        runtime_state.append_log("TELEGRAM /pause -> entries pausiert")
+        logger.warning("Telegram-Aktion: /pause -> neue Entries pausiert")
+        self._send_text(
+            chat_id,
+            "⏸️ Neue Entries wurden pausiert. Bestehende Positionen werden weiter verwaltet."
+        )
+
+    def _handle_kill(self, chat_id: str) -> None:
+        runtime_control.pause_entries()
+        runtime_control.enable_risk_off()
+        runtime_state.update_engine(paused=True, risk_off=True)
+        runtime_state.append_log("TELEGRAM /kill -> emergency_stop")
+        self._notifier.notify_bot_paused("telegram:/kill")
+        self._notifier.notify_risk_off(True, "telegram:/kill")
+        self._send_text(
+            chat_id,
+            "🛑 <b>NOTSTOPP aktiv</b>\n"
+            "Entries sofort gestoppt und Risk-Off aktiviert.\n"
+            "Zum Freigeben: <code>/resume</code> + <code>/riskon</code>.",
+        )
+
+    def _send_why(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        last_signal = rt.get("last_signal") or {}
+        last_decision = rt.get("last_decision") or {}
+        brain = rt.get("brain") or {}
+        selector = rt.get("selector") or {}
+        app_ctx = rt.get("app_context") or {}
+        oracle = app_ctx.get("oracle_score") or {}
+        mtf = app_ctx.get("mtf_context") or {}
+        lines = [
+            "❓ <b>/why – Entscheidungsgrund</b>",
+            f"Signal: <code>{last_signal.get('symbol', 'n/a')} {last_signal.get('side', 'n/a')}</code>",
+            f"Strategie: <code>{last_signal.get('strategy', 'n/a')}</code>",
+            f"Reason: <code>{last_signal.get('reason', 'n/a')}</code>",
+            f"Decision: <code>{last_decision.get('decision', 'n/a')}</code> | "
+            f"{last_decision.get('reason', 'n/a')}",
+            f"Brain score: <code>{brain.get('last_signal_score', 'n/a')}</code> | "
+            f"Selector winner: <code>{selector.get('winner', 'n/a')}</code>",
+        ]
+        if oracle:
+            lines.append(
+                f"Oracle: <code>{oracle.get('score', 'n/a')}</code> | "
+                f"{oracle.get('verdict', oracle.get('tier', 'n/a'))} | "
+                f"mult={oracle.get('position_multiplier', oracle.get('size_multiplier', 'n/a'))}"
+            )
+        if mtf:
+            lines.append(
+                f"MTF: <code>{mtf.get('reason', 'n/a')}</code> | support={mtf.get('support_ratio', 'n/a')}"
+            )
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_hotpairs(self, chat_id: str) -> None:
+        if not self._callbacks.get_market_status:
+            self._send_text(chat_id, "⚠️ Market-Status Callback nicht angebunden.")
+            return
+        try:
+            data = self._callbacks.get_market_status() or {}
+        except Exception as e:
+            logger.error("Hotpairs Callback-Fehler: %s", e)
+            self._send_text(chat_id, "⚠️ Konnte Hotpairs nicht lesen.")
+            return
+        pairs = list(data.get("pairs") or [])
+        stale = set(data.get("stale_symbols") or [])
+        hot = [p for p in pairs if p not in stale][:10]
+        if not hot:
+            hot = pairs[:10]
+        self._send_text(
+            chat_id,
+            "🔥 <b>Hot Pairs</b>\n"
+            f"Aktiv: <code>{', '.join(hot) if hot else 'n/a'}</code>\n"
+            f"Stale excluded: <code>{len(stale)}</code>",
+        )
+
+    def _send_confidence(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        last_signal = rt.get("last_signal") or {}
+        ranking = list(brain.get("last_strategy_ranking") or [])
+        top = ranking[0] if ranking else {}
+        self._send_text(
+            chat_id,
+            "🎯 <b>Confidence</b>\n"
+            f"Signal conf: <code>{last_signal.get('confidence', 'n/a')}</code>\n"
+            f"Brain score: <code>{brain.get('last_signal_score', 'n/a')}</code>\n"
+            f"Top ranking: <code>{top.get('strategy', 'n/a')} {top.get('side', '')} "
+            f"score={top.get('brain_score', 'n/a')}</code>",
+        )
+
+    def _send_mistakes(self, chat_id: str) -> None:
+        rows = self._repo.get_recent_trades(limit=400, status="rejected", current_mode_only=True)
+        if not rows:
+            self._send_text(chat_id, "🧩 <b>Mistakes</b>\nKeine Rejection-Daten vorhanden.")
+            return
+        counts: Dict[str, int] = {}
+        for row in rows:
+            key = str(
+                row.get("reason_rejected") or row.get("reason_open") or "unknown"
+            ).strip()[:80] or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        top = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:6]
+        lines = ["🧩 <b>Häufigste Fehler (rejected)</b>"]
+        lines.extend([f"• <code>{reason}</code>: <b>{cnt}</b>" for reason, cnt in top])
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_shadow(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        enabled = list(rt.get("enabled_strategies") or [])
+        ranking = list((rt.get("brain") or {}).get("last_strategy_ranking") or [])
+        lines = [
+            "🕶 <b>Shadow-Strategien (Beobachtung)</b>",
+            f"Aktiv im Pool: <code>{', '.join(enabled) if enabled else 'n/a'}</code>",
+        ]
+        if ranking:
+            lines.append("Top Kandidaten:")
+            for row in ranking[:5]:
+                lines.append(
+                    f"• <code>{row.get('strategy')}</code> {row.get('side')} "
+                    f"(score={row.get('brain_score')}, eligible={row.get('eligible')})"
+                )
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_journal(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        perf = rt.get("performance") or {}
+        day = perf.get("daily_summary") or {}
+        snap = perf.get("snapshot") or {}
+        lines = [
+            "📓 <b>Tagesbericht</b>",
+            f"Trades: <code>{int(day.get('trades_count', 0))}</code>",
+            f"PnL: <code>{float(day.get('pnl_abs', 0.0)):+.4f}</code>",
+            f"Winrate: <code>{float(day.get('win_rate', 0.0) or 0.0):.1f}%</code>",
+            f"Best: <code>{day.get('best_strategy') or 'n/a'}</code> | "
+            f"Worst: <code>{day.get('worst_strategy') or 'n/a'}</code>",
+            f"Unrealized: <code>{float(snap.get('unrealized_pnl_total', 0.0)):+.4f}</code>",
+        ]
+        self._send_text(chat_id, "\n".join(lines))
 
     def _handle_setmode(self, chat_id: str, text: str) -> None:
         parts = text.split()

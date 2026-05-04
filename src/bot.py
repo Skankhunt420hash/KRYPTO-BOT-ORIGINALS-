@@ -903,6 +903,7 @@ class MultiStrategyBot:
         self._master_last_winrate_pct: float = 0.0
         self._master_fail_windows: int = 0
         self._master_auto_paused: bool = False
+        self._master_auto_paused_since_ts: float = 0.0
         self._master_last_reason: str = "init"
         self._master_last_snapshot_file: str = "n/a"
         self._master_autoheal_alert_window_ts: float = 0.0
@@ -1217,6 +1218,7 @@ class MultiStrategyBot:
         runtime_control.resume_entries()
         runtime_control.disable_risk_off()
         self._master_auto_paused = False
+        self._master_auto_paused_since_ts = 0.0
         hold_minutes = max(30, int(getattr(settings, "ENTRY_CADENCE_INACTIVITY_MINUTES", 120)))
         self._master_cadence_override_until_ts = now_ts + hold_minutes * 60
         until_txt = datetime.fromtimestamp(
@@ -1425,8 +1427,15 @@ class MultiStrategyBot:
         changed: List[str] = []
         rt = runtime_state.snapshot()
         gate = self.risk.get_gate_status()
+        master_guard_enabled = bool(
+            getattr(settings, "SELF_REFLECTION_MASTER_GUARD_ENABLED", True)
+        )
         if "unlock_entries" in actions:
-            if bool(rt.get("paused")) or bool(rt.get("risk_off")):
+            # Nicht gegen den Master-Watchdog arbeiten:
+            # solange Master auto-paused ist, kein automatisches Unlock durch Reflection.
+            if master_guard_enabled and self._master_auto_paused:
+                changed.append("unlock_skipped_master_auto_paused")
+            elif bool(rt.get("paused")) or bool(rt.get("risk_off")):
                 runtime_control.resume_entries()
                 runtime_control.disable_risk_off()
                 changed.append("unlock_entries")
@@ -1436,13 +1445,19 @@ class MultiStrategyBot:
                 fail_windows = int(getattr(settings, "MASTER_BRAIN_FAIL_WINDOWS", 2))
                 settings.MASTER_BRAIN_MIN_TRADES = max(8, min_trades - 4)
                 settings.MASTER_BRAIN_FAIL_WINDOWS = min(8, fail_windows + 1)
-                settings.MASTER_BRAIN_AUTO_PAUSE = False
-                self._master_auto_paused = False
-                runtime_control.resume_entries()
-                runtime_control.disable_risk_off()
-                changed.append(
-                    "master_relaxed:min_trades-4,fail_windows+1,auto_pause=false"
-                )
+                if bool(getattr(settings, "SELF_REFLECTION_MASTER_GUARD_ENABLED", True)):
+                    changed.append(
+                        "master_relaxed:min_trades-4,fail_windows+1,auto_pause=unchanged"
+                    )
+                else:
+                    settings.MASTER_BRAIN_AUTO_PAUSE = False
+                    self._master_auto_paused = False
+                    self._master_auto_paused_since_ts = 0.0
+                    runtime_control.resume_entries()
+                    runtime_control.disable_risk_off()
+                    changed.append(
+                        "master_relaxed:min_trades-4,fail_windows+1,auto_pause=false"
+                    )
         if "increase_max_positions" in actions:
             current = int(self.risk.max_open_trades)
             target = int(getattr(settings, "SELF_REFLECTION_MAX_POSITIONS_CEIL", 12))
@@ -1456,7 +1471,9 @@ class MultiStrategyBot:
                 changed.append(f"max_positions={new_val}")
         if "clear_noncritical_risk_off" in actions:
             reason = str(gate.get("last_gate_reason", ""))
-            if "DAILY LOSS" not in reason.upper():
+            if master_guard_enabled and self._master_auto_paused:
+                changed.append("risk_off_clear_skipped_master_auto_paused")
+            elif "DAILY LOSS" not in reason.upper():
                 runtime_control.disable_risk_off()
                 changed.append("risk_off_cleared")
         if changed:
@@ -3872,12 +3889,25 @@ class MultiStrategyBot:
         winrate = (wins / len(closed) * 100.0) if closed else 0.0
         self._master_last_winrate_pct = round(winrate, 2)
         target = float(getattr(settings, "MASTER_BRAIN_TARGET_WINRATE_PCT", 70.0))
+        now_ts = time.time()
+        min_pause_sec = max(
+            60, int(getattr(settings, "MASTER_BRAIN_MIN_PAUSE_MINUTES", 45)) * 60
+        )
         if winrate >= target:
             self._master_fail_windows = 0
             if self._master_auto_paused:
+                paused_since = float(self._master_auto_paused_since_ts or now_ts)
+                paused_for_sec = max(0.0, now_ts - paused_since)
+                if paused_for_sec < float(min_pause_sec):
+                    self._master_last_reason = (
+                        f"pause_lock_active:{paused_for_sec/60.0:.1f}m"
+                        f"<{min_pause_sec/60.0:.1f}m"
+                    )
+                    return
                 runtime_control.resume_entries()
                 runtime_control.disable_risk_off()
                 self._master_auto_paused = False
+                self._master_auto_paused_since_ts = 0.0
                 self._master_last_reason = f"recovered_winrate:{winrate:.2f}%"
                 runtime_state.append_log(f"MASTER recovered winrate={winrate:.2f}%")
                 self.tg.send(
@@ -3902,6 +3932,18 @@ class MultiStrategyBot:
 
         already_auto_paused = bool(self._master_auto_paused)
         if already_auto_paused:
+            paused_since = float(self._master_auto_paused_since_ts or now_ts)
+            paused_for_sec = max(0.0, now_ts - paused_since)
+            if paused_for_sec < float(min_pause_sec):
+                ctrl = runtime_control.get_snapshot()
+                if not bool(ctrl.get("paused")) or not bool(ctrl.get("risk_off")):
+                    runtime_control.pause_entries()
+                    runtime_control.enable_risk_off()
+                self._master_last_reason += (
+                    f" | pause_lock:{paused_for_sec/60.0:.1f}m"
+                    f"<{min_pause_sec/60.0:.1f}m"
+                )
+                return
             # Bereits pausiert: nicht in jedem Zyklus erneut Alarm/Snapshot-Spam senden.
             self._master_last_reason += " | already_auto_paused"
             return
@@ -3910,6 +3952,7 @@ class MultiStrategyBot:
             runtime_control.pause_entries()
             runtime_control.enable_risk_off()
             self._master_auto_paused = True
+            self._master_auto_paused_since_ts = now_ts
 
         snap_ok, snap_msg = self._save_master_snapshot("auto_watchdog_under_target_winrate")
         if snap_ok:
@@ -3919,7 +3962,6 @@ class MultiStrategyBot:
             f"MASTER auto_pause winrate={winrate:.2f}% target={target:.2f}%"
         )
 
-        now_ts = time.time()
         window_start = float(self._master_autoheal_alert_window_ts or 0.0)
         if now_ts - window_start >= 3600.0:
             self._master_autoheal_alert_window_ts = now_ts

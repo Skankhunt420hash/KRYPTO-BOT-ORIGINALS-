@@ -481,6 +481,9 @@ class Settings:
     MASTER_BRAIN_MAX_AUTOHEAL_ALERTS_PER_HOUR: int = int(
         os.getenv("MASTER_BRAIN_MAX_AUTOHEAL_ALERTS_PER_HOUR", 1)
     )
+    MASTER_BRAIN_MIN_PAUSE_MINUTES: int = int(
+        os.getenv("MASTER_BRAIN_MIN_PAUSE_MINUTES", 45)
+    )
     # Entry-Cadence-Guard: verhindert lange Entry-Stillephasen, indem Entry-Filter
     # kontrolliert gelockert werden, bis wieder Trades kommen.
     ENTRY_CADENCE_GUARD_ENABLED: bool = _env_bool(
@@ -557,6 +560,9 @@ class Settings:
             "SELF_REFLECTION_COOLDOWN_MINUTES",
             default="30",
         )
+    )
+    SELF_REFLECTION_MASTER_GUARD_ENABLED: bool = _env_bool(
+        "SELF_REFLECTION_MASTER_GUARD_ENABLED", default=True
     )
     SELF_REFLECTION_MAX_REPAIRS_PER_DAY: int = int(
         os.getenv("SELF_REFLECTION_MAX_REPAIRS_PER_DAY", 8)

@@ -17,11 +17,13 @@ Wichtige Hinweise:
 
 from __future__ import annotations
 
+import html
+import re
 import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 import requests
 
@@ -35,6 +37,7 @@ from src.utils.telegram_notifier import TelegramNotifier
 logger = setup_logger("telegram.panel")
 
 _API_BASE = "https://api.telegram.org/bot{token}/{method}"
+_PAUSE_DURATION_RE = re.compile(r"^\s*(\d+)\s*([mhd])?\s*$", re.IGNORECASE)
 _STRATEGY_ALIASES = {
     "momentum_pullback": "MomentumPullback",
     "rangereversion": "RangeReversion",
@@ -48,6 +51,19 @@ _STRATEGY_ALIASES = {
     "combined": "Combined",
     "auto": "auto",
 }
+
+
+def _parse_pause_duration_seconds(raw: str) -> Optional[int]:
+    match = _PAUSE_DURATION_RE.match(str(raw or "").strip())
+    if not match:
+        return None
+    amount = int(match.group(1))
+    unit = (match.group(2) or "m").lower()
+    mult = {"m": 60, "h": 3600, "d": 86400}.get(unit, 60)
+    seconds = amount * mult
+    if seconds <= 0:
+        return None
+    return min(seconds, 7 * 24 * 3600)
 
 
 @dataclass
@@ -64,6 +80,14 @@ class PanelCallbacks:
     request_bot_start: Optional[Callable[[], Tuple[bool, str]]] = None
     request_bot_restart: Optional[Callable[[], Tuple[bool, str]]] = None
     get_bot_status: Optional[Callable[[], Dict]] = None
+    apply_runtime_settings: Optional[Callable[[Dict[str, Any]], Tuple[bool, str]]] = None
+    request_auto_heal: Optional[Callable[[], Tuple[bool, str]]] = None
+    get_market_status: Optional[Callable[[], Dict]] = None
+    get_master_status: Optional[Callable[[], Dict]] = None
+    request_close_oldest_open_trades: Optional[
+        Callable[[int, int], Tuple[bool, str]]
+    ] = None
+    request_test_trade: Optional[Callable[[], Tuple[bool, str]]] = None
 
 
 class TelegramControlPanel:
@@ -370,9 +394,11 @@ class TelegramControlPanel:
             elif cmd == "/summary":
                 self._send_summary(chat_id)
             elif cmd == "/pause":
-                self._handle_pause(chat_id)
+                self._handle_pause(chat_id, text)
             elif cmd == "/resume":
                 self._handle_resume(chat_id)
+            elif cmd in ("/kill", "/panic", "/emergency"):
+                self._handle_kill(chat_id)
             elif cmd == "/riskoff":
                 self._handle_riskoff(chat_id)
             elif cmd == "/riskon":
@@ -385,6 +411,68 @@ class TelegramControlPanel:
                 self._handle_setmode(chat_id, text)
             elif cmd == "/setstrategy":
                 self._handle_setstrategy(chat_id, text)
+            elif cmd == "/setrisk":
+                self._handle_setrisk(chat_id, text)
+            elif cmd == "/setbrain":
+                self._handle_setbrain(chat_id, text)
+            elif cmd == "/setmtf":
+                self._handle_setmtf(chat_id, text)
+            elif cmd == "/setoracle":
+                self._handle_setoracle(chat_id, text)
+            elif cmd == "/config":
+                self._send_config(chat_id)
+            elif cmd == "/brain":
+                self._send_brain(chat_id)
+            elif cmd in ("/regime", "/marketregime", "/marktwetter"):
+                self._send_regime(chat_id)
+            elif cmd == "/why":
+                self._send_why(chat_id)
+            elif cmd == "/markets":
+                self._send_markets(chat_id)
+            elif cmd == "/hotpairs":
+                self._send_hotpairs(chat_id)
+            elif cmd == "/confidence":
+                self._send_confidence(chat_id)
+            elif cmd == "/mistakes":
+                self._send_mistakes(chat_id)
+            elif cmd == "/journal":
+                self._send_journal(chat_id)
+            elif cmd == "/shadow":
+                self._send_shadow(chat_id)
+            elif cmd == "/autoheal":
+                self._handle_autoheal(chat_id)
+            elif cmd == "/masterstatus":
+                self._send_master_status(chat_id)
+            elif cmd == "/masterheal":
+                self._handle_autoheal(chat_id)
+            elif cmd in ("/ampel", "/ampelstatus"):
+                self._send_ampel(chat_id)
+            elif cmd == "/ampeldebug":
+                self._send_ampel_debug(chat_id)
+            elif cmd == "/ampelauto":
+                self._handle_ampelauto(chat_id, text)
+            elif cmd in ("/ampel_min_trades", "/ampelmintrades"):
+                self._handle_ampel_min_trades(chat_id, text)
+            elif cmd == "/setprofile":
+                self._handle_setprofile(chat_id, text)
+            elif cmd in ("/testtrade", "/testtrades"):
+                self._handle_testtrade(chat_id)
+            elif cmd == "/repair":
+                self._handle_autoheal(chat_id)
+            elif cmd == "/unlock":
+                self._handle_unlock(chat_id)
+            elif cmd == "/safemode":
+                self._handle_safemode(chat_id)
+            elif cmd == "/recovery":
+                self._send_recovery(chat_id)
+            elif cmd == "/snapshot":
+                self._handle_snapshot(chat_id)
+            elif cmd in ("/closeoldest", "/closeold", "/closeoldtrades"):
+                self._handle_close_oldest(chat_id, text)
+            elif cmd == "/setmaster":
+                self._handle_setmaster(chat_id, text)
+            elif cmd == "/ops":
+                self._send_ops(chat_id)
             elif cmd == "/stop_bot":
                 self._handle_stop_bot(chat_id)
             elif cmd == "/start_bot":
@@ -417,24 +505,43 @@ class TelegramControlPanel:
             return False
         try:
             url = _API_BASE.format(token=self._token, method="sendMessage")
-            resp = requests.post(
-                url,
-                json={
-                    "chat_id": chat_id,
-                    "text": text,
-                    "parse_mode": "HTML",
-                    "disable_web_page_preview": True,
-                },
-                timeout=8,
-            )
+            payload = {
+                "chat_id": chat_id,
+                "text": text,
+                "parse_mode": "HTML",
+                "disable_web_page_preview": True,
+            }
+            resp = requests.post(url, json=payload, timeout=8)
             if resp.status_code == 200:
                 return True
+
             desc = ""
             try:
-                payload = resp.json()
-                desc = payload.get("description", "")
+                body = resp.json() or {}
+                desc = str(body.get("description", "") or "")
             except Exception:
                 desc = ""
+
+            # Häufigster Grund für ausbleibende /status-Antwort: ungültiges HTML.
+            # Fallback: escaped plain text ohne parse_mode erneut senden.
+            if resp.status_code == 400 and (
+                "can't parse entities" in desc.lower()
+                or "can't find end tag" in desc.lower()
+                or "unsupported start tag" in desc.lower()
+            ):
+                safe_text = html.escape(str(text or ""))
+                fallback = {
+                    "chat_id": chat_id,
+                    "text": safe_text,
+                    "disable_web_page_preview": True,
+                }
+                resp2 = requests.post(url, json=fallback, timeout=8)
+                if resp2.status_code == 200:
+                    logger.warning(
+                        "Telegram-Panel HTML parse fallback aktiv (%s).", desc
+                    )
+                    return True
+
             logger.warning(
                 f"Telegram-Panel sendMessage HTTP {resp.status_code}"
                 f"{f' ({desc})' if desc else ''}"
@@ -506,10 +613,28 @@ class TelegramControlPanel:
             chat_id,
             "<b>KRYPTO-BOT Control Center</b>\n"
             "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
-            "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
-            "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper\n"
+            "🎛 <b>Steuerung</b>: /pause [30m|2h|1d] /resume /riskoff /riskon /kill /killswitch /killswitchoff\n"
+            "⚙ <b>Tuning</b>: /setstrategy &lt;name&gt;, /setmode paper, /setrisk &lt;key&gt; &lt;value&gt;, /setbrain &lt;key&gt; &lt;value&gt;, /setmtf &lt;key&gt; &lt;value&gt;, /setoracle &lt;key&gt; &lt;value&gt;\n"
+            "🔮 <b>Oracle Quickref</b>: keys = enabled, no_trade_below, small_below, normal_below, small_mult, top_mult\n"
+            "🔮 <b>Beispiele</b>: /setoracle enabled true | /setoracle no_trade_below 60 | /setoracle small_mult 0.60 | /setoracle top_mult 1.10\n"
+            "🧠 <b>Diagnose</b>: /config /brain /why /regime /hotpairs /confidence /mistakes /journal /shadow /markets /autoheal /masterstatus /masterheal /recovery /snapshot /ampel /ampeldebug\n"
+            "🚦 <b>Ampel</b>: /ampel /ampeldebug /ampelauto status|on|off /ampel_min_trades &lt;n&gt;\n"
+            "🧪 <b>Kompatibilität</b>: /setprofile &lt;growth|scalping|defensive|hf75&gt;, /testtrade, /testtrades\n"
+            "🛠 <b>Ops</b>: /repair /unlock /safemode /ops /setmaster &lt;key&gt; &lt;value&gt; /closeoldest &lt;n&gt; [keep_newest]\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
+        )
+
+    def _send_legacy_ampel_help(self, chat_id: str) -> None:
+        self._send_text(
+            chat_id,
+            "🚦 <b>Ampel-Kommandos (Legacy-Bridge)</b>\n"
+            "In dieser Version läuft Ampel über das neue Ops/Risk-Panel:\n"
+            "• <code>/ampel</code> → Summary + Risk-Lage\n"
+            "• <code>/ampeldebug</code> → Recovery + Market + Master-Status\n"
+            "• <code>/ampelauto status</code> → Master-Status\n"
+            "• <code>/ampelauto on|off</code> → /setmaster enabled true|false\n"
+            "Tipp: Nutze zusätzlich <code>/ops</code> für Reparaturbefehle."
         )
 
     def _send_mode(self, chat_id: str) -> None:
@@ -686,6 +811,20 @@ class TelegramControlPanel:
                 f"🧠 <b>Selector:</b> regime={selector.get('regime')} | "
                 f"actionable={selector.get('actionable')} | eligible={selector.get('eligible')} | "
                 f"winner={selector.get('winner') or 'none'} | score={selector.get('winner_score') or 'n/a'}"
+            )
+        app_ctx = rt.get("app_context") or {}
+        regime_ctx = app_ctx.get("regime_context") or {}
+        if regime_ctx:
+            parts.append(
+                f"🌦 <b>Regime-Marktphase:</b> {regime_ctx.get('regime', 'n/a')} | "
+                f"reason={regime_ctx.get('reason', 'n/a')}"
+            )
+            parts.append(
+                f"🌦 <b>Regime-Faktoren:</b> "
+                f"ADX={regime_ctx.get('adx', 'n/a')} | "
+                f"ATR%={regime_ctx.get('atr_pct', 'n/a')} | "
+                f"VolRatio={regime_ctx.get('volume_ratio', 'n/a')} | "
+                f"Shock%={regime_ctx.get('shock_return_pct', 'n/a')}"
             )
         gate = rt.get("risk_gate") or {}
         if gate:
@@ -993,16 +1132,23 @@ class TelegramControlPanel:
             f"PID-File: <code>{status.get('pidfile', 'n/a')}</code>"
         )
 
-    def _handle_pause(self, chat_id: str) -> None:
-        runtime_control.pause_entries()
-        runtime_state.update_engine(paused=True)
-        runtime_state.append_log("TELEGRAM /pause -> entries pausiert")
-        logger.warning("Telegram-Aktion: /pause -> neue Entries pausiert")
-        self._notifier.notify_bot_paused("telegram:/pause")
-        self._send_text(
-            chat_id,
-            "⏸️ Neue Entries wurden pausiert. Bestehende Positionen werden weiter verwaltet."
-        )
+    def _pause_resume_after(self, seconds: int, chat_id: str) -> None:
+        def _runner() -> None:
+            try:
+                time.sleep(max(1, int(seconds)))
+                runtime_control.resume_entries()
+                runtime_state.update_engine(paused=False)
+                runtime_state.append_log(f"TELEGRAM auto-resume nach /pause {seconds}s")
+                self._notifier.notify_bot_resumed("telegram:auto_resume")
+                self._send_text(
+                    chat_id,
+                    f"▶️ Auto-Resume aktiv: Pause nach {int(seconds/60)}m aufgehoben.",
+                )
+            except Exception as e:
+                logger.error("Auto-Resume Fehler: %s", e)
+
+        t = threading.Thread(target=_runner, name="tg-pause-auto-resume", daemon=True)
+        t.start()
 
     def _handle_resume(self, chat_id: str) -> None:
         runtime_control.resume_entries()
@@ -1067,6 +1213,171 @@ class TelegramControlPanel:
         except Exception as e:
             logger.error(f"Kill-Switch Deaktivierung fehlgeschlagen: {e}")
             self._send_text(chat_id, "⚠️ Kill-Switch konnte nicht deaktiviert werden.")
+
+    def _handle_pause(self, chat_id: str, text: str = "") -> None:
+        pause_seconds = _parse_pause_duration_seconds(text or "")
+        if pause_seconds is None and len(text.split()) > 1:
+            self._send_text(chat_id, "⚠️ Verwendung: /pause [30m|2h|1d]")
+            return
+
+        runtime_control.pause_entries()
+        runtime_state.update_engine(paused=True)
+        self._notifier.notify_bot_paused("telegram:/pause")
+
+        if pause_seconds and pause_seconds > 0:
+            runtime_state.append_log(
+                f"TELEGRAM /pause {pause_seconds}s -> entries pausiert"
+            )
+            logger.warning(
+                "Telegram-Aktion: /pause timed -> neue Entries pausiert (%ss)",
+                pause_seconds,
+            )
+            self._pause_resume_after(pause_seconds, chat_id)
+            self._send_text(
+                chat_id,
+                "⏸️ Neue Entries wurden pausiert.\n"
+                f"Auto-Resume in <code>{int(pause_seconds // 60)}m</code> geplant.\n"
+                "Bestehende Positionen werden weiter verwaltet.",
+            )
+            return
+
+        runtime_state.append_log("TELEGRAM /pause -> entries pausiert")
+        logger.warning("Telegram-Aktion: /pause -> neue Entries pausiert")
+        self._send_text(
+            chat_id,
+            "⏸️ Neue Entries wurden pausiert. Bestehende Positionen werden weiter verwaltet."
+        )
+
+    def _handle_kill(self, chat_id: str) -> None:
+        runtime_control.pause_entries()
+        runtime_control.enable_risk_off()
+        runtime_state.update_engine(paused=True, risk_off=True)
+        runtime_state.append_log("TELEGRAM /kill -> emergency_stop")
+        self._notifier.notify_bot_paused("telegram:/kill")
+        self._notifier.notify_risk_off(True, "telegram:/kill")
+        self._send_text(
+            chat_id,
+            "🛑 <b>NOTSTOPP aktiv</b>\n"
+            "Entries sofort gestoppt und Risk-Off aktiviert.\n"
+            "Zum Freigeben: <code>/resume</code> + <code>/riskon</code>.",
+        )
+
+    def _send_why(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        last_signal = rt.get("last_signal") or {}
+        last_decision = rt.get("last_decision") or {}
+        brain = rt.get("brain") or {}
+        selector = rt.get("selector") or {}
+        app_ctx = rt.get("app_context") or {}
+        oracle = app_ctx.get("oracle_score") or {}
+        mtf = app_ctx.get("mtf_context") or {}
+        lines = [
+            "❓ <b>/why – Entscheidungsgrund</b>",
+            f"Signal: <code>{last_signal.get('symbol', 'n/a')} {last_signal.get('side', 'n/a')}</code>",
+            f"Strategie: <code>{last_signal.get('strategy', 'n/a')}</code>",
+            f"Reason: <code>{last_signal.get('reason', 'n/a')}</code>",
+            f"Decision: <code>{last_decision.get('decision', 'n/a')}</code> | "
+            f"{last_decision.get('reason', 'n/a')}",
+            f"Brain score: <code>{brain.get('last_signal_score', 'n/a')}</code> | "
+            f"Selector winner: <code>{selector.get('winner', 'n/a')}</code>",
+        ]
+        if oracle:
+            lines.append(
+                f"Oracle: <code>{oracle.get('score', 'n/a')}</code> | "
+                f"{oracle.get('verdict', oracle.get('tier', 'n/a'))} | "
+                f"mult={oracle.get('position_multiplier', oracle.get('size_multiplier', 'n/a'))}"
+            )
+        if mtf:
+            lines.append(
+                f"MTF: <code>{mtf.get('reason', 'n/a')}</code> | support={mtf.get('support_ratio', 'n/a')}"
+            )
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_hotpairs(self, chat_id: str) -> None:
+        if not self._callbacks.get_market_status:
+            self._send_text(chat_id, "⚠️ Market-Status Callback nicht angebunden.")
+            return
+        try:
+            data = self._callbacks.get_market_status() or {}
+        except Exception as e:
+            logger.error("Hotpairs Callback-Fehler: %s", e)
+            self._send_text(chat_id, "⚠️ Konnte Hotpairs nicht lesen.")
+            return
+        pairs = list(data.get("pairs") or [])
+        stale = set(data.get("stale_symbols") or [])
+        hot = [p for p in pairs if p not in stale][:10]
+        if not hot:
+            hot = pairs[:10]
+        self._send_text(
+            chat_id,
+            "🔥 <b>Hot Pairs</b>\n"
+            f"Aktiv: <code>{', '.join(hot) if hot else 'n/a'}</code>\n"
+            f"Stale excluded: <code>{len(stale)}</code>",
+        )
+
+    def _send_confidence(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        last_signal = rt.get("last_signal") or {}
+        ranking = list(brain.get("last_strategy_ranking") or [])
+        top = ranking[0] if ranking else {}
+        self._send_text(
+            chat_id,
+            "🎯 <b>Confidence</b>\n"
+            f"Signal conf: <code>{last_signal.get('confidence', 'n/a')}</code>\n"
+            f"Brain score: <code>{brain.get('last_signal_score', 'n/a')}</code>\n"
+            f"Top ranking: <code>{top.get('strategy', 'n/a')} {top.get('side', '')} "
+            f"score={top.get('brain_score', 'n/a')}</code>",
+        )
+
+    def _send_mistakes(self, chat_id: str) -> None:
+        rows = self._repo.get_recent_trades(limit=400, status="rejected", current_mode_only=True)
+        if not rows:
+            self._send_text(chat_id, "🧩 <b>Mistakes</b>\nKeine Rejection-Daten vorhanden.")
+            return
+        counts: Dict[str, int] = {}
+        for row in rows:
+            key = str(
+                row.get("reason_rejected") or row.get("reason_open") or "unknown"
+            ).strip()[:80] or "unknown"
+            counts[key] = counts.get(key, 0) + 1
+        top = sorted(counts.items(), key=lambda x: x[1], reverse=True)[:6]
+        lines = ["🧩 <b>Häufigste Fehler (rejected)</b>"]
+        lines.extend([f"• <code>{reason}</code>: <b>{cnt}</b>" for reason, cnt in top])
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_shadow(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        enabled = list(rt.get("enabled_strategies") or [])
+        ranking = list((rt.get("brain") or {}).get("last_strategy_ranking") or [])
+        lines = [
+            "🕶 <b>Shadow-Strategien (Beobachtung)</b>",
+            f"Aktiv im Pool: <code>{', '.join(enabled) if enabled else 'n/a'}</code>",
+        ]
+        if ranking:
+            lines.append("Top Kandidaten:")
+            for row in ranking[:5]:
+                lines.append(
+                    f"• <code>{row.get('strategy')}</code> {row.get('side')} "
+                    f"(score={row.get('brain_score')}, eligible={row.get('eligible')})"
+                )
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_journal(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        perf = rt.get("performance") or {}
+        day = perf.get("daily_summary") or {}
+        snap = perf.get("snapshot") or {}
+        lines = [
+            "📓 <b>Tagesbericht</b>",
+            f"Trades: <code>{int(day.get('trades_count', 0))}</code>",
+            f"PnL: <code>{float(day.get('pnl_abs', 0.0)):+.4f}</code>",
+            f"Winrate: <code>{float(day.get('win_rate', 0.0) or 0.0):.1f}%</code>",
+            f"Best: <code>{day.get('best_strategy') or 'n/a'}</code> | "
+            f"Worst: <code>{day.get('worst_strategy') or 'n/a'}</code>",
+            f"Unrealized: <code>{float(snap.get('unrealized_pnl_total', 0.0)):+.4f}</code>",
+        ]
+        self._send_text(chat_id, "\n".join(lines))
 
     def _handle_setmode(self, chat_id: str, text: str) -> None:
         parts = text.split()
@@ -1139,4 +1450,668 @@ class TelegramControlPanel:
             "Hinweis: Meta-Selector berücksichtigt dies als Bonus, "
             "Risk-Gates bleiben unverändert aktiv."
         )
+
+    def _handle_setrisk(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setrisk <key> <value>\n"
+                "Keys: max_positions, daily_loss_limit_pct, coin_cooldown_minutes, strategy_cooldown_minutes, duplicate_signal_minutes"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "max_positions": ("max_positions_total", int, 1, 50),
+            "daily_loss_limit_pct": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "coin_cooldown_minutes": ("coin_cooldown_minutes", int, 0, 240),
+            "strategy_cooldown_minutes": ("strategy_cooldown_minutes", int, 0, 240),
+            "duplicate_signal_minutes": ("duplicate_signal_minutes", int, 0, 240),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setrisk-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _handle_setbrain(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setbrain <key> <value>\n"
+                "Keys: min_score, risky_score, perf_weight, reward_weight, reward_window, bitter_threshold"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "min_score": ("brain_min_score_to_trade", float, 0.05, 1.0),
+            "risky_score": ("brain_risky_phase_score", float, 0.05, 1.0),
+            "perf_weight": ("perf_selector_weight", float, 0.0, 1.0),
+            "reward_weight": ("brain_reward_weight", float, 0.0, 1.0),
+            "reward_window": ("brain_reward_window", int, 2, 80),
+            "bitter_threshold": ("brain_bitter_treat_block_threshold", float, -1.0, 0.0),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setbrain-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _handle_setmtf(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setmtf <key> <value>\n"
+                "Keys: enabled, entry_tf, micro_tf, setup_tf, direction_tf, context_tf, min_support_ratio, direction_strong_threshold"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "enabled": ("mtf_king_enabled", bool, None, None),
+            "entry_tf": ("mtf_entry_timeframe", str, None, None),
+            "micro_tf": ("mtf_micro_timeframe", str, None, None),
+            "setup_tf": ("mtf_setup_timeframe", str, None, None),
+            "direction_tf": ("mtf_direction_timeframe", str, None, None),
+            "context_tf": ("mtf_context_timeframe", str, None, None),
+            "min_support_ratio": ("mtf_min_support_ratio", float, 0.0, 1.0),
+            "direction_strong_threshold": ("mtf_direction_strong_threshold", float, 0.0, 5.0),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setmtf-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            if caster is bool:
+                val = value_raw.strip().lower() in {"1", "true", "yes", "on"}
+            elif caster is str:
+                val = value_raw.strip()
+                if not val:
+                    raise ValueError("empty timeframe")
+            else:
+                val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if lo is not None and hi is not None and not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _handle_setoracle(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setoracle <key> <value>\n"
+                "Keys: enabled, no_trade_below, small_below, normal_below, small_mult, top_mult",
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "enabled": ("oracle_score_enabled", bool, None, None),
+            "no_trade_below": ("oracle_no_trade_below", float, 0.0, 100.0),
+            "small_below": ("oracle_small_size_below", float, 0.0, 100.0),
+            "normal_below": ("oracle_normal_size_below", float, 0.0, 100.0),
+            "small_mult": ("oracle_small_position_multiplier", float, 0.05, 1.0),
+            "top_mult": ("oracle_top_setup_multiplier", float, 0.5, 2.0),
+            # Legacy aliases (kompatibel zu älteren Texten)
+            "block_below": ("oracle_no_trade_below", float, 0.0, 100.0),
+            "small_size_below": ("oracle_small_size_below", float, 0.0, 100.0),
+            "normal_size_below": ("oracle_normal_size_below", float, 0.0, 100.0),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setoracle-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            if caster is bool:
+                val = value_raw.strip().lower() in {"1", "true", "yes", "on"}
+            else:
+                val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if lo is not None and hi is not None and not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _send_config(self, chat_id: str) -> None:
+        text = (
+            "⚙️ <b>Runtime-Konfiguration</b>\n"
+            f"MAX_POSITIONS_TOTAL: <code>{getattr(settings, 'MAX_POSITIONS_TOTAL', 'n/a')}</code>\n"
+            f"MAX_OPEN_TRADES: <code>{getattr(settings, 'MAX_OPEN_TRADES', 'n/a')}</code>\n"
+            f"DAILY_LOSS_LIMIT_PCT: <code>{getattr(settings, 'DAILY_LOSS_LIMIT_PCT', 'n/a')}</code>\n"
+            f"BRAIN_MIN_SCORE_TO_TRADE: <code>{getattr(settings, 'BRAIN_MIN_SCORE_TO_TRADE', 'n/a')}</code>\n"
+            f"BRAIN_RISKY_PHASE_SCORE: <code>{getattr(settings, 'BRAIN_RISKY_PHASE_SCORE', 'n/a')}</code>\n"
+            f"BRAIN_REWARD_WEIGHT: <code>{getattr(settings, 'BRAIN_REWARD_WEIGHT', 'n/a')}</code>\n"
+            f"BRAIN_REWARD_WINDOW: <code>{getattr(settings, 'BRAIN_REWARD_WINDOW', 'n/a')}</code>\n"
+            f"BRAIN_BITTER_TREAT_BLOCK_THRESHOLD: <code>{getattr(settings, 'BRAIN_BITTER_TREAT_BLOCK_THRESHOLD', 'n/a')}</code>\n"
+            f"ORACLE_ENABLED: <code>{getattr(settings, 'ORACLE_SCORE_ENABLED', 'n/a')}</code>\n"
+            f"ORACLE_NO_TRADE_BELOW: <code>{getattr(settings, 'ORACLE_NO_TRADE_BELOW', 'n/a')}</code>\n"
+            f"ORACLE_SMALL_SIZE_BELOW: <code>{getattr(settings, 'ORACLE_SMALL_SIZE_BELOW', 'n/a')}</code>\n"
+            f"ORACLE_NORMAL_SIZE_BELOW: <code>{getattr(settings, 'ORACLE_NORMAL_SIZE_BELOW', 'n/a')}</code>\n"
+            f"ORACLE_SMALL_POSITION_MULTIPLIER: <code>{getattr(settings, 'ORACLE_SMALL_POSITION_MULTIPLIER', 'n/a')}</code>\n"
+            f"ORACLE_TOP_SETUP_MULTIPLIER: <code>{getattr(settings, 'ORACLE_TOP_SETUP_MULTIPLIER', 'n/a')}</code>"
+        )
+        self._send_text(chat_id, text)
+
+    def _send_brain(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        app_ctx = rt.get("app_context") or {}
+        reflection = app_ctx.get("self_reflection") or {}
+        regime_ctx = app_ctx.get("regime_context") or {}
+        ranking = list(brain.get("last_strategy_ranking") or [])
+        lines = [
+            "🧠 <b>Brain-Status</b>",
+            f"Regime: <code>{brain.get('last_regime', 'n/a')}</code>",
+            f"Score: <code>{brain.get('last_signal_score', 'n/a')}</code>",
+            f"Decision: <code>{brain.get('last_decision_reason', 'n/a')}</code>",
+            f"Risky: <code>{brain.get('risky_phase', 'n/a')}</code>",
+        ]
+        oracle = app_ctx.get("oracle_score") or {}
+        if oracle:
+            lines.extend(
+                [
+                    f"Oracle: <code>{oracle.get('score', 'n/a')}/100</code> | "
+                    f"Tier=<code>{oracle.get('verdict', oracle.get('tier', 'n/a'))}</code> | "
+                    f"Scale=<code>{oracle.get('position_multiplier', oracle.get('size_multiplier', 'n/a'))}</code>",
+                    f"Oracle reason: <code>{oracle.get('reason', 'n/a')}</code>",
+                ]
+            )
+        if regime_ctx:
+            lines.extend(
+                [
+                    f"Marktphase: <code>{regime_ctx.get('regime', 'n/a')}</code>",
+                    f"Phase-Grund: <code>{regime_ctx.get('reason', 'n/a')}</code>",
+                    "Phase-Metriken: "
+                    f"<code>ADX={regime_ctx.get('adx', 'n/a')} "
+                    f"ATR%={regime_ctx.get('atr_pct', 'n/a')} "
+                    f"VolRatio={regime_ctx.get('volume_ratio', 'n/a')} "
+                    f"Shock%={regime_ctx.get('shock_return_pct', 'n/a')}</code>",
+                ]
+            )
+        if reflection:
+            lines.extend(
+                [
+                    f"Memory pattern: <code>{reflection.get('pattern', 'n/a')}</code>",
+                    f"Memory score: <code>{reflection.get('severity_score', 0.0)}</code>",
+                    f"Memory action: <code>{', '.join(reflection.get('repair_actions', []) or ['none'])}</code>",
+                ]
+            )
+        if ranking:
+            top = ranking[0]
+            lines.append(
+                f"Top: <code>{top.get('strategy')} {top.get('side')} score={top.get('brain_score')}</code>"
+            )
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_regime(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        app_ctx = rt.get("app_context") or {}
+        regime_ctx = app_ctx.get("regime_context") or {}
+        detected = app_ctx.get("detected_regime") or brain.get("last_regime") or "n/a"
+        if not regime_ctx:
+            self._send_text(
+                chat_id,
+                "🌦 <b>Markt-Regime</b>\n"
+                f"Phase: <code>{detected}</code>\n"
+                "Details: <code>n/a</code>\n"
+                "Hinweis: Noch kein vollständiger Regime-Kontext im Runtime-State.",
+            )
+            return
+
+        text = (
+            "🌦 <b>Markt-Regime</b>\n"
+            f"Phase: <code>{regime_ctx.get('regime', detected)}</code>\n"
+            f"Grund: <code>{regime_ctx.get('reason', 'n/a')}</code>\n"
+            f"Trend: <code>{regime_ctx.get('trend_direction', 'n/a')}</code>\n"
+            "Metriken:\n"
+            f"• ADX: <code>{regime_ctx.get('adx', 'n/a')}</code>\n"
+            f"• ATR%: <code>{regime_ctx.get('atr_pct', 'n/a')}</code>\n"
+            f"• EMA Slope%: <code>{regime_ctx.get('ema_slope_pct', 'n/a')}</code>\n"
+            f"• BB Width%: <code>{regime_ctx.get('bb_width_pct', 'n/a')}</code>\n"
+            f"• VolRatio: <code>{regime_ctx.get('volume_ratio', 'n/a')}</code>\n"
+            f"• Shock%: <code>{regime_ctx.get('shock_return_pct', 'n/a')}</code>\n"
+            f"• Cascade%: <code>{regime_ctx.get('cascade_move_pct', 'n/a')}</code>\n"
+            f"• Swing12%: <code>{regime_ctx.get('swing_12_pct', 'n/a')}</code>\n"
+            f"• Retrace%: <code>{regime_ctx.get('retrace_from_high_pct', 'n/a')}</code>"
+        )
+        mtf = app_ctx.get("mtf_context") or {}
+        if mtf:
+            frames = list(mtf.get("frames") or [])
+            detail_lines = []
+            for row in frames:
+                detail_lines.append(
+                    f"• {row.get('tf', 'n/a')}: {row.get('relation', 'n/a')} | "
+                    f"{row.get('regime', 'n/a')} ({row.get('trend', 'n/a')})"
+                )
+            details = "\n".join(detail_lines) if detail_lines else "• n/a"
+            text += (
+                "\n\n🕒 <b>MTF-Gate</b>\n"
+                f"Allowed: <code>{mtf.get('allowed', 'n/a')}</code>\n"
+                f"Reason: <code>{mtf.get('reason', 'n/a')}</code>\n"
+                f"Entry TF: <code>{mtf.get('entry_timeframe', 'n/a')}</code> | "
+                f"Direction TF: <code>{mtf.get('direction_timeframe', 'n/a')}</code> | "
+                f"Context TF: <code>{mtf.get('context_timeframe', 'n/a')}</code>\n"
+                f"Opposing hard/total: <code>{mtf.get('opposing_hard', 0)}/{mtf.get('opposing_total', 0)}</code>\n"
+                "Frames:\n"
+                f"{details}"
+            )
+        self._send_text(chat_id, text)
+
+    def _send_markets(self, chat_id: str) -> None:
+        if not self._callbacks.get_market_status:
+            self._send_text(chat_id, "⚠️ Market-Status Callback nicht angebunden.")
+            return
+        try:
+            data = self._callbacks.get_market_status() or {}
+        except Exception as e:
+            logger.error("Market-Status Callback-Fehler: %s", e)
+            self._send_text(chat_id, "⚠️ Konnte Market-Status nicht lesen.")
+            return
+        pairs = data.get("pairs") or []
+        stale = data.get("stale_symbols") or []
+        text = (
+            "📈 <b>Market-Status</b>\n"
+            f"Pairs aktiv: <code>{data.get('pair_count', len(pairs))}</code>\n"
+            f"Open Positions: <code>{data.get('open_positions', 0)}</code>\n"
+            f"Stale Symbols: <code>{len(stale)}</code>\n"
+            f"Sample Pairs: <code>{', '.join(pairs[:8]) if pairs else 'n/a'}</code>"
+        )
+        self._send_text(chat_id, text)
+
+    def _handle_autoheal(self, chat_id: str) -> None:
+        if not self._callbacks.request_auto_heal:
+            self._send_text(chat_id, "⚠️ Autoheal-Callback nicht angebunden.")
+            return
+        try:
+            ok, msg = self._callbacks.request_auto_heal()
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+        except Exception as e:
+            logger.error("Autoheal-Callback-Fehler: %s", e)
+            self._send_text(chat_id, "⚠️ Autoheal fehlgeschlagen.")
+
+    def _send_master_status(self, chat_id: str) -> None:
+        if not self._callbacks.get_master_status:
+            self._send_text(chat_id, "⚠️ Master-Status Callback nicht angebunden.")
+            return
+        try:
+            data = self._callbacks.get_master_status() or {}
+        except Exception as e:
+            logger.error("Master-Status Callback-Fehler: %s", e)
+            self._send_text(chat_id, "⚠️ Konnte Master-Status nicht lesen.")
+            return
+        text = (
+            "🧠 <b>Master-Status</b>\n"
+            f"Enabled: <code>{data.get('enabled', False)}</code>\n"
+            f"Min Trades: <code>{data.get('min_trades', 'n/a')}</code>\n"
+            f"Target Winrate: <code>{data.get('target_winrate_pct', 'n/a')}%</code>\n"
+            f"Last Winrate: <code>{data.get('last_winrate_pct', 'n/a')}%</code>\n"
+            f"Consecutive Fails: <code>{data.get('consecutive_fail_windows', 0)}</code>\n"
+            f"Auto Pause: <code>{data.get('auto_paused', False)}</code>\n"
+            f"Cadence Level: <code>{data.get('cadence_level', 0)}</code> | "
+            f"Entries today: <code>{data.get('entries_today', 0)}/{data.get('target_trades_per_day', 'n/a')}</code>\n"
+            f"Cadence Override until: <code>{data.get('cadence_override_until', 'n/a')}</code>\n"
+            f"Last Reason: <code>{data.get('last_reason', 'n/a')}</code>\n"
+            f"Last Snapshot: <code>{data.get('last_snapshot_file', 'n/a')}</code>"
+        )
+        self._send_text(chat_id, text)
+
+    def _send_ampel(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        gate = rt.get("risk_gate") or {}
+        brain = rt.get("brain") or {}
+        stale_count = 0
+        try:
+            stale_count = len((self._callbacks.get_market_status() or {}).get("stale_symbols") or [])
+        except Exception:
+            stale_count = 0
+
+        paused = bool(rt.get("paused", False))
+        risk_off = bool(rt.get("risk_off", False))
+        risky = bool(brain.get("risky_phase", False))
+        gate_reason = str(gate.get("last_gate_reason", "n/a"))
+        open_pos = int(gate.get("open_positions", rt.get("open_positions", 0)) or 0)
+        max_pos = int(gate.get("max_open_positions", getattr(settings, "MAX_POSITIONS_TOTAL", 0)) or 0)
+
+        if paused or risk_off or stale_count > 0:
+            state = "🔴 RED"
+            reason = "Pause/RiskOff oder stale Daten aktiv"
+        elif "DAILY LOSS" in gate_reason.upper() or "MAX TRADES" in gate_reason.upper():
+            state = "🔴 RED"
+            reason = gate_reason
+        elif risky or (open_pos >= max_pos and max_pos > 0):
+            state = "🟡 YELLOW"
+            reason = "Risky-Phase oder Positionslimit erreicht"
+        else:
+            state = "🟢 GREEN"
+            reason = "Bedingungen für neue Entries sind grundsätzlich ok"
+
+        self._send_text(
+            chat_id,
+            "🚦 <b>Ampel</b>\n"
+            f"State: <code>{state}</code>\n"
+            f"Reason: <code>{reason}</code>\n"
+            f"Gate: <code>{gate_reason}</code>\n"
+            f"Paused/RiskOff: <code>{paused}/{risk_off}</code>\n"
+            f"Open: <code>{open_pos}/{max_pos}</code>\n"
+            f"Brain risky: <code>{risky}</code>\n"
+            f"Stale symbols: <code>{stale_count}</code>",
+        )
+
+    def _send_ampel_debug(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        gate = rt.get("risk_gate") or {}
+        brain = rt.get("brain") or {}
+        master = {}
+        if self._callbacks.get_master_status:
+            try:
+                master = self._callbacks.get_master_status() or {}
+            except Exception:
+                master = {}
+        markets = {}
+        if self._callbacks.get_market_status:
+            try:
+                markets = self._callbacks.get_market_status() or {}
+            except Exception:
+                markets = {}
+        self._send_text(
+            chat_id,
+            "🚦 <b>Ampel Debug</b>\n"
+            f"Gate last: <code>{gate.get('last_gate_reason', 'n/a')}</code>\n"
+            f"Startup OK: <code>{gate.get('recovery_startup_ok', 'n/a')}</code>\n"
+            f"Blocked symbols: <code>{len(gate.get('recovery_blocked_symbols', []) or [])}</code>\n"
+            f"Paused/RiskOff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>\n"
+            f"Brain score/risky: <code>{brain.get('last_signal_score', 'n/a')}/{brain.get('risky_phase', 'n/a')}</code>\n"
+            f"Master enabled: <code>{master.get('enabled', 'n/a')}</code> | "
+            f"winrate: <code>{master.get('last_winrate_pct', 'n/a')}%</code>\n"
+            f"Cadence level: <code>{master.get('cadence_level', 0)}</code> | "
+            f"entries: <code>{master.get('entries_today', 0)}/{master.get('target_trades_per_day', 'n/a')}</code>\n"
+            f"Cadence override until: <code>{master.get('cadence_override_until', 'n/a')}</code>\n"
+            f"Master reason: <code>{master.get('last_reason', 'n/a')}</code>\n"
+            f"Stale symbols: <code>{len(markets.get('stale_symbols', []) or [])}</code>",
+        )
+
+    def _handle_ampelauto(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        action = parts[1].strip().lower() if len(parts) > 1 else "status"
+        if action == "status":
+            self._send_master_status(chat_id)
+            return
+        if action not in {"on", "off"}:
+            self._send_legacy_ampel_help(chat_id)
+            return
+        if not self._callbacks.apply_runtime_settings:
+            self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+            return
+        target = action == "on"
+        ok, msg = self._callbacks.apply_runtime_settings({"master_brain_enabled": target})
+        self._send_text(chat_id, f"{'✅' if ok else '⚠️'} AMPEL_AUTO enabled={target} | {msg}")
+
+    def _handle_ampel_min_trades(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 2:
+            self._send_text(chat_id, "Verwendung: /ampel_min_trades <anzahl>")
+            return
+        try:
+            val = int(parts[1].strip())
+        except Exception:
+            self._send_text(chat_id, f"Ungültige Zahl: {parts[1].strip()}")
+            return
+        if not self._callbacks.apply_runtime_settings:
+            self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.apply_runtime_settings({"master_brain_min_trades": val})
+        self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+
+    def _handle_setprofile(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 2:
+            self._send_text(chat_id, "Verwendung: /setprofile <growth|scalping|defensive|hf75>")
+            return
+        profile = parts[1].strip().lower()
+        presets = {
+            "growth": {
+                "daily_loss_limit_pct": 8.0,
+                "coin_cooldown_minutes": 6,
+                "strategy_cooldown_minutes": 3,
+                "duplicate_signal_minutes": 2,
+                "brain_min_score_to_trade": 0.42,
+                "brain_risky_phase_score": 0.32,
+                "brain_reward_weight": 0.20,
+                "brain_reward_window": 24,
+                "master_brain_target_winrate_pct": 70.0,
+            },
+            "scalping": {
+                "daily_loss_limit_pct": 9.0,
+                "coin_cooldown_minutes": 2,
+                "strategy_cooldown_minutes": 1,
+                "duplicate_signal_minutes": 1,
+                "brain_min_score_to_trade": 0.34,
+                "brain_risky_phase_score": 0.26,
+                "brain_reward_weight": 0.22,
+                "brain_reward_window": 16,
+                "master_brain_target_winrate_pct": 70.0,
+            },
+            "defensive": {
+                "daily_loss_limit_pct": 5.0,
+                "coin_cooldown_minutes": 15,
+                "strategy_cooldown_minutes": 8,
+                "duplicate_signal_minutes": 6,
+                "brain_min_score_to_trade": 0.52,
+                "brain_risky_phase_score": 0.40,
+                "brain_reward_weight": 0.16,
+                "brain_reward_window": 28,
+                "master_brain_target_winrate_pct": 70.0,
+            },
+            "hf75": {
+                "daily_loss_limit_pct": 10.0,
+                "coin_cooldown_minutes": 3,
+                "strategy_cooldown_minutes": 2,
+                "duplicate_signal_minutes": 1,
+                "brain_min_score_to_trade": 0.30,
+                "brain_risky_phase_score": 0.24,
+                "brain_reward_weight": 0.24,
+                "brain_reward_window": 14,
+                "master_brain_target_winrate_pct": 75.0,
+                "master_brain_fail_windows": 3,
+            },
+        }
+        if profile not in presets:
+            self._send_text(chat_id, f"Unbekanntes Profil: {profile}")
+            return
+        if not self._callbacks.apply_runtime_settings:
+            self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.apply_runtime_settings(presets[profile])
+        self._send_text(chat_id, f"{'✅' if ok else '⚠️'} Profil <code>{profile}</code> gesetzt.\n{msg}")
+
+    def _handle_testtrade(self, chat_id: str) -> None:
+        if self._callbacks.request_test_trade:
+            ok, msg = self._callbacks.request_test_trade()
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        rt = self._safe_runtime_status()
+        self._send_text(
+            chat_id,
+            "🧪 <b>Testtrade-Bridge</b>\n"
+            "Direkter Testtrade ist in diesem Build nicht als harte Market-Order verdrahtet.\n"
+            "Stattdessen Schnellcheck:\n"
+            f"• running: <code>{rt.get('running', False)}</code>\n"
+            f"• paused/riskoff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>\n"
+            "Nutze /unlock und danach /markets + /ampeldebug für sofortige Diagnostik.",
+        )
+
+    def _handle_unlock(self, chat_id: str) -> None:
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+        runtime_state.append_log("TELEGRAM /unlock -> pause+riskoff aufgehoben")
+        self._send_text(chat_id, "✅ Unlock ausgeführt: Pause/Risk-Off aufgehoben.")
+
+    def _handle_safemode(self, chat_id: str) -> None:
+        runtime_control.pause_entries()
+        runtime_control.enable_risk_off()
+        runtime_state.update_engine(paused=True, risk_off=True)
+        runtime_state.append_log("TELEGRAM /safemode -> pause+riskoff gesetzt")
+        self._send_text(chat_id, "🛡 SafeMode aktiv: Neue Entries pausiert und Risk-Off gesetzt.")
+
+    def _send_recovery(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        gate = rt.get("risk_gate") or {}
+        text = (
+            "🧯 <b>Recovery-Status</b>\n"
+            f"Startup OK: <code>{gate.get('recovery_startup_ok', 'n/a')}</code>\n"
+            f"Startup Reason: <code>{gate.get('recovery_startup_reason', 'n/a')}</code>\n"
+            f"Blocked Symbols: <code>{len(gate.get('recovery_blocked_symbols', []) or [])}</code>\n"
+            f"Paused/RiskOff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>\n"
+            f"Last Gate: <code>{gate.get('last_gate_reason', 'n/a')}</code>"
+        )
+        self._send_text(chat_id, text)
+
+    def _handle_snapshot(self, chat_id: str) -> None:
+        if not self._callbacks.request_auto_heal:
+            self._send_text(chat_id, "⚠️ Snapshot/Autoheal Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.request_auto_heal()
+        self._send_text(
+            chat_id,
+            f"{'✅' if ok else '⚠️'} Snapshot-Heal ausgeführt.\n<code>{msg}</code>",
+        )
+
+    def _handle_close_oldest(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        close_count = 5
+        keep_newest = 5
+        if len(parts) >= 2:
+            try:
+                close_count = int(parts[1].strip())
+            except Exception:
+                self._send_text(
+                    chat_id,
+                    "Ungültige Anzahl. Verwendung: /closeoldest <anzahl> [keep_newest]",
+                )
+                return
+        if len(parts) >= 3:
+            try:
+                keep_newest = int(parts[2].strip())
+            except Exception:
+                self._send_text(
+                    chat_id,
+                    "Ungültiger keep_newest-Wert. Verwendung: /closeoldest <anzahl> [keep_newest]",
+                )
+                return
+        close_count = max(1, min(20, close_count))
+        keep_newest = max(0, min(50, keep_newest))
+        if not self._callbacks.request_close_oldest_open_trades:
+            self._send_text(chat_id, "⚠️ Close-Oldest-Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.request_close_oldest_open_trades(
+            close_count, keep_newest
+        )
+        self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+
+    def _handle_setmaster(self, chat_id: str, text: str) -> None:
+        parts = text.split()
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setmaster <key> <value>\n"
+                "Keys: enabled, min_trades, target_winrate, fail_windows, auto_pause",
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "enabled": ("master_brain_enabled", lambda x: str(x).strip().lower() in {"1", "true", "yes", "on"}),
+            "min_trades": ("master_brain_min_trades", int),
+            "target_winrate": ("master_brain_target_winrate_pct", float),
+            "fail_windows": ("master_brain_fail_windows", int),
+            "auto_pause": ("master_brain_auto_pause", lambda x: str(x).strip().lower() in {"1", "true", "yes", "on"}),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter master-Key: {key}")
+            return
+        runtime_key, caster = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _send_ops(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        self._send_text(
+            chat_id,
+            "🛠 <b>Ops-Panel</b>\n"
+            "• /repair oder /autoheal: automatische Reparatur + Snapshot\n"
+            "• /unlock: Pause/Risk-Off aufheben\n"
+            "• /safemode: Pause/Risk-Off setzen\n"
+            "• /recovery: Startup-/Recovery-Blocker anzeigen\n"
+            "• /snapshot: sofort Snapshot+Heal triggern\n"
+            "• /closeoldest <n> [keep_newest]: älteste offene Trades schließen\n"
+            "• /setrisk max_positions 8\n"
+            "• /setmaster target_winrate 55\n"
+            f"Aktuell pause/riskoff: <code>{rt.get('paused', False)}/{rt.get('risk_off', False)}</code>",
+        )
+
+    def _send_legacy_info(self, chat_id: str) -> None:
+        self._send_text(
+            chat_id,
+            "ℹ️ <b>Legacy-Befehl erkannt</b>\n"
+            "Dieser Befehl wurde in der aktuellen Version nicht mehr als eigener Command geführt.\n"
+            "Nutze bitte stattdessen:\n"
+            "• /ops (Repair/Unlock/SafeMode)\n"
+            "• /masterstatus und /setmaster ...\n"
+            "• /brain, /setbrain ...\n"
+            "• /risk, /setrisk ...\n"
+            "Wenn du einen ganz bestimmten alten Befehl 1:1 zurück willst, sende den exakten Namen."
+        )
+
 

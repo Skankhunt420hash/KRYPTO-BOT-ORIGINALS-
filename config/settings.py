@@ -82,7 +82,7 @@ class Settings:
     MAX_POSITION_SIZE_PERCENT: float = float(
         os.getenv("MAX_POSITION_SIZE_PERCENT", 2.0)
     )
-    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 5))
+    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 8))
     STOP_LOSS_PERCENT: float = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
     TAKE_PROFIT_PERCENT: float = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
     TRAILING_STOP: bool = os.getenv("TRAILING_STOP", "false").lower() == "true"
@@ -171,6 +171,21 @@ class Settings:
     RECOVERY_MAX_OPEN_TRADES_RESTORE: int = int(
         os.getenv("RECOVERY_MAX_OPEN_TRADES_RESTORE", 100)
     )
+    # Startup-Gate zyklisch neu prüfen, damit temporäre Boot-Fehler
+    # den Bot nicht dauerhaft blockieren.
+    STARTUP_GATE_RECHECK_SEC: int = int(
+        os.getenv("STARTUP_GATE_RECHECK_SEC", 180)
+    )
+    # Recovery-Blocks auf Symbolen laufen nach TTL aus, wenn keine
+    # offene Position dazu mehr existiert.
+    RECOVERY_BLOCK_SYMBOL_TTL_MINUTES: int = int(
+        os.getenv("RECOVERY_BLOCK_SYMBOL_TTL_MINUTES", 120)
+    )
+    # Bei sauberem Startup stale Pause/RiskOff aus Recovery-Datei automatisch lösen.
+    RECOVERY_AUTO_RESUME_ON_CLEAN_STARTUP: bool = _env_bool(
+        "RECOVERY_AUTO_RESUME_ON_CLEAN_STARTUP",
+        default=True,
+    )
     # Exchange-Read-Retry (nur read-only Calls, keine Mehrfachorders)
     EXCHANGE_READ_RETRY_MAX: int = int(os.getenv("EXCHANGE_READ_RETRY_MAX", 2))
     EXCHANGE_READ_RETRY_BACKOFF_SEC: float = float(
@@ -217,6 +232,79 @@ class Settings:
 
     # Mindest-RR für aktionsfähige Signale
     MIN_RR: float = float(os.getenv("MIN_RR", 1.5))
+
+    # ------------------------------------------------------------------
+    # Multi-Timeframe-King (Entry klein, Erlaubnis groß)
+    # ------------------------------------------------------------------
+    # Prinzip:
+    # - Entry-Timeframe liefert Timing (z.B. 1m)
+    # - Höhere Timeframes (5m/15m/1h/4h) geben Freigabe oder Block
+    # - Ein Entry wird blockiert, wenn höhere Ebenen klar dagegen sprechen
+    MTF_KING_ENABLED: bool = _env_bool(
+        "MTF_KING_ENABLED", fallback="MTF_GATE_ENABLED", default=True
+    )
+    MTF_ENTRY_TIMEFRAME: str = _first_non_empty(
+        "MTF_ENTRY_TIMEFRAME", default="1m"
+    ).strip()
+    MTF_MICRO_TIMEFRAME: str = _first_non_empty(
+        "MTF_MICRO_TIMEFRAME", default="5m"
+    ).strip()
+    MTF_SETUP_TIMEFRAME: str = _first_non_empty(
+        "MTF_SETUP_TIMEFRAME", "MTF_CONFIRM_TIMEFRAME", default="15m"
+    ).strip()
+    MTF_DIRECTION_TIMEFRAME: str = _first_non_empty(
+        "MTF_DIRECTION_TIMEFRAME", default="1h"
+    ).strip()
+    MTF_CONTEXT_TIMEFRAME: str = _first_non_empty(
+        "MTF_CONTEXT_TIMEFRAME", default="4h"
+    ).strip()
+    MTF_CANDLE_LIMIT: int = int(
+        _first_non_empty("MTF_CANDLE_LIMIT", "MTF_FETCH_LIMIT", default="220")
+    )
+    MTF_CACHE_TTL_SEC: int = int(os.getenv("MTF_CACHE_TTL_SEC", 45))
+    # Bias-Heuristik je Timeframe:
+    # Trend gilt erst als klar, wenn EMA-Slope + EMA-Gap beide ausreichend sind.
+    MTF_BIAS_MIN_SLOPE_PCT: float = float(os.getenv("MTF_BIAS_MIN_SLOPE_PCT", 0.05))
+    MTF_BIAS_MIN_EMA_GAP_PCT: float = float(os.getenv("MTF_BIAS_MIN_EMA_GAP_PCT", 0.08))
+    # Gate-Logik:
+    # - harte Sperre, wenn 1h/4h klar entgegenstehen
+    # - zusätzlich Mindest-Support über alle höheren Ebenen
+    MTF_DIRECTION_STRONG_THRESHOLD: float = float(
+        os.getenv("MTF_DIRECTION_STRONG_THRESHOLD", 0.18)
+    )
+    MTF_MIN_SUPPORT_RATIO: float = float(os.getenv("MTF_MIN_SUPPORT_RATIO", 0.50))
+
+    # ------------------------------------------------------------------
+    # Oracle Score (0..100) – finale Qualitätsbewertung je Entry
+    # ------------------------------------------------------------------
+    ORACLE_SCORE_ENABLED: bool = _env_bool("ORACLE_SCORE_ENABLED", default=True)
+    # Unterhalb: kein Trade
+    ORACLE_NO_TRADE_BELOW: float = float(
+        _first_non_empty("ORACLE_NO_TRADE_BELOW", "ORACLE_MIN_TRADE_SCORE", default="60.0")
+    )
+    # 60..75: kleine Position
+    ORACLE_SMALL_SIZE_BELOW: float = float(
+        _first_non_empty("ORACLE_SMALL_SIZE_BELOW", "ORACLE_SMALL_SIZE_MAX_SCORE", default="75.0")
+    )
+    # 75..88: normal, >=88: Top-Setup
+    ORACLE_NORMAL_SIZE_BELOW: float = float(
+        _first_non_empty("ORACLE_NORMAL_SIZE_BELOW", "ORACLE_NORMAL_SIZE_MAX_SCORE", default="88.0")
+    )
+    ORACLE_SMALL_POSITION_MULTIPLIER: float = float(
+        _first_non_empty(
+            "ORACLE_SMALL_POSITION_MULTIPLIER",
+            "ORACLE_SMALL_SIZE_MULTIPLIER",
+            default="0.60",
+        )
+    )
+    # Sicherheitshalber standardmäßig kein Upsize bei Top-Setup
+    ORACLE_TOP_SETUP_MULTIPLIER: float = float(
+        _first_non_empty(
+            "ORACLE_TOP_SETUP_MULTIPLIER",
+            "ORACLE_TOP_SIZE_MULTIPLIER",
+            default="1.00",
+        )
+    )
 
     # ------------------------------------------------------------------
     # Risk Engine Cooldowns & Limits
@@ -313,6 +401,41 @@ class Settings:
     BRAIN_RISKY_PHASE_SCORE: float = float(
         os.getenv("BRAIN_RISKY_PHASE_SCORE", 0.35)
     )
+    # Kurzfristiges Reward-System für den Brain-Score:
+    # beeinflusst die Strategieauswahl anhand jüngster Outcomes.
+    BRAIN_REWARD_WEIGHT: float = float(os.getenv("BRAIN_REWARD_WEIGHT", 0.18))
+    BRAIN_REWARD_WINDOW: int = int(os.getenv("BRAIN_REWARD_WINDOW", 16))
+    # Anteil des Reward-Bias direkt im Brain-Ranking.
+    BRAIN_REWARD_BRAIN_WEIGHT: float = float(
+        os.getenv("BRAIN_REWARD_BRAIN_WEIGHT", 0.12)
+    )
+    # Positive Trades ("süßes Leckerli") verstärken funktionierende Muster.
+    BRAIN_POSITIVE_TREAT_MULTIPLIER: float = float(
+        os.getenv("BRAIN_POSITIVE_TREAT_MULTIPLIER", 1.35)
+    )
+    # Negative Trades ("bitteres Leckerli") bestrafen schlechte Muster stärker.
+    BRAIN_BITTER_TREAT_MULTIPLIER: float = float(
+        os.getenv("BRAIN_BITTER_TREAT_MULTIPLIER", 2.25)
+    )
+    # Harte Sperre bei sehr negativem Reward-Bias.
+    # Beispiel: -0.55 => starke Verlustserie für diese Strategie.
+    BRAIN_BITTER_TREAT_BLOCK_THRESHOLD: float = float(
+        os.getenv("BRAIN_BITTER_TREAT_BLOCK_THRESHOLD", -0.55)
+    )
+    # Mindesthistorie, bevor das Bitter-Gate hart blockiert.
+    BRAIN_BITTER_TREAT_MIN_TRADES: int = int(
+        os.getenv("BRAIN_BITTER_TREAT_MIN_TRADES", 8)
+    )
+    # Zusätzliche Guardrails, damit das Bitter-Gate nicht dauerhaft alles blockiert.
+    BRAIN_BITTER_TREAT_MIN_LOSING_STREAK: int = int(
+        os.getenv("BRAIN_BITTER_TREAT_MIN_LOSING_STREAK", 3)
+    )
+    BRAIN_BITTER_TREAT_MAX_RECENCY_WR_PCT: float = float(
+        os.getenv("BRAIN_BITTER_TREAT_MAX_RECENCY_WR_PCT", 45.0)
+    )
+    BRAIN_BITTER_TREAT_MAX_STALE_HOURS: float = float(
+        os.getenv("BRAIN_BITTER_TREAT_MAX_STALE_HOURS", 6.0)
+    )
 
     # ------------------------------------------------------------------
     # Portfolio Risk Engine & Position Sizing
@@ -345,7 +468,108 @@ class Settings:
     MAX_TOTAL_OPEN_RISK_PCT: float = float(os.getenv("MAX_TOTAL_OPEN_RISK_PCT", 10.0))
 
     # Max. gleichzeitige Positionen gesamt / pro Symbol / pro Strategie
-    MAX_POSITIONS_TOTAL: int = int(os.getenv("MAX_POSITIONS_TOTAL", 5))
+    MAX_POSITIONS_TOTAL: int = int(os.getenv("MAX_POSITIONS_TOTAL", 8))
+
+    # Master-Brain Watchdog: überwacht Underperformance und startet Auto-Heal + Snapshot.
+    MASTER_BRAIN_ENABLED: bool = _env_bool("MASTER_BRAIN_ENABLED", default=True)
+    MASTER_BRAIN_MIN_TRADES: int = int(os.getenv("MASTER_BRAIN_MIN_TRADES", 60))
+    MASTER_BRAIN_TARGET_WINRATE_PCT: float = float(
+        os.getenv("MASTER_BRAIN_TARGET_WINRATE_PCT", 70.0)
+    )
+    MASTER_BRAIN_FAIL_WINDOWS: int = int(os.getenv("MASTER_BRAIN_FAIL_WINDOWS", 2))
+    MASTER_BRAIN_AUTO_PAUSE: bool = _env_bool("MASTER_BRAIN_AUTO_PAUSE", default=True)
+    MASTER_BRAIN_MAX_AUTOHEAL_ALERTS_PER_HOUR: int = int(
+        os.getenv("MASTER_BRAIN_MAX_AUTOHEAL_ALERTS_PER_HOUR", 1)
+    )
+    MASTER_BRAIN_MIN_PAUSE_MINUTES: int = int(
+        os.getenv("MASTER_BRAIN_MIN_PAUSE_MINUTES", 45)
+    )
+    # Entry-Cadence-Guard: verhindert lange Entry-Stillephasen, indem Entry-Filter
+    # kontrolliert gelockert werden, bis wieder Trades kommen.
+    ENTRY_CADENCE_GUARD_ENABLED: bool = _env_bool(
+        "ENTRY_CADENCE_GUARD_ENABLED", default=True
+    )
+    ENTRY_CADENCE_TARGET_TRADES_PER_DAY: int = int(
+        os.getenv("ENTRY_CADENCE_TARGET_TRADES_PER_DAY", 9)
+    )
+    ENTRY_CADENCE_INACTIVITY_MINUTES: int = int(
+        os.getenv("ENTRY_CADENCE_INACTIVITY_MINUTES", 90)
+    )
+    ENTRY_CADENCE_RELAX_MIN_CONF_STEP: float = float(
+        os.getenv("ENTRY_CADENCE_RELAX_MIN_CONF_STEP", 3.0)
+    )
+    ENTRY_CADENCE_RELAX_MIN_RR_STEP: float = float(
+        os.getenv("ENTRY_CADENCE_RELAX_MIN_RR_STEP", 0.06)
+    )
+    ENTRY_CADENCE_RELAX_MIN_WIN_CHANCE_STEP: float = float(
+        os.getenv("ENTRY_CADENCE_RELAX_MIN_WIN_CHANCE_STEP", 2.5)
+    )
+    ENTRY_CADENCE_RELAX_BRAIN_SCORE_STEP: float = float(
+        os.getenv("ENTRY_CADENCE_RELAX_BRAIN_SCORE_STEP", 0.025)
+    )
+    ENTRY_CADENCE_MIN_CONFIDENCE_FLOOR: float = float(
+        os.getenv("ENTRY_CADENCE_MIN_CONFIDENCE_FLOOR", 30.0)
+    )
+    ENTRY_CADENCE_MIN_RR_FLOOR: float = float(
+        os.getenv("ENTRY_CADENCE_MIN_RR_FLOOR", 1.10)
+    )
+    ENTRY_CADENCE_MIN_WIN_CHANCE_FLOOR: float = float(
+        os.getenv("ENTRY_CADENCE_MIN_WIN_CHANCE_FLOOR", 62.0)
+    )
+    ENTRY_CADENCE_BRAIN_SCORE_FLOOR: float = float(
+        os.getenv("ENTRY_CADENCE_BRAIN_SCORE_FLOOR", 0.20)
+    )
+    ENTRY_CADENCE_MASTER_OVERRIDE_MINUTES: int = int(
+        os.getenv("ENTRY_CADENCE_MASTER_OVERRIDE_MINUTES", 180)
+    )
+    # Selbstreflexion + Memory: erkennt wiederkehrende Ampel-/Gate-Probleme
+    # und startet kontrollierte Auto-Reparaturen.
+    SELF_REFLECTION_ENABLED: bool = _env_bool("SELF_REFLECTION_ENABLED", default=True)
+    SELF_REFLECTION_MEMORY_FILE: str = os.getenv(
+        "SELF_REFLECTION_MEMORY_FILE", "data/self_reflection_memory.json"
+    )
+    SELF_REFLECTION_WINDOW_MINUTES: int = int(
+        _first_non_empty(
+            "SELF_REFLECTION_WINDOW_MINUTES",
+            "SELF_REFLECTION_WINDOW",
+            default="240",
+        )
+    )
+    SELF_REFLECTION_ISSUE_THRESHOLD: int = int(
+        os.getenv("SELF_REFLECTION_ISSUE_THRESHOLD", 6)
+    )
+    SELF_REFLECTION_REPAIR_TRIGGER_SCORE: float = float(
+        os.getenv("SELF_REFLECTION_REPAIR_TRIGGER_SCORE", 0.60)
+    )
+    SELF_REFLECTION_MAX_EVENTS: int = int(
+        os.getenv("SELF_REFLECTION_MAX_EVENTS", 500)
+    )
+    SELF_REFLECTION_AMPEL_MIN_EVENTS: int = int(
+        os.getenv("SELF_REFLECTION_AMPEL_MIN_EVENTS", 4)
+    )
+    SELF_REFLECTION_COOLDOWN_MINUTES: int = int(
+        _first_non_empty(
+            "SELF_REFLECTION_COOLDOWN_MINUTES",
+            "SELF_REFLECTION_REPAIR_COOLDOWN_MINUTES",
+            default="30",
+        )
+    )
+    SELF_REFLECTION_REPAIR_COOLDOWN_MINUTES: int = int(
+        _first_non_empty(
+            "SELF_REFLECTION_REPAIR_COOLDOWN_MINUTES",
+            "SELF_REFLECTION_COOLDOWN_MINUTES",
+            default="30",
+        )
+    )
+    SELF_REFLECTION_MASTER_GUARD_ENABLED: bool = _env_bool(
+        "SELF_REFLECTION_MASTER_GUARD_ENABLED", default=True
+    )
+    SELF_REFLECTION_MAX_REPAIRS_PER_DAY: int = int(
+        os.getenv("SELF_REFLECTION_MAX_REPAIRS_PER_DAY", 8)
+    )
+    SELF_REFLECTION_MAX_POSITIONS_CEIL: int = int(
+        os.getenv("SELF_REFLECTION_MAX_POSITIONS_CEIL", 12)
+    )
     MAX_POSITIONS_PER_SYMBOL: int = int(os.getenv("MAX_POSITIONS_PER_SYMBOL", 1))
     MAX_STRATEGY_POSITIONS: int = int(os.getenv("MAX_STRATEGY_POSITIONS", 2))
 

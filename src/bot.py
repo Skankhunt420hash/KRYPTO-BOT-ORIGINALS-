@@ -905,6 +905,8 @@ class MultiStrategyBot:
         self._master_auto_paused: bool = False
         self._master_last_reason: str = "init"
         self._master_last_snapshot_file: str = "n/a"
+        self._master_autoheal_alert_window_ts: float = 0.0
+        self._master_autoheal_alert_count: int = 0
         self._master_cadence_override_until_ts: float = 0.0
         self._started_at_ts: float = time.time()
         self._last_entry_open_ts: float = 0.0
@@ -3898,10 +3900,17 @@ class MultiStrategyBot:
             self._master_last_reason += " | cadence_override_active"
             return
 
+        already_auto_paused = bool(self._master_auto_paused)
+        if already_auto_paused:
+            # Bereits pausiert: nicht in jedem Zyklus erneut Alarm/Snapshot-Spam senden.
+            self._master_last_reason += " | already_auto_paused"
+            return
+
         if bool(getattr(settings, "MASTER_BRAIN_AUTO_PAUSE", True)):
             runtime_control.pause_entries()
             runtime_control.enable_risk_off()
             self._master_auto_paused = True
+
         snap_ok, snap_msg = self._save_master_snapshot("auto_watchdog_under_target_winrate")
         if snap_ok:
             self._master_last_snapshot_file = snap_msg
@@ -3909,6 +3918,24 @@ class MultiStrategyBot:
         runtime_state.append_log(
             f"MASTER auto_pause winrate={winrate:.2f}% target={target:.2f}%"
         )
+
+        now_ts = time.time()
+        window_start = float(self._master_autoheal_alert_window_ts or 0.0)
+        if now_ts - window_start >= 3600.0:
+            self._master_autoheal_alert_window_ts = now_ts
+            self._master_autoheal_alert_count = 0
+        max_alerts = max(
+            0, int(getattr(settings, "MASTER_BRAIN_MAX_AUTOHEAL_ALERTS_PER_HOUR", 1))
+        )
+        if self._master_autoheal_alert_count >= max_alerts:
+            runtime_state.append_log(
+                "MASTER_AUTOHEAL_ALERT_SUPPRESSED "
+                f"count={self._master_autoheal_alert_count}/{max_alerts}"
+            )
+            self._master_last_reason += " | alert_suppressed"
+            return
+
+        self._master_autoheal_alert_count += 1
         self.tg.send(
             "🛑 <b>MASTER AUTOHEAL</b>\n"
             f"Winrate unter Ziel: {winrate:.2f}% &lt; {target:.2f}%.\n"

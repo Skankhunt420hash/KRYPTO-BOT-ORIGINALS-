@@ -2008,12 +2008,28 @@ class MultiStrategyBot:
             return
 
         min_n = int(getattr(settings, "MASTER_AUTOHEAL_MIN_CLOSED_TRADES", 40) or 0)
-        total = int(stats.get("total_trades") or 0)
+        use_db = bool(getattr(settings, "MASTER_AUTOHEAL_USE_DB_STATS", True))
+        total = 0
+        winrate = 0.0
+        stats_source = ""
+        if use_db:
+            try:
+                db = self.repo.get_summary_stats() or {}
+                c = int(db.get("closed_trades") or 0)
+                if c >= min_n:
+                    total = c
+                    winrate = float(db.get("winrate_pct") or 0.0)
+                    stats_source = "db"
+            except Exception:
+                pass
+        if stats_source != "db":
+            total = int(stats.get("total_trades") or 0)
+            winrate = float(stats.get("winrate_pct") or 0.0)
+            stats_source = "session"
         if total < min_n:
             return
 
         target = float(getattr(settings, "MASTER_AUTOHEAL_TARGET_WINRATE_PCT", 70.0) or 0.0)
-        winrate = float(stats.get("winrate_pct") or 0.0)
         cooldown = float(getattr(settings, "MASTER_AUTOHEAL_COOLDOWN_SEC", 900.0) or 0.0)
         now = time.monotonic()
 
@@ -2030,6 +2046,7 @@ class MultiStrategyBot:
                 "winrate_pct": winrate,
                 "target_pct": target,
                 "closed_trades": total,
+                "stats_source": stats_source,
                 "trading_mode": settings.TRADING_MODE,
                 "tag": tag,
             }

@@ -324,7 +324,7 @@ class Settings:
     # Liegt oft UNTERHALB von MIN_WIN_CHANCE_PCT: Zuerst Meta-Selector, dann
     # dieser Score – zu hohe Defaults wirken wie „keine Signale“ trotz Scan.
     BRAIN_MIN_SCORE_TO_TRADE: float = float(
-        os.getenv("BRAIN_MIN_SCORE_TO_TRADE", 0.38)
+        os.getenv("BRAIN_MIN_SCORE_TO_TRADE", 0.34)
     )
     # Unterhalb dieses Scores gilt die Marktphase als "riskant/unsauber"
     BRAIN_RISKY_PHASE_SCORE: float = float(
@@ -345,6 +345,10 @@ class Settings:
     )
     MASTER_SNAPSHOT_DIR: str = os.getenv(
         "MASTER_SNAPSHOT_DIR", "data/master_snapshots"
+    )
+    # True: Winrate/Anzahl aus DB (wie Telegram „DB (Paper)“) — nicht Session-RiskManager
+    MASTER_AUTOHEAL_USE_DB_STATS: bool = _env_bool(
+        "MASTER_AUTOHEAL_USE_DB_STATS", default=True
     )
 
     # ------------------------------------------------------------------

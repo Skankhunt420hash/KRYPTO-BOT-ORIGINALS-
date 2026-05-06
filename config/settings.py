@@ -109,6 +109,11 @@ class Settings:
     )
     # Paper: Balance = Equity; kein Abzug des vollen Notionals beim Open (nur PnL beim Close).
     PAPER_EQUITY_ACCOUNT: bool = _env_bool("PAPER_EQUITY_ACCOUNT", default=True)
+    # Paper: jeden Zyklus Pause/Risk-Off aufheben (gegen Alt-Fork „MASTER AUTOHEAL“ / Panel).
+    # Live-Modus: wird nicht angewendet. Manuelles /pause im Paper: auf false setzen.
+    PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE: bool = _env_bool(
+        "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", default=True
+    )
 
     # auto = Multi-Strategie (Meta-Selector + Legacy-Adapter)
     STRATEGY: str = os.getenv("STRATEGY", "auto")

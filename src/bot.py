@@ -1921,6 +1921,29 @@ class MultiStrategyBot:
             market_context={},
         )
 
+    def _paper_undo_unwanted_control_locks(self) -> None:
+        """
+        Paper: hebt Pause/Risk-Off auf, die z. B. von einem alten Server-Fork
+        (MASTER AUTOHEAL) oder veraltetem Recovery-State gesetzt wurden.
+        Live: keine Wirkung.
+        """
+        if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
+            return
+        if not bool(getattr(settings, "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", True)):
+            return
+        ctrl = runtime_control.get_snapshot()
+        if not (ctrl.get("paused") or ctrl.get("risk_off")):
+            return
+        logger.warning(
+            "Paper: hebe Pause/Risk-Off auf (PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE) — "
+            "vorher paused=%s risk_off=%s",
+            ctrl.get("paused"),
+            ctrl.get("risk_off"),
+        )
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
@@ -1963,6 +1986,8 @@ class MultiStrategyBot:
             )
             return
 
+        self._paper_undo_unwanted_control_locks()
+
         # Scorer zu Beginn jedes Zyklus aktualisieren (liest neue Trades aus DB)
         try:
             self.scorer.refresh()
@@ -1991,6 +2016,8 @@ class MultiStrategyBot:
         self._update_performance_tracking()
         self._sync_runtime_state()
         self._persist_recovery_state()
+
+        self._paper_undo_unwanted_control_locks()
 
         # Health-Monitor auswerten (Watchdog-Reaktionen, Snapshots)
         self.health.check_and_react()

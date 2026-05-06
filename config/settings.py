@@ -89,8 +89,10 @@ class Settings:
     TRAILING_STOP: bool = os.getenv("TRAILING_STOP", "false").lower() == "true"
 
     # Heuristische Mindest-„Gewinnchance“ (0–100, siehe src/utils/win_chance.py).
-    # Trades mit niedrigerer Kennzahl werden nicht eröffnet. 0 = Filter deaktiviert.
-    MIN_WIN_CHANCE_PCT: float = float(os.getenv("MIN_WIN_CHANCE_PCT", "80"))
+    # Keine echte Trefferquote — nur Score aus Konfidenz/Brain/RR.
+    # 80 blockiert fast alle Signale (~0 Trades). Für ~5–10 Trades/Tag eher 55–65 testen.
+    # 0 = Filter komplett aus.
+    MIN_WIN_CHANCE_PCT: float = float(os.getenv("MIN_WIN_CHANCE_PCT", "58"))
     # Anteil der gemessenen Strategie-Win-Rate (DB) in der Entry-Kennzahl (0–1).
     # 0.35 = 35 % echte Historie, 65 % Heuristik – reduziert „Schein-80%“-Effekt.
     WIN_CHANCE_BLEND_ACTUAL_WR: float = float(

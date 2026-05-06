@@ -714,7 +714,8 @@ class MultiStrategyBot:
         self._recovery_blocked_symbols: Set[str] = set()
         self._startup_checks_ok: bool = True
         self._startup_block_reason: str = ""
-        self._active_strategy_runtime: str = "AUTO"
+        # Anzeige im Panel/Telegram: vermeidet Missverständnis „Master/autoheal“ (Meta+AUTO+healthy).
+        self._active_strategy_runtime: str = "Multi (Meta-Selector)"
         self._last_selector_snapshot: Dict = {}
         self._last_brain_snapshot: Dict = {}
 
@@ -1572,6 +1573,12 @@ class MultiStrategyBot:
                 regime=best.regime,
                 reason_rejected=hist_reason,
             )
+            self.tg.notify_trade_blocked(
+                symbol=symbol,
+                strategy=best.strategy_name,
+                side=best.side.value,
+                reason=hist_reason,
+            )
             self._record_last_decision(
                 symbol=symbol,
                 decision="blocked_historical_win_rate",
@@ -1622,6 +1629,12 @@ class MultiStrategyBot:
                     confidence=best.confidence,
                     regime=best.regime,
                     reason_rejected=reason_wc,
+                )
+                self.tg.notify_trade_blocked(
+                    symbol=symbol,
+                    strategy=best.strategy_name,
+                    side=best.side.value,
+                    reason=reason_wc,
                 )
                 self._record_last_decision(
                     symbol=symbol,

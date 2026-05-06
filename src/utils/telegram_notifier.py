@@ -9,7 +9,7 @@ Verhalten:
 - Telegram-Fehler loggen, aber nie den Main-Loop unterbrechen
 - Rate-Limit: max 20 Nachrichten/Minute (Telegram erlaubt ~30/s)
 - Nur Signale ab TELEGRAM_MIN_CONFIDENCE erhalten Benachrichtigungen
-- Block-Benachrichtigungen nur für kritische Gründe (kein Cooldown-Spam)
+- Block-Benachrichtigungen für wichtige Gründe (Cooldown-Spam-Schutz pro Präfix)
 """
 
 import time
@@ -29,8 +29,22 @@ _API_URL = "https://api.telegram.org/bot{token}/sendMessage"
 _REQUEST_TIMEOUT: int = 8       # Sekunden bis Timeout
 _MAX_MSGS_PER_MIN: int = 20     # Telegram-API-Schutz
 
-# Block-Gründe, die eine Telegram-Meldung auslösen (Cooldowns nicht)
-_IMPORTANT_BLOCK_PREFIXES = ("DAILY LOSS", "MAX TRADES", "LIVE HARD GATE")
+# Block-Gründe, die eine Telegram-Meldung auslösen (keine Duplikat-/Cooldown-Flut)
+_IMPORTANT_BLOCK_PREFIXES = (
+    "DAILY LOSS",
+    "MAX TRADES",
+    "LIVE HARD GATE",
+    "LIVE TEST GATE",
+    "MIN_WIN_CHANCE",
+    "HIST_WIN_RATE",
+    "PORTFOLIO",
+    "SIZING BLOCKIERT",
+    "CONTROL PAUSE",
+    "RISK OFF",
+    "VOLATILITY BLOCK",
+    "LOSS PATTERN BLOCK",
+    "INVALID SIGNAL",
+)
 
 # Mindestabstand zwischen Block-Meldungen desselben Typs (verhindert Spam
 # wenn Daily-Limit über viele Zyklen/Paare hinweg aktiv bleibt)
@@ -312,9 +326,8 @@ class TelegramNotifier:
         reason: str,
     ) -> None:
         """
-        Signal blockiert – nur bei kritischen Gründen (Daily-Loss, Max-Trades, Live-Hard-Gate).
-        Cooldowns und Duplikate werden nicht gesendet (zu viel Spam).
-        Gleiche Block-Art wird max. 1× pro 30 Minuten gemeldet (Spam-Schutz).
+        Signal blockiert – bei den in _IMPORTANT_BLOCK_PREFIXES gelisteten Gründen.
+        Cooldowns/Duplikate bleiben stumm (Spam).         Gleicher Präfix-Typ max. 1×/30min.
         """
         if not self._should_notify("critical"):
             return

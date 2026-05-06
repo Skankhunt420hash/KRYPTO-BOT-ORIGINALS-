@@ -172,6 +172,14 @@ class Settings:
     STATE_RECOVERY_FILE: str = os.getenv(
         "STATE_RECOVERY_FILE", "data/runtime_recovery.json"
     )
+    # Beim Neustart aus Recovery-Datei übernehmen (false = Entriegelung nach
+    # externem Risk-Off / manuell „festgefahren“, ohne Datei löschen zu müssen)
+    STATE_RECOVERY_RESTORE_PAUSED: bool = _env_bool(
+        "STATE_RECOVERY_RESTORE_PAUSED", default=True
+    )
+    STATE_RECOVERY_RESTORE_RISK_OFF: bool = _env_bool(
+        "STATE_RECOVERY_RESTORE_RISK_OFF", default=True
+    )
     RECOVERY_MAX_OPEN_TRADES_RESTORE: int = int(
         os.getenv("RECOVERY_MAX_OPEN_TRADES_RESTORE", 100)
     )

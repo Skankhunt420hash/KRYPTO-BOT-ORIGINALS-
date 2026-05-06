@@ -838,12 +838,18 @@ class MultiStrategyBot:
             return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            if raw.get("paused"):
-                runtime_control.pause_entries()
+            if bool(getattr(settings, "STATE_RECOVERY_RESTORE_PAUSED", True)):
+                if raw.get("paused"):
+                    runtime_control.pause_entries()
+                else:
+                    runtime_control.resume_entries()
             else:
                 runtime_control.resume_entries()
-            if raw.get("risk_off"):
-                runtime_control.enable_risk_off()
+            if bool(getattr(settings, "STATE_RECOVERY_RESTORE_RISK_OFF", True)):
+                if raw.get("risk_off"):
+                    runtime_control.enable_risk_off()
+                else:
+                    runtime_control.disable_risk_off()
             else:
                 runtime_control.disable_risk_off()
             preferred = str(raw.get("preferred_strategy") or "").strip()

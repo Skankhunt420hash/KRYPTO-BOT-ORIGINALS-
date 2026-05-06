@@ -756,6 +756,15 @@ class MultiStrategyBot:
         # Zusätzlich grep-freundlich (ohne Rich): in journalctl klar erkennbar
         logger.info("STRATEGY_POOL_COUNT=%d", len(strat_names))
         logger.info("STRATEGY_POOL_NAMES=%s", _pool)
+        if bool(getattr(settings, "MASTER_AUTOHEAL_ENABLED", False)):
+            logger.warning(
+                "MASTER_AUTOHEAL ist AN — bei Winrate unter Ziel werden Entries pausiert und Risk-Off gesetzt. "
+                "Abschalten: MASTER_AUTOHEAL_ENABLED=false in .env und Bot neu starten."
+            )
+        else:
+            logger.info(
+                "MASTER_AUTOHEAL: aus — kein automatisches Sperren über Winrate-Ziel."
+            )
         # Pro Symbol werden Einzel-Strategien nur bei LOG_LEVEL=DEBUG geloggt (sonst zu viel Spam).
         if bool(getattr(settings, "SHORT_ONLY_TRADING", False)):
             logger.info(

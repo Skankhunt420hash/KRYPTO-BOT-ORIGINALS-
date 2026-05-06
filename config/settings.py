@@ -331,8 +331,9 @@ class Settings:
         os.getenv("BRAIN_RISKY_PHASE_SCORE", 0.35)
     )
 
-    # Master AUTOHEAL (optional): bei geschlossenen Trades & Winrate unter Ziel
-    # Pause + Risk-Off. Standard AUS — bei wenigen Trades sonst Fehlalarm (z. B. 18% bei n=16).
+    # Master AUTOHEAL (optional): Winrate < Ziel → Pause + Risk-Off.
+    # Ohne .env-Eintrag oder MASTER_AUTOHEAL_ENABLED=false → IMMER aus.
+    # Nur explizit true/1/yes/on schaltet ein.
     MASTER_AUTOHEAL_ENABLED: bool = _env_bool("MASTER_AUTOHEAL_ENABLED", default=False)
     MASTER_AUTOHEAL_TARGET_WINRATE_PCT: float = float(
         os.getenv("MASTER_AUTOHEAL_TARGET_WINRATE_PCT", 70.0)

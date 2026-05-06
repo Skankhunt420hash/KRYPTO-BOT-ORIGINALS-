@@ -312,9 +312,11 @@ class Settings:
     CONTROL_STRATEGY_PRIORITY_BONUS: float = float(
         os.getenv("CONTROL_STRATEGY_PRIORITY_BONUS", 0.08)
     )
-    # Brain-Gate: Mindestsignal-Score fuer Entry-Freigabe (0..1)
+    # Brain-Gate: Mindest-Brain-Score für Entry (0..~1.5, typ. 0.35–0.55).
+    # Liegt oft UNTERHALB von MIN_WIN_CHANCE_PCT: Zuerst Meta-Selector, dann
+    # dieser Score – zu hohe Defaults wirken wie „keine Signale“ trotz Scan.
     BRAIN_MIN_SCORE_TO_TRADE: float = float(
-        os.getenv("BRAIN_MIN_SCORE_TO_TRADE", 0.45)
+        os.getenv("BRAIN_MIN_SCORE_TO_TRADE", 0.38)
     )
     # Unterhalb dieses Scores gilt die Marktphase als "riskant/unsauber"
     BRAIN_RISKY_PHASE_SCORE: float = float(

@@ -315,7 +315,7 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 | `STRATEGY_COOLDOWN_MINUTES` | `30`          | Cooldown nach Verlust-Trade pro Strategie (Minuten) |
 | `RISK_BLOCK_HIGH_VOLATILITY` | `false`      | `true` = neue Trades im HIGH_VOLATILITY-Regime blockieren |
 | `STRATEGY_MIN_PERF_SCORE` | `0.0`           | Optionaler Performance-Gate \[0.0–1.0], z.B. 0.4 = Strategien mit Score < 0.4 werden im Meta-Selector ignoriert |
-| `BRAIN_MIN_SCORE_TO_TRADE` | `0.45`         | Brain-Gate: Mindestscore für Entry-Freigabe |
+| `BRAIN_MIN_SCORE_TO_TRADE` | `0.38`         | Brain-Gate: Mindestscore für Entry-Freigabe |
 | `BRAIN_RISKY_PHASE_SCORE` | `0.35`          | Unterhalb dieses Scores gilt die Phase als riskant |
 | `TELEGRAM_PANEL_ENABLED`  | `false`         | `true` = Telegram-Control-Panel aktiviert (Polling) |
 | `TELEGRAM_PANEL_POLL_INTERVAL_SEC` | `10`   | Poll-Intervall des Panels (Sekunden) |

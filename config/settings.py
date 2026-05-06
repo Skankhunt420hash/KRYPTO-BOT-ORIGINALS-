@@ -331,6 +331,22 @@ class Settings:
         os.getenv("BRAIN_RISKY_PHASE_SCORE", 0.35)
     )
 
+    # Master AUTOHEAL (optional): bei geschlossenen Trades & Winrate unter Ziel
+    # Pause + Risk-Off. Standard AUS — bei wenigen Trades sonst Fehlalarm (z. B. 18% bei n=16).
+    MASTER_AUTOHEAL_ENABLED: bool = _env_bool("MASTER_AUTOHEAL_ENABLED", default=False)
+    MASTER_AUTOHEAL_TARGET_WINRATE_PCT: float = float(
+        os.getenv("MASTER_AUTOHEAL_TARGET_WINRATE_PCT", 70.0)
+    )
+    MASTER_AUTOHEAL_MIN_CLOSED_TRADES: int = int(
+        os.getenv("MASTER_AUTOHEAL_MIN_CLOSED_TRADES", 40)
+    )
+    MASTER_AUTOHEAL_COOLDOWN_SEC: float = float(
+        os.getenv("MASTER_AUTOHEAL_COOLDOWN_SEC", 900.0)
+    )
+    MASTER_SNAPSHOT_DIR: str = os.getenv(
+        "MASTER_SNAPSHOT_DIR", "data/master_snapshots"
+    )
+
     # ------------------------------------------------------------------
     # Portfolio Risk Engine & Position Sizing
     # ------------------------------------------------------------------

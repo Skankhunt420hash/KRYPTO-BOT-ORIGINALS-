@@ -457,6 +457,33 @@ class TelegramNotifier:
             f"🕐 {self._ts()}"
         )
 
+    def notify_master_autoheal_blocked(
+        self, winrate: float, target: float, snapshot_relpath: str
+    ) -> None:
+        """Telegram: Winrate unter Ziel — Pause + Risk-Off (MASTER AUTOHEAL)."""
+        if not self._should_notify("critical"):
+            return
+        self.send(
+            "🛑 <b>MASTER AUTOHEAL</b>\n"
+            f"Winrate unter Ziel: {winrate:.2f}% &lt; {target:.2f}%.\n"
+            "Entries pausiert + Risk-Off aktiviert.\n"
+            f"Snapshot: <code>{snapshot_relpath}</code>\n"
+            f"🕐 {self._ts()}"
+        )
+
+    def notify_master_autoheal_released(
+        self, winrate: float, target: float, snapshot_relpath: str
+    ) -> None:
+        if not self._should_notify("critical"):
+            return
+        self.send(
+            "🟢 <b>MASTER AUTOHEAL</b>\n"
+            f"Winrate wieder stabil: {winrate:.2f}% (Target {target:.2f}%).\n"
+            "Entries wurden freigegeben.\n"
+            f"Snapshot: <code>{snapshot_relpath}</code>\n"
+            f"🕐 {self._ts()}"
+        )
+
     def notify_live_test_mode_start(self, limits: str) -> None:
         if not self._should_notify("runtime"):
             return

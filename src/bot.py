@@ -718,6 +718,8 @@ class MultiStrategyBot:
         self._active_strategy_runtime: str = "Multi (Meta-Selector)"
         self._last_selector_snapshot: Dict = {}
         self._last_brain_snapshot: Dict = {}
+        self._master_autoheal_armed: bool = False
+        self._master_autoheal_last_notify_mono: float = 0.0
 
         # Performance-Tracking und adaptives Scoring
         self.perf_tracker = PerformanceTracker()
@@ -1992,8 +1994,82 @@ class MultiStrategyBot:
         self._sync_runtime_state()
         self._persist_recovery_state()
 
+        self._maybe_master_autoheal(stats)
+
         # Health-Monitor auswerten (Watchdog-Reaktionen, Snapshots)
         self.health.check_and_react()
+
+    def _maybe_master_autoheal(self, stats: Dict) -> None:
+        """
+        Optional: Winrate vs. Ziel — Pause + Risk-Off (wie Server-„Thunder“-Build).
+        Standard deaktiviert; mit Mindest-Trade-Zahl gegen Fehlalarm bei kleinem n.
+        """
+        if not bool(getattr(settings, "MASTER_AUTOHEAL_ENABLED", False)):
+            return
+
+        min_n = int(getattr(settings, "MASTER_AUTOHEAL_MIN_CLOSED_TRADES", 40) or 0)
+        total = int(stats.get("total_trades") or 0)
+        if total < min_n:
+            return
+
+        target = float(getattr(settings, "MASTER_AUTOHEAL_TARGET_WINRATE_PCT", 70.0) or 0.0)
+        winrate = float(stats.get("winrate_pct") or 0.0)
+        cooldown = float(getattr(settings, "MASTER_AUTOHEAL_COOLDOWN_SEC", 900.0) or 0.0)
+        now = time.monotonic()
+
+        root = Path(__file__).resolve().parents[1]
+        snap_dir = Path(getattr(settings, "MASTER_SNAPSHOT_DIR", "data/master_snapshots"))
+        if not snap_dir.is_absolute():
+            snap_dir = root / snap_dir
+
+        def _write_snap(tag: str) -> str:
+            snap_dir.mkdir(parents=True, exist_ok=True)
+            ts = int(time.time())
+            path = snap_dir / f"master_snapshot_{ts}_{tag}.json"
+            payload = {
+                "winrate_pct": winrate,
+                "target_pct": target,
+                "closed_trades": total,
+                "trading_mode": settings.TRADING_MODE,
+                "tag": tag,
+            }
+            path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+            try:
+                return str(path.relative_to(root))
+            except ValueError:
+                return str(path)
+
+        if winrate < target:
+            runtime_control.pause_entries()
+            runtime_control.enable_risk_off()
+            runtime_state.update_engine(paused=True, risk_off=True)
+            rel = _write_snap("block")
+            should_send = (not self._master_autoheal_armed) or (
+                now - self._master_autoheal_last_notify_mono >= cooldown
+            )
+            self._master_autoheal_armed = True
+            if should_send:
+                self._master_autoheal_last_notify_mono = now
+                self.tg.notify_master_autoheal_blocked(winrate, target, rel)
+                runtime_state.append_log(
+                    f"MASTER_AUTOHEAL block winrate={winrate:.2f}% target={target:.2f}% n={total}"
+                )
+            return
+
+        if self._master_autoheal_armed:
+            runtime_control.resume_entries()
+            runtime_control.disable_risk_off()
+            runtime_state.update_engine(paused=False, risk_off=False)
+            self._master_autoheal_armed = False
+            rel = _write_snap("release")
+            self.tg.notify_master_autoheal_released(winrate, target, rel)
+            runtime_state.append_log(
+                f"MASTER_AUTOHEAL release winrate={winrate:.2f}% target={target:.2f}% n={total}"
+            )
+            logger.info(
+                "MASTER AUTOHEAL: Winrate >= Ziel — Pause/Risk-Off aufgehoben "
+                f"({winrate:.2f}% >= {target:.2f}%)"
+            )
 
     def run(self, interval_seconds: int = None):
         """Startet den Multi-Strategy-Bot in einer Dauerschleife."""

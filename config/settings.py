@@ -83,7 +83,7 @@ class Settings:
     MAX_POSITION_SIZE_PERCENT: float = float(
         os.getenv("MAX_POSITION_SIZE_PERCENT", 2.0)
     )
-    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 5))
+    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 8))
     STOP_LOSS_PERCENT: float = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
     TAKE_PROFIT_PERCENT: float = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
     TRAILING_STOP: bool = os.getenv("TRAILING_STOP", "false").lower() == "true"
@@ -92,7 +92,7 @@ class Settings:
     # Keine echte Trefferquote — nur Score aus Konfidenz/Brain/RR.
     # 80 blockiert fast alle Signale (~0 Trades). Für ~5–10 Trades/Tag eher 55–65 testen.
     # 0 = Filter komplett aus.
-    MIN_WIN_CHANCE_PCT: float = float(os.getenv("MIN_WIN_CHANCE_PCT", "58"))
+    MIN_WIN_CHANCE_PCT: float = float(os.getenv("MIN_WIN_CHANCE_PCT", "0"))
     # Anteil der gemessenen Strategie-Win-Rate (DB) in der Entry-Kennzahl (0–1).
     # 0.35 = 35 % echte Historie, 65 % Heuristik – reduziert „Schein-80%“-Effekt.
     WIN_CHANCE_BLEND_ACTUAL_WR: float = float(
@@ -225,13 +225,13 @@ class Settings:
     # Multi-Modus:         auto
 
     # Mindest-Konfidenz für aktionsfähige Signale (0-100)
-    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", 48.0))
+    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", 42.0))
 
     # Mindest-RR für aktionsfähige Signale (2% SL / 4% TP ≈ 2.0)
-    MIN_RR: float = float(os.getenv("MIN_RR", 1.2))
+    MIN_RR: float = float(os.getenv("MIN_RR", 1.05))
 
     # Meta-Selector: Mindest-Regime-Fit (0.30–0.50 typisch)
-    MIN_REGIME_FIT: float = float(os.getenv("MIN_REGIME_FIT", 0.38))
+    MIN_REGIME_FIT: float = float(os.getenv("MIN_REGIME_FIT", 0.30))
 
     # ------------------------------------------------------------------
     # Risk Engine Cooldowns & Limits
@@ -247,16 +247,16 @@ class Settings:
     )
 
     # Wartezeit nach Schließung einer Position auf demselben Coin (Minuten)
-    COIN_COOLDOWN_MINUTES: int = int(os.getenv("COIN_COOLDOWN_MINUTES", 60))
+    COIN_COOLDOWN_MINUTES: int = int(os.getenv("COIN_COOLDOWN_MINUTES", 25))
 
     # Wartezeit nach einem Verlust-Trade für dieselbe Strategie (Minuten)
-    STRATEGY_COOLDOWN_MINUTES: int = int(os.getenv("STRATEGY_COOLDOWN_MINUTES", 30))
+    STRATEGY_COOLDOWN_MINUTES: int = int(os.getenv("STRATEGY_COOLDOWN_MINUTES", 15))
 
     # Schutz vor doppelten Signalen: gleiche Strategie + Symbol in N Minuten (Minuten)
-    DUPLICATE_SIGNAL_MINUTES: int = int(os.getenv("DUPLICATE_SIGNAL_MINUTES", 15))
+    DUPLICATE_SIGNAL_MINUTES: int = int(os.getenv("DUPLICATE_SIGNAL_MINUTES", 8))
 
     # Wiederholte Verluste gleiche Strategie + Symbol: Entry sperren (Lernschicht)
-    LOSS_PATTERN_MEMORY_ENABLED: bool = _env_bool("LOSS_PATTERN_MEMORY_ENABLED", default=True)
+    LOSS_PATTERN_MEMORY_ENABLED: bool = _env_bool("LOSS_PATTERN_MEMORY_ENABLED", default=False)
     LOSS_PATTERN_MEMORY_FILE: str = os.getenv(
         "LOSS_PATTERN_MEMORY_FILE", "data/loss_pattern_memory.json"
     )
@@ -323,33 +323,13 @@ class Settings:
     # Brain-Gate: Mindest-Brain-Score für Entry (0..~1.5, typ. 0.35–0.55).
     # Liegt oft UNTERHALB von MIN_WIN_CHANCE_PCT: Zuerst Meta-Selector, dann
     # dieser Score – zu hohe Defaults wirken wie „keine Signale“ trotz Scan.
+    # 0 = Brain-Score-Gate aus (Meta-Selector reicht). >0 = Mindest-Score für Entry.
     BRAIN_MIN_SCORE_TO_TRADE: float = float(
-        os.getenv("BRAIN_MIN_SCORE_TO_TRADE", 0.34)
+        os.getenv("BRAIN_MIN_SCORE_TO_TRADE", 0.0)
     )
     # Unterhalb dieses Scores gilt die Marktphase als "riskant/unsauber"
     BRAIN_RISKY_PHASE_SCORE: float = float(
         os.getenv("BRAIN_RISKY_PHASE_SCORE", 0.35)
-    )
-
-    # Master AUTOHEAL (optional): Winrate < Ziel → Pause + Risk-Off.
-    # Ohne .env-Eintrag oder MASTER_AUTOHEAL_ENABLED=false → IMMER aus.
-    # Nur explizit true/1/yes/on schaltet ein.
-    MASTER_AUTOHEAL_ENABLED: bool = _env_bool("MASTER_AUTOHEAL_ENABLED", default=False)
-    MASTER_AUTOHEAL_TARGET_WINRATE_PCT: float = float(
-        os.getenv("MASTER_AUTOHEAL_TARGET_WINRATE_PCT", 70.0)
-    )
-    MASTER_AUTOHEAL_MIN_CLOSED_TRADES: int = int(
-        os.getenv("MASTER_AUTOHEAL_MIN_CLOSED_TRADES", 40)
-    )
-    MASTER_AUTOHEAL_COOLDOWN_SEC: float = float(
-        os.getenv("MASTER_AUTOHEAL_COOLDOWN_SEC", 900.0)
-    )
-    MASTER_SNAPSHOT_DIR: str = os.getenv(
-        "MASTER_SNAPSHOT_DIR", "data/master_snapshots"
-    )
-    # True: Winrate/Anzahl aus DB (wie Telegram „DB (Paper)“) — nicht Session-RiskManager
-    MASTER_AUTOHEAL_USE_DB_STATS: bool = _env_bool(
-        "MASTER_AUTOHEAL_USE_DB_STATS", default=True
     )
 
     # ------------------------------------------------------------------

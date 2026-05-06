@@ -34,3 +34,6 @@ data/*.sqlite
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Versehentlicher Nested-Clone im Projektroot (nicht committen)
+KRYPTO-BOT-ORIGINALS-/

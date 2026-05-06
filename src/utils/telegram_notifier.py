@@ -187,10 +187,22 @@ class TelegramNotifier:
             pairs_txt = ", ".join(pairs)
         else:
             pairs_txt = ", ".join(pairs[:max_pairs]) + f" … (+{len(pairs) - max_pairs} weitere)"
+        if settings.DAILY_LOSS_LIMIT_PCT <= 0:
+            limit_line = (
+                "🛡 Tagesverlust-Limit: <b>aus</b> "
+                "(kein Stopp durch Tagesverlust)"
+            )
+        else:
+            limit_line = (
+                f"🛡 Tagesverlust-Limit: <b>{settings.DAILY_LOSS_LIMIT_PCT:g}%</b> "
+                "vom Startkapital"
+            )
         text = (
             f"🤖 <b>KRYPTO-BOT ORIGINALS gestartet</b>\n"
+            f"📌 <i>Quelle: KRYPTO-BOT ORIGINALS — Chat-/Panel-Titel in Telegram ist separat.</i>\n"
             f"{mode_icon} Modus: <b>{mode.upper()}</b>\n"
             f"📊 Strategie: {strategy}\n"
+            f"{limit_line}\n"
             f"💱 Paare ({len(pairs)}): {pairs_txt}\n"
             f"⏱ Zeitrahmen: {timeframe}\n"
             f"🕐 {self._ts()}"

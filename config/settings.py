@@ -3,9 +3,10 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-# Immer Projektroot/.env laden (nicht vom aktuellen Arbeitsverzeichnis abhängig – wichtig für systemd)
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
-load_dotenv(dotenv_path=_ENV_PATH, override=False)
+# Immer Projektroot/.env laden; optional .env.local mit Override (lokal, nicht committen)
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=False)
+load_dotenv(dotenv_path=_PROJECT_ROOT / ".env.local", override=True)
 
 
 def _first_non_empty(*keys: str, default: str = "") -> str:
@@ -107,7 +108,8 @@ class Settings:
     # Paper: Balance = Equity; kein Abzug des vollen Notionals beim Open (nur PnL beim Close).
     PAPER_EQUITY_ACCOUNT: bool = _env_bool("PAPER_EQUITY_ACCOUNT", default=True)
 
-    STRATEGY: str = os.getenv("STRATEGY", "rsi_ema")
+    # auto = Multi-Strategie (Meta-Selector + Legacy-Adapter)
+    STRATEGY: str = os.getenv("STRATEGY", "auto")
 
     # Telegram Hauptschalter:
     # - bevorzugt: ENABLE_TELEGRAM
@@ -124,8 +126,8 @@ class Settings:
 
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    # Mindest-Konfidenz (0-100) damit ein Signal eine Telegram-Meldung auslöst
-    TELEGRAM_MIN_CONFIDENCE: float = float(os.getenv("TELEGRAM_MIN_CONFIDENCE", 50.0))
+    # Sollte in der Regel ≤ MIN_CONFIDENCE sein, sonst fehlen Trade-Meldungen
+    TELEGRAM_MIN_CONFIDENCE: float = float(os.getenv("TELEGRAM_MIN_CONFIDENCE", 48.0))
     # Benachrichtigungslevel:
     # off      -> keine Telegram-Meldungen
     # critical -> nur kritische Risk-/Error-Events
@@ -213,17 +215,20 @@ class Settings:
     # Multi-Modus:         auto
 
     # Mindest-Konfidenz für aktionsfähige Signale (0-100)
-    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", 40.0))
+    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", 48.0))
 
-    # Mindest-RR für aktionsfähige Signale
-    MIN_RR: float = float(os.getenv("MIN_RR", 1.5))
+    # Mindest-RR für aktionsfähige Signale (2% SL / 4% TP ≈ 2.0)
+    MIN_RR: float = float(os.getenv("MIN_RR", 1.2))
+
+    # Meta-Selector: Mindest-Regime-Fit (0.30–0.50 typisch)
+    MIN_REGIME_FIT: float = float(os.getenv("MIN_REGIME_FIT", 0.38))
 
     # ------------------------------------------------------------------
     # Risk Engine Cooldowns & Limits
     # ------------------------------------------------------------------
 
-    # Tagesverlust-Limit in % des Startkapitals (danach kein neues Trading)
-    DAILY_LOSS_LIMIT_PCT: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 5.0))
+    # Tagesverlust-Limit in % des Startkapitals (<=0 = deaktiviert, siehe RiskEngine)
+    DAILY_LOSS_LIMIT_PCT: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 0.0))
 
     # Optionaler Volatilitäts-Stop: blockiert neue Trades in HIGH_VOLATILITY-Regimes
     # (Regime wird von RegimeEngine erkannt und im EnhancedSignal.regime gespeichert)

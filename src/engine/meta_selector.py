@@ -78,8 +78,8 @@ REGIME_STRATEGY_FIT: Dict[Regime, Dict[str, float]] = {
     },
 }
 
-# Mindest-Regime-Fit damit ein Signal überhaupt in die Bewertung kommt
-MIN_REGIME_FIT: float = 0.35
+# Brain / Kompatibilität: Schwellwert aus Settings (beim Laden des Moduls)
+MIN_REGIME_FIT: float = settings.MIN_REGIME_FIT
 
 
 class MetaSelector:
@@ -148,12 +148,12 @@ class MetaSelector:
             dir_mult = dir_mults.get(sig.side, 1.0)
             fit = base_fit * dir_mult
 
-            if fit < MIN_REGIME_FIT:
+            if fit < settings.MIN_REGIME_FIT:
                 self._last_selection["blocked_regime"] += 1
                 logger.debug(
                     f"[REGIME-FILTER] {sig.strategy_name} [{sig.side.value.upper()}] "
                     f"| {symbol} | fit={fit:.2f} (base={base_fit:.2f} × dir={dir_mult:.2f}) "
-                    f"< {MIN_REGIME_FIT} – blockiert"
+                    f"< {settings.MIN_REGIME_FIT} – blockiert"
                 )
                 continue
 

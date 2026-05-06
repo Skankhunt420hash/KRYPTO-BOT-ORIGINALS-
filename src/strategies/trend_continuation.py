@@ -30,7 +30,7 @@ class TrendContinuationStrategy(EnhancedBaseStrategy):
     MACD_FAST = 12
     MACD_SLOW = 26
     MACD_SIGNAL = 9
-    SL_EMA_BUFFER = 0.5
+    SL_EMA_BUFFER = 0.65
 
     def __init__(self):
         super().__init__("TrendContinuation")

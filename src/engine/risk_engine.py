@@ -137,19 +137,22 @@ class RiskEngine(RiskManager):
         if signal.side == Side.SHORT and not (signal.stop_loss > signal.entry > signal.take_profit):
             return self._reject("INVALID SIGNAL: SHORT benötigt SL > Entry > TP")
 
-        # 1. Daily Loss Limit
-        daily_limit = self._initial_balance * (settings.DAILY_LOSS_LIMIT_PCT / 100)
-        if abs(self._daily_loss) >= daily_limit:
-            if not self._daily_loss_risk_off_latched:
-                self._daily_loss_risk_off_latched = True
-                logger.warning(
-                    "Daily-Loss-Limit erreicht -> neue Entries werden blockiert "
-                    "(interner Risk-Gate-Latch aktiv)."
+        # 1. Daily Loss Limit (<=0 = deaktiviert; bei 0 kein „Limit 0 USDT“-Bug)
+        if settings.DAILY_LOSS_LIMIT_PCT <= 0:
+            self._daily_loss_risk_off_latched = False
+        else:
+            daily_limit = self._initial_balance * (settings.DAILY_LOSS_LIMIT_PCT / 100)
+            if abs(self._daily_loss) >= daily_limit:
+                if not self._daily_loss_risk_off_latched:
+                    self._daily_loss_risk_off_latched = True
+                    logger.warning(
+                        "Daily-Loss-Limit erreicht -> neue Entries werden blockiert "
+                        "(interner Risk-Gate-Latch aktiv)."
+                    )
+                return self._reject(
+                    f"DAILY LOSS LIMIT: Tagesverlust {abs(self._daily_loss):.2f} USDT "
+                    f">= Limit {daily_limit:.2f} USDT – Trading pausiert"
                 )
-            return self._reject(
-                f"DAILY LOSS LIMIT: Tagesverlust {abs(self._daily_loss):.2f} USDT "
-                f">= Limit {daily_limit:.2f} USDT – Trading pausiert"
-            )
 
         # 2. Optionaler Volatilitäts-Stop (Regime HIGH_VOLATILITY)
         if settings.RISK_BLOCK_HIGH_VOLATILITY:
@@ -372,16 +375,17 @@ class RiskEngine(RiskManager):
                 f"{len(self.open_positions)}/{hard_max_open}"
             )
 
-        # 5) Daily Loss Limit
+        # 5) Daily Loss Limit (0 = aus)
         daily_limit_pct = float(settings.DAILY_LOSS_LIMIT_PCT)
         if settings.LIVE_TEST_MODE:
             daily_limit_pct = float(getattr(settings, "LIVE_TEST_DAILY_LOSS_LIMIT_PCT", daily_limit_pct))
-        daily_limit = self._initial_balance * (daily_limit_pct / 100)
-        if abs(self._daily_loss) >= daily_limit:
-            return _deny(
-                f"LIVE HARD GATE: DAILY LOSS LIMIT "
-                f"{abs(self._daily_loss):.2f}/{daily_limit:.2f} USDT"
-            )
+        if daily_limit_pct > 0:
+            daily_limit = self._initial_balance * (daily_limit_pct / 100)
+            if abs(self._daily_loss) >= daily_limit:
+                return _deny(
+                    f"LIVE HARD GATE: DAILY LOSS LIMIT "
+                    f"{abs(self._daily_loss):.2f}/{daily_limit:.2f} USDT"
+                )
 
         # 6) Verlustserie
         if self._global_losing_streak >= int(settings.LIVE_MAX_LOSING_STREAK):

@@ -177,7 +177,9 @@ def run_forever() -> None:
     poll = max(30, int(getattr(settings, "SAFETY_WATCHDOG_POLL_SEC", 120)))
     tail_n = max(50, int(getattr(settings, "SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)))
     err_thr = max(1, int(getattr(settings, "SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)))
-    log_rel = getattr(settings, "SUPERVISOR_BOT_LOGFILE", "logs/bot_process.log")
+    log_rel = (getattr(settings, "SAFETY_WATCHDOG_LOG_FILE", "") or "").strip() or getattr(
+        settings, "SUPERVISOR_BOT_LOGFILE", "logs/bot_process.log"
+    )
     log_path = Path(log_rel)
     if not log_path.is_absolute():
         log_path = root / log_path

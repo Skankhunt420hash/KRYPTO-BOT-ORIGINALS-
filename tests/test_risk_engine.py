@@ -1,5 +1,6 @@
 import unittest
 
+from config.settings import settings
 from src.engine.risk_engine import RiskEngine
 from src.strategies.signal import EnhancedSignal, Side
 
@@ -22,16 +23,21 @@ class RiskEngineTests(unittest.TestCase):
         )
 
     def test_daily_loss_limit_blocks_signal(self):
-        engine = RiskEngine(initial_balance=10_000.0)
-        sig = self._make_dummy_signal()
+        original_daily_limit = settings.DAILY_LOSS_LIMIT_PCT
+        settings.DAILY_LOSS_LIMIT_PCT = 5.0
+        try:
+            engine = RiskEngine(initial_balance=10_000.0)
+            sig = self._make_dummy_signal()
 
-        # Simuliere Tagesverlust, der das Limit überschreitet
-        engine._daily_loss = -600.0  # intern: negativer Wert
-        engine._initial_balance = 10_000.0
+            # Simuliere Tagesverlust, der das Limit überschreitet
+            engine._daily_loss = -600.0  # intern: negativer Wert
+            engine._initial_balance = 10_000.0
 
-        allowed, reason = engine.check_signal(sig)
-        self.assertFalse(allowed)
-        self.assertIn("DAILY LOSS LIMIT", reason)
+            allowed, reason = engine.check_signal(sig)
+            self.assertFalse(allowed)
+            self.assertIn("DAILY LOSS LIMIT", reason)
+        finally:
+            settings.DAILY_LOSS_LIMIT_PCT = original_daily_limit
 
     def test_duplicate_signal_blocked(self):
         engine = RiskEngine(initial_balance=10_000.0)

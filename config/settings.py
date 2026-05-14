@@ -473,5 +473,36 @@ class Settings:
     MAX_MEMORY_PCT: float = float(os.getenv("MAX_MEMORY_PCT", 80.0))
     MAX_CPU_PCT: float = float(os.getenv("MAX_CPU_PCT", 90.0))
 
+    # ------------------------------------------------------------------
+    # Safety Watchdog (separater Prozess: safety_watchdog.py)
+    # Überwacht den Handels-Bot, Logs, Syntax; optional Neustart.
+    # Kein „KI repariert beliebigen Code“ — nur definierte, sichere Schritte.
+    # ------------------------------------------------------------------
+    SAFETY_WATCHDOG_POLL_SEC: int = int(os.getenv("SAFETY_WATCHDOG_POLL_SEC", 120))
+    SAFETY_WATCHDOG_LOG_TAIL_LINES: int = int(
+        os.getenv("SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)
+    )
+    SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD: int = int(
+        os.getenv("SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)
+    )
+    # Shell-Befehl zum Neustart (leer = nur melden). z.B. systemctl restart krypto-bot
+    SAFETY_WATCHDOG_RESTART_CMD: str = os.getenv(
+        "SAFETY_WATCHDOG_RESTART_CMD", ""
+    ).strip()
+    SAFETY_WATCHDOG_RESTART_COOLDOWN_SEC: int = int(
+        os.getenv("SAFETY_WATCHDOG_RESTART_COOLDOWN_SEC", 1800)
+    )
+    SAFETY_WATCHDOG_RUN_COMPILEALL: bool = _env_bool(
+        "SAFETY_WATCHDOG_RUN_COMPILEALL", default=True
+    )
+    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (festgefahren)
+    SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY: bool = _env_bool(
+        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=True
+    )
+    # Nur wenn ruff installiert und explizit true — vorsichtig
+    SAFETY_WATCHDOG_RUFF_AUTOFIX: bool = _env_bool(
+        "SAFETY_WATCHDOG_RUFF_AUTOFIX", default=False
+    )
+
 
 settings = Settings()

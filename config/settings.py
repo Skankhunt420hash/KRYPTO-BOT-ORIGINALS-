@@ -1,11 +1,21 @@
 import os
 from pathlib import Path
 
-from dotenv import load_dotenv
+try:
+    from dotenv import load_dotenv
+except ModuleNotFoundError:
+    # Optional dependency fallback: service should still boot with pure env vars.
+    def load_dotenv(*args, **kwargs):
+        return False
 
-# Immer Projektroot/.env laden; optional .env.local mit Override (lokal, nicht committen)
+# Immer Projektroot/.env laden (unabhängig vom cwd), optional .env.local mit Override.
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(dotenv_path=_PROJECT_ROOT / ".env", override=False)
+_ENV_PATH = _PROJECT_ROOT / ".env"
+if _ENV_PATH.exists():
+    load_dotenv(dotenv_path=_ENV_PATH, override=False)
+else:
+    # Fallback für lokale Sonderfälle (bisheriges Verhalten ohne festen Pfad).
+    load_dotenv(override=False)
 load_dotenv(dotenv_path=_PROJECT_ROOT / ".env.local", override=True)
 
 
@@ -98,10 +108,85 @@ class Settings:
     WIN_CHANCE_BLEND_ACTUAL_WR: float = float(
         os.getenv("WIN_CHANCE_BLEND_ACTUAL_WR", "0.35")
     )
+    # Neu: Mindest-Anteil echter Historie in der effektiven Win-Chance.
+    # Beispiel: 0.55 bedeutet >=55% der Kennzahl stammen aus gemessener DB-Win-Rate
+    # (falls genügend Daten vorhanden sind). Dämpft Überoptimismus der Heuristik.
+    WIN_CHANCE_MIN_ACTUAL_WR_BLEND: float = float(
+        os.getenv("WIN_CHANCE_MIN_ACTUAL_WR_BLEND", "0.55")
+    )
     # Harte Sperre: nach PERF_TRACKER_MIN_TRADES Trades keine neuen Entries, wenn
     # gemessene Win-Rate darunter liegt. 0 = aus (Default).
     MIN_HISTORICAL_WIN_RATE_PCT: float = float(
         os.getenv("MIN_HISTORICAL_WIN_RATE_PCT", "0")
+    )
+    # Mindest-Expectancy pro Trade:
+    # E = p*RR - (1-p), mit p = effektive Gewinnchance [0..1].
+    # > 0 bedeutet positiver Erwartungswert.
+    # 0 = aus.
+    MIN_EXPECTANCY_SCORE: float = float(os.getenv("MIN_EXPECTANCY_SCORE", "0"))
+    # Alias für Runtime-/Telegram-Tuning (min_expectancy_pct → MIN_EXPECTANCY_R).
+    MIN_EXPECTANCY_R: float = float(
+        os.getenv("MIN_EXPECTANCY_R", os.getenv("MIN_EXPECTANCY_SCORE", "0"))
+    )
+    # Harte Qualitätsgates auf Strategie-Historie:
+    # - recency win-rate unter Schwelle → Entry blockieren
+    # - profit factor unter Schwelle     → Entry blockieren
+    QUALITY_GATE_MIN_RECENCY_WR_PCT: float = float(
+        os.getenv("QUALITY_GATE_MIN_RECENCY_WR_PCT", "58.0")
+    )
+    QUALITY_GATE_MIN_PROFIT_FACTOR: float = float(
+        os.getenv("QUALITY_GATE_MIN_PROFIT_FACTOR", "1.08")
+    )
+    # Adaptive Risikoreduktion in Drawdown-/Losing-Streak-Phasen.
+    # Faktor multipliziert die berechnete Positionsgröße (0.10–1.0).
+    QUALITY_RISK_SCALE_MIN_FACTOR: float = float(
+        os.getenv("QUALITY_RISK_SCALE_MIN_FACTOR", "0.45")
+    )
+    QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER: int = int(
+        os.getenv("QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER", "2")
+    )
+    QUALITY_RISK_SCALE_DD_TRIGGER_PCT: float = float(
+        os.getenv("QUALITY_RISK_SCALE_DD_TRIGGER_PCT", "10.0")
+    )
+    # Ampel-System (Trade-Qualitätsmonitor):
+    # RED  -> Entries pausieren + Risk-Off
+    # YELLOW/GREEN -> Ampel-Sperre wieder lösen.
+    AMPEL_WINDOW_TRADES: int = int(os.getenv("AMPEL_WINDOW_TRADES", "50"))
+    AMPEL_MIN_TRADES: int = int(os.getenv("AMPEL_MIN_TRADES", "20"))
+    AMPEL_RED_PF: float = float(os.getenv("AMPEL_RED_PF", "1.05"))
+    AMPEL_RED_WINRATE_PCT: float = float(os.getenv("AMPEL_RED_WINRATE_PCT", "58.0"))
+    AMPEL_RED_EXPECTANCY_R: float = float(os.getenv("AMPEL_RED_EXPECTANCY_R", "0.02"))
+    AMPEL_RED_LOSING_STREAK: int = int(os.getenv("AMPEL_RED_LOSING_STREAK", "5"))
+    AMPEL_GREEN_PF: float = float(os.getenv("AMPEL_GREEN_PF", "1.25"))
+    AMPEL_GREEN_WINRATE_PCT: float = float(os.getenv("AMPEL_GREEN_WINRATE_PCT", "68.0"))
+    AMPEL_GREEN_EXPECTANCY_R: float = float(os.getenv("AMPEL_GREEN_EXPECTANCY_R", "0.08"))
+    AMPEL_GREEN_MAX_LOSING_STREAK: int = int(
+        os.getenv("AMPEL_GREEN_MAX_LOSING_STREAK", "2")
+    )
+    # Falls die letzten geschlossenen Trades zu alt sind, wird RED nicht forciert,
+    # damit der Bot nicht in einem dauerhaften "Red-Lock" ohne neue Daten hängen bleibt.
+    AMPEL_STALE_DATA_HOURS: float = float(os.getenv("AMPEL_STALE_DATA_HOURS", "8"))
+    AMPEL_STALE_FORCE_YELLOW: bool = _env_bool("AMPEL_STALE_FORCE_YELLOW", default=True)
+    AMPEL_AUTO_ENABLED: bool = _env_bool("AMPEL_AUTO_ENABLED", default=True)
+    AMPEL_AUTO_INTERVAL_SEC: int = int(os.getenv("AMPEL_AUTO_INTERVAL_SEC", "180"))
+    # Anti-Spam für Auto-Ampel-Meldungen:
+    # gleiche Zustandsmeldung (z.B. RED-Hold) nur alle N Sekunden erneut senden.
+    AMPEL_AUTO_NOTIFY_COOLDOWN_SEC: int = int(
+        _first_non_empty(
+            "AMPEL_AUTO_NOTIFY_COOLDOWN_SEC",
+            "AMPEL_NOTIFY_COOLDOWN_SEC",
+            default="1800",
+        )
+    )
+    # Hard-Loop-Schutz:
+    # Wenn Ampel über längere Zeit auf RED hängt und keine neuen Closed-Trades
+    # nachkommen, wird der Guard temporär auf YELLOW entsperrt.
+    AMPEL_RED_LOOP_MAX_MINUTES: int = int(
+        os.getenv("AMPEL_RED_LOOP_MAX_MINUTES", "90")
+    )
+    AMPEL_RED_LOOP_BREAKER_ENABLED: bool = _env_bool(
+        "AMPEL_RED_LOOP_BREAKER_ENABLED",
+        default=True,
     )
 
     PAPER_TRADING_BALANCE: float = float(
@@ -243,7 +328,7 @@ class Settings:
     # ------------------------------------------------------------------
 
     # Tagesverlust-Limit in % des Startkapitals (<=0 = deaktiviert, siehe RiskEngine)
-    DAILY_LOSS_LIMIT_PCT: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 0.0))
+    DAILY_LOSS_LIMIT_PCT: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 10.0))
 
     # Optionaler Volatilitäts-Stop: blockiert neue Trades in HIGH_VOLATILITY-Regimes
     # (Regime wird von RegimeEngine erkannt und im EnhancedSignal.regime gespeichert)
@@ -335,6 +420,46 @@ class Settings:
     # Unterhalb dieses Scores gilt die Marktphase als "riskant/unsauber"
     BRAIN_RISKY_PHASE_SCORE: float = float(
         os.getenv("BRAIN_RISKY_PHASE_SCORE", 0.35)
+    )
+    # Kurzfristiges Reward-System für den Brain-Score:
+    # beeinflusst die Strategieauswahl anhand jüngster Outcomes.
+    BRAIN_REWARD_WEIGHT: float = float(os.getenv("BRAIN_REWARD_WEIGHT", 0.08))
+    BRAIN_REWARD_WINDOW: int = int(os.getenv("BRAIN_REWARD_WINDOW", 12))
+    BRAIN_REWARD_DECAY: float = float(os.getenv("BRAIN_REWARD_DECAY", 0.88))
+    # Positiver Trade-Muster-Lernbonus:
+    # Aus erfolgreichen Trades werden typische Confidence/RR/Side/Regime-Muster
+    # je Strategie gelernt und bei ähnlichen neuen Signalen leicht bevorzugt.
+    BRAIN_POSITIVE_PATTERN_ENABLED: bool = _env_bool(
+        "BRAIN_POSITIVE_PATTERN_ENABLED",
+        "BRAIN_PATTERN_LEARNING_ENABLED",
+        default=True,
+    )
+    BRAIN_POSITIVE_PATTERN_WINDOW: int = int(
+        _first_non_empty(
+            "BRAIN_POSITIVE_PATTERN_WINDOW",
+            "BRAIN_PATTERN_WINDOW",
+            default="40",
+        )
+    )
+    BRAIN_POSITIVE_PATTERN_MIN_TRADES: int = int(
+        _first_non_empty(
+            "BRAIN_POSITIVE_PATTERN_MIN_TRADES",
+            "BRAIN_PATTERN_MIN_WINS",
+            default="8",
+        )
+    )
+    BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT: float = float(
+        _first_non_empty(
+            "BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT",
+            default="55.0",
+        )
+    )
+    BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT: float = float(
+        _first_non_empty(
+            "BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT",
+            "BRAIN_PATTERN_MAX_BONUS",
+            default="0.08",
+        )
     )
 
     # ------------------------------------------------------------------

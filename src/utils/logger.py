@@ -2,8 +2,15 @@ import logging
 import os
 import sys
 from datetime import datetime
-from rich.logging import RichHandler
-from rich.console import Console
+try:
+    from rich.logging import RichHandler
+    from rich.console import Console
+except ModuleNotFoundError:
+    RichHandler = None
+
+    class Console:  # type: ignore[override]
+        def __init__(self, *args, **kwargs):
+            pass
 
 # Windows: CP1252 stdout can crash on Unicode log lines (box drawing, symbols).
 # Best effort: reconfigure std streams to UTF-8 with replacement fallback.
@@ -31,14 +38,23 @@ def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
     logger.propagate = False
 
     if not logger.handlers:
-        rich_handler = RichHandler(
-            console=console,
-            show_time=True,
-            show_path=False,
-            markup=True,
-            rich_tracebacks=True,
-        )
-        rich_handler.setLevel(log_level)
+        if RichHandler is not None:
+            stream_handler = RichHandler(
+                console=console,
+                show_time=True,
+                show_path=False,
+                markup=True,
+                rich_tracebacks=True,
+            )
+        else:
+            stream_handler = logging.StreamHandler(stream=sys.stdout)
+            stream_handler.setFormatter(
+                logging.Formatter(
+                    "%(asctime)s | %(name)s | %(levelname)s | %(message)s",
+                    datefmt="%Y-%m-%d %H:%M:%S",
+                )
+            )
+        stream_handler.setLevel(log_level)
 
         file_handler = logging.FileHandler(log_filename, encoding="utf-8")
         file_handler.setLevel(log_level)
@@ -48,7 +64,7 @@ def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
         )
         file_handler.setFormatter(file_formatter)
 
-        logger.addHandler(rich_handler)
+        logger.addHandler(stream_handler)
         logger.addHandler(file_handler)
 
     return logger

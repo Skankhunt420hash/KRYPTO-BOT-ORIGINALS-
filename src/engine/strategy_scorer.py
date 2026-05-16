@@ -64,6 +64,11 @@ _MAX_STREAK_PENALTY: float = 0.10
 _SCORE_MIN: float = 0.10
 _SCORE_MAX: float = 1.00
 
+# Reinforcement / "Belohnungssystem":
+# Neue gute Trades sollen die Strategy kurzfristig leicht pushen,
+# schlechte Trades analog dämpfen (kontrolliert, nicht dominant).
+_REWARD_WEIGHT: float = float(getattr(settings, "BRAIN_REWARD_WEIGHT", 0.08))
+
 
 class StrategyScorer:
     """
@@ -148,15 +153,34 @@ class StrategyScorer:
             * _MAX_STREAK_PENALTY
         )
 
-        raw = base + regime_adj - dd_penalty - streak_penalty
+        reward_adj = self._reward_adjustment(strategy_name, regime)
+        raw = base + regime_adj + reward_adj - dd_penalty - streak_penalty
         score = max(_SCORE_MIN, min(_SCORE_MAX, raw))
 
         logger.debug(
             f"[Scorer] {strategy_name} [{regime}] "
             f"n={global_m.trade_count} "
             f"wr={wr_score:.2f} pf={pf_score:.2f} rec={rec_score:.2f} "
-            f"base={base:.3f} reg_adj={regime_adj:+.3f} "
+            f"base={base:.3f} reg_adj={regime_adj:+.3f} reward_adj={reward_adj:+.3f} "
             f"dd_pen={-dd_penalty:.3f} sk_pen={-streak_penalty:.3f} "
             f"→ score={score:.3f}"
         )
         return score
+
+    def _reward_adjustment(self, strategy_name: str, regime: str) -> float:
+        """
+        Belohnungs-/Bestrafungs-Komponente aus der jüngsten Win-Rate.
+        Positiv bei frischer Erfolgsserie, negativ bei frischer Verlustserie.
+        """
+        metrics = self._tracker.get_global(strategy_name)
+        if metrics is None:
+            return 0.0
+        recent_signal = float(metrics.recent_reward_signal)
+        if regime and regime != "GLOBAL":
+            reg_metrics = self._tracker.get_regime(strategy_name, regime)
+            if reg_metrics is not None and reg_metrics.trade_count >= _MIN_TRADES_REGIME:
+                # Regime-spezifische "Emotion" leicht stärker gewichten
+                recent_signal = (recent_signal * 0.4) + (float(reg_metrics.recent_reward_signal) * 0.6)
+        # clamp innerhalb [-1, +1] und skaliere auf maximal +/- _REWARD_WEIGHT
+        recent_signal = max(-1.0, min(1.0, recent_signal))
+        return recent_signal * _REWARD_WEIGHT

@@ -8,7 +8,7 @@ from src.exchange.connector import ExchangeConnector
 from src.exchange.universe import resolve_trading_pairs, format_pairs_for_log
 from src.engine.portfolio_risk import PortfolioRiskEngine, build_config_from_settings
 from src.strategies import get_strategy, get_all_enhanced_strategies, Signal
-from src.strategies.signal import Side
+from src.strategies.signal import Side, EnhancedSignal
 from src.engine.regime import RegimeEngine
 from src.engine.meta_selector import MetaSelector
 from src.engine.brain import IntelligenceBrain
@@ -30,6 +30,8 @@ from src.utils.win_chance import (
     compute_trade_win_chance_pct,
     effective_entry_win_chance_pct,
     historical_win_rate_block_reason,
+    strategy_quality_block_reason,
+    position_size_scaler_by_quality,
 )
 
 logger = setup_logger("bot", settings.LOG_LEVEL)
@@ -64,6 +66,10 @@ class TradingBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                request_bot_restart=self._request_restart_from_panel,
+                get_bot_status=self._bot_status_from_panel,
+                apply_runtime_settings=self._apply_runtime_settings_from_panel,
+                request_test_trade=self._trigger_test_trade_from_panel,
             ),
         )
         self.running = False
@@ -412,7 +418,14 @@ class TradingBot:
             self.perf_tracker.refresh()
         except Exception:
             pass
-        for symbol in self.pairs:
+        cycle_symbols = list(dict.fromkeys(list(self.pairs) + list(self.risk.open_positions.keys())))
+        extra_symbols = [s for s in self.risk.open_positions.keys() if s not in self.pairs]
+        if extra_symbols:
+            logger.info(
+                "Exit-Überwachung erweitert um offene Symbole außerhalb Pair-Liste: %s",
+                ", ".join(extra_symbols[:20]),
+            )
+        for symbol in cycle_symbols:
             try:
                 self._process_pair(symbol)
             except Exception as e:
@@ -634,6 +647,412 @@ class TradingBot:
             "(Telegram kann keinen sicheren Cold-Start auslösen)."
         )
 
+    def _request_restart_from_panel(self) -> Tuple[bool, str]:
+        """
+        Restart innerhalb des laufenden Prozesses:
+        - Runtime-Sperren werden zurückgesetzt.
+        - Kein Prozess-Neustart; dafür ist der externe Supervisor zuständig.
+        """
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+        runtime_state.append_log("TELEGRAM /botrestart -> runtime gates reset")
+        try:
+            self.tg.notify_bot_resumed("telegram:/botrestart")
+        except Exception:
+            pass
+        if self.running:
+            return True, "Bot-Runtime neu aktiviert (Pause/Risk-Off zurückgesetzt)."
+        return False, (
+            "Bot-Prozess läuft nicht. Für echten Prozess-Restart bitte Controller/Supervisor nutzen."
+        )
+
+    def _bot_status_from_panel(self) -> Dict:
+        return {
+            "running": bool(self.running),
+            "pid": os.getpid(),
+            "uptime_sec": None,
+            "pidfile": "inprocess:trading-bot",
+        }
+
+    def _trigger_test_trade_from_panel(self) -> Tuple[bool, str]:
+        """
+        Führt einen kontrollierten Test-Trade aus, um den kompletten Entry-Flow
+        (Order → Risk → DB → Telegram) zu verifizieren.
+        Sicherheitsgrenze: nur im Paper-Modus erlaubt.
+        """
+        if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
+            return False, "Test-Trade ist nur im Paper-Modus erlaubt."
+        if not self.pairs:
+            return False, "Keine Trading-Paare konfiguriert."
+        symbol = str(self.pairs[0]).strip()
+        if not symbol:
+            return False, "Erstes Trading-Paar ist leer."
+        try:
+            df = self.exchange.fetch_ohlcv(symbol, limit=2)
+            if df.empty:
+                return False, f"Keine Marktdaten für {symbol}."
+            entry = float(df["close"].iloc[-1])
+            if entry <= 0:
+                return False, f"Ungültiger Marktpreis für {symbol}: {entry}"
+
+            amount = float(self.risk.calculate_position_size(entry))
+            if amount <= 0:
+                return False, "Berechnete Positionsgröße ist 0."
+
+            stop_loss = entry * 0.99
+            take_profit = entry * 1.02
+            rr = (take_profit - entry) / max(entry - stop_loss, 1e-9)
+            signal = Signal(
+                symbol=symbol,
+                action="buy",
+                confidence=0.99,
+                reason="telegram_test_trade",
+            )
+
+            order = self.exchange.create_market_buy_order(symbol, amount)
+            if not order:
+                return False, "Order konnte nicht ausgeführt werden."
+
+            pos = self.risk.open_position(symbol, entry, amount)
+            if pos is None:
+                return False, "RiskManager hat Position nicht geöffnet."
+            pos.stop_loss = stop_loss
+            pos.take_profit = take_profit
+            pos.strategy_name = "TelegramTest"
+
+            trade_id = self.repo.save_open_trade(
+                symbol=symbol,
+                timeframe=settings.TIMEFRAME,
+                strategy_name="TelegramTest",
+                side="long",
+                entry_price=entry,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                position_size=amount,
+                rr_planned=round(rr, 2),
+                confidence=99.0,
+                regime="TEST",
+                reason_open="telegram_test_trade",
+                signal_score=0.99,
+                risk_state_at_entry=self._risk_state_at_entry_snapshot(),
+                order_id=str(order.get("id", "")),
+            )
+            if trade_id:
+                self._open_trade_ids[symbol] = trade_id
+
+            self.tg.notify_trade_opened(
+                symbol=symbol,
+                side="long",
+                entry=entry,
+                sl=stop_loss,
+                tp=take_profit,
+                rr=round(rr, 2),
+                amount=amount,
+                strategy="TelegramTest",
+                confidence=99.0,
+                regime="TEST",
+                is_paper=True,
+                brain_score=None,
+            )
+            self._record_trade_event(
+                event="opened",
+                symbol=symbol,
+                side="long",
+                strategy="TelegramTest",
+                pnl=None,
+                reason="telegram_test_trade",
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="entry_opened_testtrade",
+                reason="telegram_test_trade",
+                strategy="TelegramTest",
+            )
+            return True, (
+                f"Test-Trade eröffnet: {symbol} | entry={entry:.4f} | amount={amount:.6f} | "
+                f"SL={stop_loss:.4f} TP={take_profit:.4f}"
+            )
+        except Exception as e:
+            return False, f"Test-Trade fehlgeschlagen: {type(e).__name__}"
+
+    def _apply_runtime_settings_from_panel(self, changes: Dict[str, float]) -> Tuple[bool, str]:
+        """
+        Erlaubt kontrollierte Laufzeit-Änderungen aus dem Telegram-Panel.
+        Verfügbar im Single-Bot als Soft-Tuning ohne Neustart.
+        """
+        changed: List[str] = []
+        try:
+            if "risk_per_trade_pct" in changes:
+                val = float(changes["risk_per_trade_pct"])
+                if not (0.1 <= val <= 10.0):
+                    return False, "risk_per_trade_pct muss zwischen 0.1 und 10.0 liegen."
+                settings.RISK_PER_TRADE_PCT = val
+                changed.append(f"RISK_PER_TRADE_PCT={val:.2f}")
+
+            if "max_total_open_risk_pct" in changes:
+                val = float(changes["max_total_open_risk_pct"])
+                if not (0.5 <= val <= 50.0):
+                    return False, "max_total_open_risk_pct muss zwischen 0.5 und 50.0 liegen."
+                settings.MAX_TOTAL_OPEN_RISK_PCT = val
+                changed.append(f"MAX_TOTAL_OPEN_RISK_PCT={val:.2f}")
+
+            if "max_positions_total" in changes:
+                val = int(changes["max_positions_total"])
+                if not (1 <= val <= 50):
+                    return False, "max_positions_total muss zwischen 1 und 50 liegen."
+                settings.MAX_POSITIONS_TOTAL = val
+                settings.MAX_OPEN_TRADES = val
+                # RiskEngine nutzt diesen harten Gate für check_signal().
+                hard_cap = val
+                if settings.TRADING_MODE == "live" and bool(getattr(settings, "LIVE_TEST_MODE", False)):
+                    hard_cap = min(hard_cap, 1)
+                self.risk.max_open_trades = hard_cap
+                # Portfolio-Layer separat synchron halten.
+                self.risk.portfolio.cfg.max_positions_total = val
+                changed.append(f"MAX_POSITIONS_TOTAL={val}")
+
+            if "max_position_notional" in changes:
+                val = float(changes["max_position_notional"])
+                if not (5.0 <= val <= 1_000_000.0):
+                    return False, "max_position_notional muss zwischen 5 und 1_000_000 liegen."
+                settings.MAX_POSITION_NOTIONAL = val
+                self.risk.portfolio.cfg.max_position_notional = val
+                changed.append(f"MAX_POSITION_NOTIONAL={val:.2f}")
+
+            if "min_position_notional" in changes:
+                val = float(changes["min_position_notional"])
+                if not (1.0 <= val <= 100_000.0):
+                    return False, "min_position_notional muss zwischen 1 und 100_000 liegen."
+                settings.MIN_POSITION_NOTIONAL = val
+                self.risk.portfolio.cfg.min_position_notional = val
+                changed.append(f"MIN_POSITION_NOTIONAL={val:.2f}")
+
+            if "daily_loss_limit_pct" in changes:
+                val = float(changes["daily_loss_limit_pct"])
+                if not (0.1 <= val <= 100.0):
+                    return False, "daily_loss_limit_pct muss zwischen 0.1 und 100.0 liegen."
+                settings.DAILY_LOSS_LIMIT_PCT = val
+                changed.append(f"DAILY_LOSS_LIMIT_PCT={val:.2f}")
+
+            if "live_test_daily_loss_limit_pct" in changes:
+                val = float(changes["live_test_daily_loss_limit_pct"])
+                if not (0.1 <= val <= 100.0):
+                    return False, "live_test_daily_loss_limit_pct muss zwischen 0.1 und 100.0 liegen."
+                settings.LIVE_TEST_DAILY_LOSS_LIMIT_PCT = val
+                changed.append(f"LIVE_TEST_DAILY_LOSS_LIMIT_PCT={val:.2f}")
+
+            if "min_confidence" in changes:
+                val = float(changes["min_confidence"])
+                if not (1.0 <= val <= 100.0):
+                    return False, "min_confidence muss zwischen 1 und 100 liegen."
+                settings.MIN_CONFIDENCE = val
+                changed.append(f"MIN_CONFIDENCE={val:.1f}")
+
+            if "min_rr" in changes:
+                val = float(changes["min_rr"])
+                if not (0.5 <= val <= 6.0):
+                    return False, "min_rr muss zwischen 0.5 und 6.0 liegen."
+                settings.MIN_RR = val
+                changed.append(f"MIN_RR={val:.2f}")
+
+            if "min_win_chance_pct" in changes:
+                val = float(changes["min_win_chance_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_win_chance_pct muss zwischen 0 und 100 liegen."
+                settings.MIN_WIN_CHANCE_PCT = val
+                changed.append(f"MIN_WIN_CHANCE_PCT={val:.1f}")
+
+            if "min_historical_win_rate_pct" in changes:
+                val = float(changes["min_historical_win_rate_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_historical_win_rate_pct muss zwischen 0 und 100 liegen."
+                settings.MIN_HISTORICAL_WIN_RATE_PCT = val
+                changed.append(f"MIN_HISTORICAL_WIN_RATE_PCT={val:.1f}")
+
+            if "perf_tracker_min_trades" in changes:
+                val = int(changes["perf_tracker_min_trades"])
+                if not (1 <= val <= 500):
+                    return False, "perf_tracker_min_trades muss zwischen 1 und 500 liegen."
+                settings.PERF_TRACKER_MIN_TRADES = val
+                changed.append(f"PERF_TRACKER_MIN_TRADES={val}")
+
+            if "coin_cooldown_minutes" in changes:
+                val = int(changes["coin_cooldown_minutes"])
+                if not (0 <= val <= 240):
+                    return False, "coin_cooldown_minutes muss zwischen 0 und 240 liegen."
+                settings.COIN_COOLDOWN_MINUTES = val
+                changed.append(f"COIN_COOLDOWN_MINUTES={val}")
+
+            if "strategy_cooldown_minutes" in changes:
+                val = int(changes["strategy_cooldown_minutes"])
+                if not (0 <= val <= 240):
+                    return False, "strategy_cooldown_minutes muss zwischen 0 und 240 liegen."
+                settings.STRATEGY_COOLDOWN_MINUTES = val
+                changed.append(f"STRATEGY_COOLDOWN_MINUTES={val}")
+
+            if "duplicate_signal_minutes" in changes:
+                val = int(changes["duplicate_signal_minutes"])
+                if not (0 <= val <= 120):
+                    return False, "duplicate_signal_minutes muss zwischen 0 und 120 liegen."
+                settings.DUPLICATE_SIGNAL_MINUTES = val
+                changed.append(f"DUPLICATE_SIGNAL_MINUTES={val}")
+
+            if "brain_min_score_to_trade" in changes:
+                val = float(changes["brain_min_score_to_trade"])
+                if not (0.1 <= val <= 0.95):
+                    return False, "brain_min_score_to_trade muss zwischen 0.10 und 0.95 liegen."
+                settings.BRAIN_MIN_SCORE_TO_TRADE = val
+                changed.append(f"BRAIN_MIN_SCORE_TO_TRADE={val:.3f}")
+
+            if "brain_risky_phase_score" in changes:
+                val = float(changes["brain_risky_phase_score"])
+                if not (0.05 <= val <= 0.9):
+                    return False, "brain_risky_phase_score muss zwischen 0.05 und 0.90 liegen."
+                settings.BRAIN_RISKY_PHASE_SCORE = val
+                changed.append(f"BRAIN_RISKY_PHASE_SCORE={val:.3f}")
+
+            if "perf_selector_weight" in changes:
+                val = float(changes["perf_selector_weight"])
+                if not (0.0 <= val <= 0.8):
+                    return False, "perf_selector_weight muss zwischen 0.0 und 0.8 liegen."
+                settings.PERF_SELECTOR_WEIGHT = val
+                changed.append(f"PERF_SELECTOR_WEIGHT={val:.3f}")
+
+            if "reward_weight" in changes:
+                val = float(changes["reward_weight"])
+                if not (0.0 <= val <= 0.5):
+                    return False, "reward_weight muss zwischen 0.0 und 0.5 liegen."
+                settings.BRAIN_REWARD_WEIGHT = val
+                changed.append(f"BRAIN_REWARD_WEIGHT={val:.3f}")
+
+            if "reward_window" in changes:
+                val = int(changes["reward_window"])
+                if not (2 <= val <= 60):
+                    return False, "reward_window muss zwischen 2 und 60 liegen."
+                settings.BRAIN_REWARD_WINDOW = val
+                changed.append(f"BRAIN_REWARD_WINDOW={val}")
+
+            if "brain_positive_pattern_enabled" in changes:
+                raw = changes["brain_positive_pattern_enabled"]
+                try:
+                    val = bool(int(raw))
+                except Exception:
+                    val = str(raw).strip().lower() in ("1", "true", "yes", "on")
+                settings.BRAIN_POSITIVE_PATTERN_ENABLED = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_ENABLED={val}")
+
+            if "brain_positive_pattern_window" in changes:
+                val = int(changes["brain_positive_pattern_window"])
+                if not (10 <= val <= 200):
+                    return False, "brain_positive_pattern_window muss zwischen 10 und 200 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_WINDOW = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_WINDOW={val}")
+
+            if "brain_positive_pattern_min_trades" in changes:
+                val = int(changes["brain_positive_pattern_min_trades"])
+                if not (3 <= val <= 80):
+                    return False, "brain_positive_pattern_min_trades muss zwischen 3 und 80 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_TRADES = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_TRADES={val}")
+
+            if "brain_positive_pattern_min_winrate_pct" in changes:
+                val = float(changes["brain_positive_pattern_min_winrate_pct"])
+                if not (40.0 <= val <= 90.0):
+                    return False, "brain_positive_pattern_min_winrate_pct muss zwischen 40.0 und 90.0 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT={val:.1f}")
+
+            if "brain_positive_pattern_bonus_weight" in changes:
+                val = float(changes["brain_positive_pattern_bonus_weight"])
+                if not (0.0 <= val <= 0.2):
+                    return False, "brain_positive_pattern_bonus_weight muss zwischen 0.0 und 0.2 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT={val:.3f}")
+
+            if "brain_positive_pattern_enabled" in changes:
+                val = bool(int(changes["brain_positive_pattern_enabled"]))
+                settings.BRAIN_POSITIVE_PATTERN_ENABLED = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_ENABLED={val}")
+
+            if "brain_positive_pattern_window" in changes:
+                val = int(changes["brain_positive_pattern_window"])
+                if not (10 <= val <= 500):
+                    return False, "brain_positive_pattern_window muss zwischen 10 und 500 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_WINDOW = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_WINDOW={val}")
+
+            if "brain_positive_pattern_min_trades" in changes:
+                val = int(changes["brain_positive_pattern_min_trades"])
+                if not (3 <= val <= 200):
+                    return False, "brain_positive_pattern_min_trades muss zwischen 3 und 200 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_TRADES = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_TRADES={val}")
+
+            if "brain_positive_pattern_min_winrate_pct" in changes:
+                val = float(changes["brain_positive_pattern_min_winrate_pct"])
+                if not (30.0 <= val <= 95.0):
+                    return False, "brain_positive_pattern_min_winrate_pct muss zwischen 30 und 95 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT={val:.1f}")
+
+            if "brain_positive_pattern_bonus_weight" in changes:
+                val = float(changes["brain_positive_pattern_bonus_weight"])
+                if not (0.0 <= val <= 0.25):
+                    return False, "brain_positive_pattern_bonus_weight muss zwischen 0.0 und 0.25 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT={val:.3f}")
+
+            if "control_strategy_priority_bonus" in changes:
+                val = float(changes["control_strategy_priority_bonus"])
+                if not (0.0 <= val <= 0.5):
+                    return False, "control_strategy_priority_bonus muss zwischen 0.0 und 0.5 liegen."
+                settings.CONTROL_STRATEGY_PRIORITY_BONUS = val
+                changed.append(f"CONTROL_STRATEGY_PRIORITY_BONUS={val:.3f}")
+
+            if "min_expectancy_pct" in changes:
+                val = float(changes["min_expectancy_pct"])
+                if not (-100.0 <= val <= 100.0):
+                    return False, "min_expectancy_pct muss zwischen -100 und 100 liegen."
+                settings.MIN_EXPECTANCY_R = val / 100.0
+                changed.append(f"MIN_EXPECTANCY_R={settings.MIN_EXPECTANCY_R:.3f}")
+
+            if "min_recency_win_rate_pct" in changes:
+                val = float(changes["min_recency_win_rate_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_recency_win_rate_pct muss zwischen 0 und 100 liegen."
+                settings.QUALITY_GATE_MIN_RECENCY_WR_PCT = val
+                changed.append(f"QUALITY_GATE_MIN_RECENCY_WR_PCT={val:.1f}")
+
+            if "min_profit_factor" in changes:
+                val = float(changes["min_profit_factor"])
+                if not (0.0 <= val <= 20.0):
+                    return False, "min_profit_factor muss zwischen 0 und 20 liegen."
+                settings.QUALITY_GATE_MIN_PROFIT_FACTOR = val
+                changed.append(f"QUALITY_GATE_MIN_PROFIT_FACTOR={val:.2f}")
+
+            if "max_losing_streak_to_trade" in changes:
+                val = int(changes["max_losing_streak_to_trade"])
+                if not (0 <= val <= 20):
+                    return False, "max_losing_streak_to_trade muss zwischen 0 und 20 liegen."
+                settings.QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER = val
+                changed.append(f"QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER={val}")
+
+            if "weak_phase_position_scale" in changes:
+                val = float(changes["weak_phase_position_scale"])
+                if not (0.1 <= val <= 1.0):
+                    return False, "weak_phase_position_scale muss zwischen 0.1 und 1.0 liegen."
+                settings.QUALITY_RISK_SCALE_MIN_FACTOR = val
+                changed.append(f"QUALITY_RISK_SCALE_MIN_FACTOR={val:.2f}")
+
+            if not changed:
+                return False, "Keine gültigen Runtime-Änderungen übergeben."
+
+            runtime_state.append_log("TELEGRAM runtime_tuning " + ", ".join(changed))
+            return True, "Runtime-Parameter aktualisiert: " + ", ".join(changed)
+        except Exception as e:
+            return False, f"Runtime-Tuning fehlgeschlagen: {type(e).__name__}"
+
     def stop(self):
         self.running = False
         if self.panel:
@@ -740,6 +1159,10 @@ class MultiStrategyBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                request_bot_restart=self._request_restart_from_panel,
+                get_bot_status=self._bot_status_from_panel,
+                apply_runtime_settings=self._apply_runtime_settings_from_panel,
+                request_test_trade=self._trigger_test_trade_from_panel,
             ),
         )
 
@@ -916,10 +1339,15 @@ class MultiStrategyBot:
 
     def _startup_sanity_checks(self) -> List[str]:
         issues: List[str] = []
+        # Im Paper-Modus sind Exchange-/Ticker-Checks bewusst soft:
+        # temporäre API-Probleme sollen den Bot nicht dauerhaft hart blockieren.
+        if settings.TRADING_MODE != "live":
+            return issues
+
         markets: List[str] = []
         try:
             markets = self.exchange.get_markets()
-            if settings.TRADING_MODE == "live" and not markets:
+            if not markets:
                 issues.append("exchange_markets_unavailable")
         except Exception as e:
             issues.append(f"exchange_connection_failed:{type(e).__name__}")
@@ -937,6 +1365,31 @@ class MultiStrategyBot:
         except Exception as e:
             issues.append(f"ticker_check_failed:{type(e).__name__}")
         return issues
+
+    def _reevaluate_startup_gate(self) -> bool:
+        """
+        Recheckt den Startup-Gate zur Laufzeit.
+        So wird ein temporärer Startfehler (z.B. Exchange kurz down) automatisch
+        aufgehoben, sobald die Infrastruktur wieder stabil ist.
+        """
+        issues = self._startup_sanity_checks()
+        if issues:
+            self._startup_checks_ok = False
+            reason = " | ".join(issues)
+            if reason != self._startup_block_reason:
+                self._startup_block_reason = reason
+                runtime_state.append_log(f"STARTUP_GATE still_blocked {reason}")
+                self.tg.notify_error("STARTUP_GATE", reason)
+            return False
+
+        if not self._startup_checks_ok:
+            runtime_state.append_log("STARTUP_GATE released")
+            logger.warning(
+                "[green]STARTUP-GATE aufgehoben[/green] – Trading-Zyklen laufen wieder normal."
+            )
+        self._startup_checks_ok = True
+        self._startup_block_reason = ""
+        return True
 
     def _recover_after_restart(self) -> None:
         self._restore_control_state_from_file()
@@ -976,8 +1429,6 @@ class MultiStrategyBot:
         if issues:
             self._startup_checks_ok = False
             self._startup_block_reason = " | ".join(issues)
-            runtime_control.pause_entries()
-            runtime_control.enable_risk_off()
             runtime_state.append_log(f"RECOVERY startup_block {self._startup_block_reason}")
             self.tg.notify_error("RECOVERY_STARTUP_BLOCK", self._startup_block_reason)
         else:
@@ -1160,7 +1611,8 @@ class MultiStrategyBot:
 
     def _process_pair(self, symbol: str):
         """Führt den vollständigen Analyse- und Ausführungszyklus für ein Pair durch."""
-        if symbol in self._recovery_blocked_symbols:
+        has_open_position = symbol in self.risk.open_positions
+        if symbol in self._recovery_blocked_symbols and not has_open_position:
             logger.warning(
                 f"[yellow]RECOVERY BLOCK[/yellow] {symbol} | "
                 "Symbol nach Neustart konservativ gesperrt"
@@ -1184,6 +1636,11 @@ class MultiStrategyBot:
                 market_context={},
             )
             return
+        if symbol in self._recovery_blocked_symbols and has_open_position:
+            logger.warning(
+                f"[yellow]RECOVERY BLOCK (exit-only)[/yellow] {symbol} | "
+                "Offene Position wird weiter verwaltet, neue Entries bleiben gesperrt"
+            )
         df = self.exchange.fetch_ohlcv(symbol)
         if df.empty:
             logger.warning(f"{symbol} | Keine OHLCV-Daten erhalten – übersprungen")
@@ -1617,6 +2074,13 @@ class MultiStrategyBot:
                 strategy_name=best.strategy_name,
                 perf_tracker=self.perf_tracker,
             )
+            # Erwartungswert-Gate:
+            # expectancy_r = p*RR - (1-p)
+            # p = Gewinnwahrscheinlichkeit in [0,1]
+            # Nur Trades mit positivem Erwartungswert zulassen.
+            p_est = max(0.0, min(1.0, wc_gate_m / 100.0))
+            expectancy_r = (p_est * float(best.rr)) - (1.0 - p_est)
+            min_expectancy = float(getattr(settings, "MIN_EXPECTANCY_R", 0.0) or 0.0)
             if wc_gate_m < min_wc:
                 reason_wc = f"MIN_WIN_CHANCE:{wc_gate_m:.1f}<{min_wc:.0f}"
                 logger.info(
@@ -1658,6 +2122,137 @@ class MultiStrategyBot:
                     allow_trade=False,
                     reject_reason=reason_wc,
                     last_decision_reason=reason_wc,
+                    market_context=market_ctx,
+                )
+                return
+            if expectancy_r < min_expectancy:
+                reason_ex = f"MIN_EXPECTANCY:{expectancy_r:.3f}<{min_expectancy:.3f}"
+                logger.info(
+                    f"[yellow]SKIP Erwartungswert[/yellow] {symbol} | "
+                    f"Strategie: {best.strategy_name} | E={expectancy_r:.3f} < {min_expectancy:.3f}"
+                )
+                self.repo.save_rejected_signal(
+                    symbol=symbol,
+                    timeframe=best.timeframe,
+                    strategy_name=best.strategy_name,
+                    side=best.side.value,
+                    entry_price=best.entry,
+                    stop_loss=best.stop_loss,
+                    take_profit=best.take_profit,
+                    rr_planned=best.rr,
+                    confidence=best.confidence,
+                    regime=best.regime,
+                    reason_rejected=reason_ex,
+                )
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="blocked_expectancy",
+                    reason=reason_ex,
+                    strategy=best.strategy_name,
+                )
+                self._log_decision_cycle(
+                    symbol=symbol,
+                    regime=regime.value,
+                    ranking=ranking,
+                    chosen_strategy=best.strategy_name,
+                    signal_score=signal_score,
+                    risk_decision="expectancy_block",
+                    allow_trade=False,
+                    reject_reason=reason_ex,
+                    last_decision_reason=reason_ex,
+                    market_context=market_ctx,
+                )
+                return
+
+        # 5f. Erweiterter Qualitäts-Gate auf echter Strategie-Historie
+        quality_reason = strategy_quality_block_reason(
+            best.strategy_name,
+            self.perf_tracker,
+        )
+        if quality_reason:
+            logger.info(
+                f"[yellow]SKIP Strategie-Qualitätsgate[/yellow] {symbol} | "
+                f"Strategie: {best.strategy_name} | {quality_reason}"
+            )
+            self.repo.save_rejected_signal(
+                symbol=symbol,
+                timeframe=best.timeframe,
+                strategy_name=best.strategy_name,
+                side=best.side.value,
+                entry_price=best.entry,
+                stop_loss=best.stop_loss,
+                take_profit=best.take_profit,
+                rr_planned=best.rr,
+                confidence=best.confidence,
+                regime=best.regime,
+                reason_rejected=quality_reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_strategy_quality",
+                reason=quality_reason,
+                strategy=best.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=regime.value,
+                ranking=ranking,
+                chosen_strategy=best.strategy_name,
+                signal_score=signal_score,
+                risk_decision="strategy_quality_block",
+                allow_trade=False,
+                reject_reason=quality_reason,
+                last_decision_reason=quality_reason,
+                market_context=market_ctx,
+            )
+            return
+
+        # 5g. Adaptive Size-Steuerung: bei schwacher jüngster Qualität Risiko reduzieren
+        size_scale, size_scale_reason = position_size_scaler_by_quality(
+            best.strategy_name,
+            self.perf_tracker,
+        )
+        if size_scale < 1.0:
+            original_amount = amount
+            amount = max(0.0, float(amount) * float(size_scale))
+            logger.info(
+                "[cyan]Adaptive Size[/cyan] %s | %s | %.6f -> %.6f",
+                symbol,
+                size_scale_reason,
+                original_amount,
+                amount,
+            )
+            if amount <= 0:
+                reason_size = f"QUALITY_SIZE_ZERO:{size_scale_reason}"
+                self.repo.save_rejected_signal(
+                    symbol=symbol,
+                    timeframe=best.timeframe,
+                    strategy_name=best.strategy_name,
+                    side=best.side.value,
+                    entry_price=best.entry,
+                    stop_loss=best.stop_loss,
+                    take_profit=best.take_profit,
+                    rr_planned=best.rr,
+                    confidence=best.confidence,
+                    regime=best.regime,
+                    reason_rejected=reason_size,
+                )
+                self._record_last_decision(
+                    symbol=symbol,
+                    decision="blocked_strategy_quality_size",
+                    reason=reason_size,
+                    strategy=best.strategy_name,
+                )
+                self._log_decision_cycle(
+                    symbol=symbol,
+                    regime=regime.value,
+                    ranking=ranking,
+                    chosen_strategy=best.strategy_name,
+                    signal_score=signal_score,
+                    risk_decision="strategy_quality_size_block",
+                    allow_trade=False,
+                    reject_reason=reason_size,
+                    last_decision_reason=reason_size,
                     market_context=market_ctx,
                 )
                 return
@@ -1947,7 +2542,7 @@ class MultiStrategyBot:
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
-        if not self._startup_checks_ok:
+        if not self._startup_checks_ok and not self._reevaluate_startup_gate():
             reason = self._startup_block_reason or "startup_checks_failed"
             logger.error(
                 f"[red]STARTUP-GATE AKTIV[/red] – Zyklus übersprungen | Grund: {reason}"
@@ -1994,7 +2589,14 @@ class MultiStrategyBot:
         except Exception as e:
             logger.warning(f"Scorer-Refresh fehlgeschlagen (nicht kritisch): {e}")
 
-        for symbol in self.pairs:
+        cycle_symbols = list(dict.fromkeys(list(self.pairs) + list(self.risk.open_positions.keys())))
+        extra_symbols = [s for s in self.risk.open_positions.keys() if s not in self.pairs]
+        if extra_symbols:
+            logger.info(
+                "Exit-Überwachung erweitert um offene Symbole außerhalb Pair-Liste: %s",
+                ", ".join(extra_symbols[:20]),
+            )
+        for symbol in cycle_symbols:
             try:
                 self._process_pair(symbol)
             except Exception as e:
@@ -2219,6 +2821,382 @@ class MultiStrategyBot:
             "Multi-Bot läuft aktuell nicht. Bitte Bot-Prozess lokal starten "
             "(Telegram kann keinen sicheren Cold-Start auslösen)."
         )
+
+    def _request_restart_from_panel(self) -> Tuple[bool, str]:
+        """
+        Restart innerhalb des laufenden Multi-Bot-Prozesses:
+        - Runtime-Gates werden zurückgesetzt.
+        - Kein neuer Prozess wird von hier gestartet.
+        """
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+        runtime_state.append_log("TELEGRAM /botrestart -> runtime gates reset")
+        try:
+            self.tg.notify_bot_resumed("telegram:/botrestart")
+        except Exception:
+            pass
+        if self.running:
+            return True, "Multi-Bot-Runtime neu aktiviert (Pause/Risk-Off zurückgesetzt)."
+        return False, (
+            "Multi-Bot-Prozess läuft nicht. Für echten Prozess-Restart bitte Controller/Supervisor nutzen."
+        )
+
+    def _bot_status_from_panel(self) -> Dict:
+        return {
+            "running": bool(self.running),
+            "pid": os.getpid(),
+            "uptime_sec": None,
+            "pidfile": "inprocess:multi-strategy-bot",
+        }
+
+    def _trigger_test_trade_from_panel(self) -> Tuple[bool, str]:
+        """
+        Führt im Multi-Bot einen kontrollierten Test-Trade aus.
+        Sicherheitsgrenze: nur im Paper-Modus erlaubt.
+        """
+        if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
+            return False, "Test-Trade ist nur im Paper-Modus erlaubt."
+        if not self.pairs:
+            return False, "Keine Trading-Paare konfiguriert."
+        symbol = str(self.pairs[0]).strip()
+        if not symbol:
+            return False, "Erstes Trading-Paar ist leer."
+
+        try:
+            df = self.exchange.fetch_ohlcv(symbol, limit=2)
+            if df.empty:
+                return False, f"Keine Marktdaten für {symbol}."
+            entry = float(df["close"].iloc[-1])
+            if entry <= 0:
+                return False, f"Ungültiger Marktpreis für {symbol}: {entry}"
+
+            amount = float(self.risk.calculate_position_size(entry))
+            if amount <= 0:
+                return False, "Berechnete Positionsgröße ist 0."
+
+            stop_loss = entry * 0.99
+            take_profit = entry * 1.02
+            rr = (take_profit - entry) / max(entry - stop_loss, 1e-9)
+
+            order = self.exchange.create_market_buy_order(symbol, amount)
+            if not order:
+                return False, "Order konnte nicht ausgeführt werden."
+
+            signal = EnhancedSignal(
+                symbol=symbol,
+                timeframe=settings.TIMEFRAME,
+                strategy_name="TelegramTest",
+                side=Side.LONG,
+                confidence=99.0,
+                entry=entry,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                rr=round(rr, 2),
+                reason="telegram_test_trade",
+                regime="TEST",
+            )
+            pos = self.risk.open_with_signal(signal, amount)
+            if pos is None:
+                return False, "RiskEngine hat Position nicht geöffnet."
+
+            trade_id = self.repo.save_open_trade(
+                symbol=symbol,
+                timeframe=settings.TIMEFRAME,
+                strategy_name="TelegramTest",
+                side="long",
+                entry_price=entry,
+                stop_loss=stop_loss,
+                take_profit=take_profit,
+                position_size=amount,
+                rr_planned=round(rr, 2),
+                confidence=99.0,
+                regime="TEST",
+                reason_open="telegram_test_trade",
+                signal_score=0.99,
+                risk_state_at_entry=self._risk_state_at_entry_snapshot(),
+                order_id=str(order.get("id", "")),
+            )
+            if trade_id:
+                self._open_trade_ids[symbol] = trade_id
+
+            self.tg.notify_trade_opened(
+                symbol=symbol,
+                side="long",
+                entry=entry,
+                sl=stop_loss,
+                tp=take_profit,
+                rr=round(rr, 2),
+                amount=amount,
+                strategy="TelegramTest",
+                confidence=99.0,
+                regime="TEST",
+                is_paper=True,
+                brain_score=None,
+            )
+            self._record_trade_event(
+                event="opened",
+                symbol=symbol,
+                side="long",
+                strategy="TelegramTest",
+                pnl=None,
+                reason="telegram_test_trade",
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="entry_opened_testtrade",
+                reason="telegram_test_trade",
+                strategy="TelegramTest",
+            )
+            return True, (
+                f"Test-Trade eröffnet: {symbol} | entry={entry:.4f} | amount={amount:.6f} | "
+                f"SL={stop_loss:.4f} TP={take_profit:.4f}"
+            )
+        except Exception as e:
+            return False, f"Test-Trade fehlgeschlagen: {type(e).__name__}"
+
+    def _apply_runtime_settings_from_panel(self, changes: Dict[str, float]) -> Tuple[bool, str]:
+        """
+        Kontrolliertes Live-Tuning aus Telegram für den Multi-Bot.
+        Änderungen sind Laufzeit-Overrides (nicht persistiert in .env).
+        """
+        changed: List[str] = []
+        try:
+            if "risk_per_trade_pct" in changes:
+                val = float(changes["risk_per_trade_pct"])
+                if not (0.1 <= val <= 10.0):
+                    return False, "risk_per_trade_pct muss zwischen 0.1 und 10.0 liegen."
+                settings.RISK_PER_TRADE_PCT = val
+                # RiskEngine + PortfolioRiskEngine synchron nachziehen
+                self.risk.portfolio.cfg.risk_per_trade_pct = val
+                changed.append(f"RISK_PER_TRADE_PCT={val:.2f}")
+
+            if "max_total_open_risk_pct" in changes:
+                val = float(changes["max_total_open_risk_pct"])
+                if not (0.5 <= val <= 50.0):
+                    return False, "max_total_open_risk_pct muss zwischen 0.5 und 50.0 liegen."
+                settings.MAX_TOTAL_OPEN_RISK_PCT = val
+                self.risk.portfolio.cfg.max_total_open_risk_pct = val
+                changed.append(f"MAX_TOTAL_OPEN_RISK_PCT={val:.2f}")
+
+            if "max_positions_total" in changes:
+                val = int(changes["max_positions_total"])
+                if not (1 <= val <= 50):
+                    return False, "max_positions_total muss zwischen 1 und 50 liegen."
+                settings.MAX_POSITIONS_TOTAL = val
+                settings.MAX_OPEN_TRADES = val
+                # RiskEngine nutzt diesen harten Gate für check_signal().
+                hard_cap = val
+                if settings.TRADING_MODE == "live" and bool(getattr(settings, "LIVE_TEST_MODE", False)):
+                    hard_cap = min(hard_cap, 1)
+                self.risk.max_open_trades = hard_cap
+                # Portfolio-Layer separat synchron halten.
+                self.risk.portfolio.cfg.max_positions_total = val
+                changed.append(f"MAX_POSITIONS_TOTAL={val}")
+
+            if "max_position_notional" in changes:
+                val = float(changes["max_position_notional"])
+                if not (5.0 <= val <= 1_000_000.0):
+                    return False, "max_position_notional muss zwischen 5 und 1_000_000 liegen."
+                settings.MAX_POSITION_NOTIONAL = val
+                self.risk.portfolio.cfg.max_position_notional = val
+                changed.append(f"MAX_POSITION_NOTIONAL={val:.2f}")
+
+            if "min_position_notional" in changes:
+                val = float(changes["min_position_notional"])
+                if not (1.0 <= val <= 100_000.0):
+                    return False, "min_position_notional muss zwischen 1 und 100_000 liegen."
+                settings.MIN_POSITION_NOTIONAL = val
+                self.risk.portfolio.cfg.min_position_notional = val
+                changed.append(f"MIN_POSITION_NOTIONAL={val:.2f}")
+
+            if "daily_loss_limit_pct" in changes:
+                val = float(changes["daily_loss_limit_pct"])
+                if not (0.1 <= val <= 100.0):
+                    return False, "daily_loss_limit_pct muss zwischen 0.1 und 100.0 liegen."
+                settings.DAILY_LOSS_LIMIT_PCT = val
+                changed.append(f"DAILY_LOSS_LIMIT_PCT={val:.2f}")
+
+            if "live_test_daily_loss_limit_pct" in changes:
+                val = float(changes["live_test_daily_loss_limit_pct"])
+                if not (0.1 <= val <= 100.0):
+                    return False, "live_test_daily_loss_limit_pct muss zwischen 0.1 und 100.0 liegen."
+                settings.LIVE_TEST_DAILY_LOSS_LIMIT_PCT = val
+                changed.append(f"LIVE_TEST_DAILY_LOSS_LIMIT_PCT={val:.2f}")
+
+            if "min_confidence" in changes:
+                val = float(changes["min_confidence"])
+                if not (1.0 <= val <= 100.0):
+                    return False, "min_confidence muss zwischen 1 und 100 liegen."
+                settings.MIN_CONFIDENCE = val
+                changed.append(f"MIN_CONFIDENCE={val:.1f}")
+
+            if "min_rr" in changes:
+                val = float(changes["min_rr"])
+                if not (0.5 <= val <= 6.0):
+                    return False, "min_rr muss zwischen 0.5 und 6.0 liegen."
+                settings.MIN_RR = val
+                changed.append(f"MIN_RR={val:.2f}")
+
+            if "min_win_chance_pct" in changes:
+                val = float(changes["min_win_chance_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_win_chance_pct muss zwischen 0 und 100 liegen."
+                settings.MIN_WIN_CHANCE_PCT = val
+                changed.append(f"MIN_WIN_CHANCE_PCT={val:.1f}")
+
+            if "min_historical_win_rate_pct" in changes:
+                val = float(changes["min_historical_win_rate_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_historical_win_rate_pct muss zwischen 0 und 100 liegen."
+                settings.MIN_HISTORICAL_WIN_RATE_PCT = val
+                changed.append(f"MIN_HISTORICAL_WIN_RATE_PCT={val:.1f}")
+
+            if "perf_tracker_min_trades" in changes:
+                val = int(changes["perf_tracker_min_trades"])
+                if not (1 <= val <= 500):
+                    return False, "perf_tracker_min_trades muss zwischen 1 und 500 liegen."
+                settings.PERF_TRACKER_MIN_TRADES = val
+                changed.append(f"PERF_TRACKER_MIN_TRADES={val}")
+
+            if "coin_cooldown_minutes" in changes:
+                val = int(changes["coin_cooldown_minutes"])
+                if not (0 <= val <= 240):
+                    return False, "coin_cooldown_minutes muss zwischen 0 und 240 liegen."
+                settings.COIN_COOLDOWN_MINUTES = val
+                changed.append(f"COIN_COOLDOWN_MINUTES={val}")
+
+            if "strategy_cooldown_minutes" in changes:
+                val = int(changes["strategy_cooldown_minutes"])
+                if not (0 <= val <= 240):
+                    return False, "strategy_cooldown_minutes muss zwischen 0 und 240 liegen."
+                settings.STRATEGY_COOLDOWN_MINUTES = val
+                changed.append(f"STRATEGY_COOLDOWN_MINUTES={val}")
+
+            if "duplicate_signal_minutes" in changes:
+                val = int(changes["duplicate_signal_minutes"])
+                if not (0 <= val <= 120):
+                    return False, "duplicate_signal_minutes muss zwischen 0 und 120 liegen."
+                settings.DUPLICATE_SIGNAL_MINUTES = val
+                changed.append(f"DUPLICATE_SIGNAL_MINUTES={val}")
+
+            if "brain_min_score_to_trade" in changes:
+                val = float(changes["brain_min_score_to_trade"])
+                if not (0.1 <= val <= 0.95):
+                    return False, "brain_min_score_to_trade muss zwischen 0.10 und 0.95 liegen."
+                settings.BRAIN_MIN_SCORE_TO_TRADE = val
+                changed.append(f"BRAIN_MIN_SCORE_TO_TRADE={val:.3f}")
+
+            if "brain_risky_phase_score" in changes:
+                val = float(changes["brain_risky_phase_score"])
+                if not (0.05 <= val <= 0.9):
+                    return False, "brain_risky_phase_score muss zwischen 0.05 und 0.90 liegen."
+                settings.BRAIN_RISKY_PHASE_SCORE = val
+                changed.append(f"BRAIN_RISKY_PHASE_SCORE={val:.3f}")
+
+            if "perf_selector_weight" in changes:
+                val = float(changes["perf_selector_weight"])
+                if not (0.0 <= val <= 0.8):
+                    return False, "perf_selector_weight muss zwischen 0.0 und 0.8 liegen."
+                settings.PERF_SELECTOR_WEIGHT = val
+                changed.append(f"PERF_SELECTOR_WEIGHT={val:.3f}")
+
+            if "reward_weight" in changes:
+                val = float(changes["reward_weight"])
+                if not (0.0 <= val <= 0.5):
+                    return False, "reward_weight muss zwischen 0.0 und 0.5 liegen."
+                settings.BRAIN_REWARD_WEIGHT = val
+                changed.append(f"BRAIN_REWARD_WEIGHT={val:.3f}")
+
+            if "reward_window" in changes:
+                val = int(changes["reward_window"])
+                if not (2 <= val <= 60):
+                    return False, "reward_window muss zwischen 2 und 60 liegen."
+                settings.BRAIN_REWARD_WINDOW = val
+                changed.append(f"BRAIN_REWARD_WINDOW={val}")
+
+            if "brain_positive_pattern_enabled" in changes:
+                val = bool(int(changes["brain_positive_pattern_enabled"]))
+                settings.BRAIN_POSITIVE_PATTERN_ENABLED = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_ENABLED={val}")
+
+            if "brain_positive_pattern_window" in changes:
+                val = int(changes["brain_positive_pattern_window"])
+                if not (10 <= val <= 500):
+                    return False, "brain_positive_pattern_window muss zwischen 10 und 500 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_WINDOW = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_WINDOW={val}")
+
+            if "brain_positive_pattern_min_trades" in changes:
+                val = int(changes["brain_positive_pattern_min_trades"])
+                if not (3 <= val <= 200):
+                    return False, "brain_positive_pattern_min_trades muss zwischen 3 und 200 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_TRADES = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_TRADES={val}")
+
+            if "brain_positive_pattern_min_winrate_pct" in changes:
+                val = float(changes["brain_positive_pattern_min_winrate_pct"])
+                if not (30.0 <= val <= 95.0):
+                    return False, "brain_positive_pattern_min_winrate_pct muss zwischen 30 und 95 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT={val:.1f}")
+
+            if "brain_positive_pattern_bonus_weight" in changes:
+                val = float(changes["brain_positive_pattern_bonus_weight"])
+                if not (0.0 <= val <= 0.25):
+                    return False, "brain_positive_pattern_bonus_weight muss zwischen 0.0 und 0.25 liegen."
+                settings.BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT = val
+                changed.append(f"BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT={val:.3f}")
+
+            if "control_strategy_priority_bonus" in changes:
+                val = float(changes["control_strategy_priority_bonus"])
+                if not (0.0 <= val <= 0.5):
+                    return False, "control_strategy_priority_bonus muss zwischen 0.0 und 0.5 liegen."
+                settings.CONTROL_STRATEGY_PRIORITY_BONUS = val
+                changed.append(f"CONTROL_STRATEGY_PRIORITY_BONUS={val:.3f}")
+
+            if "min_expectancy_pct" in changes:
+                val = float(changes["min_expectancy_pct"])
+                if not (-100.0 <= val <= 100.0):
+                    return False, "min_expectancy_pct muss zwischen -100 und 100 liegen."
+                settings.MIN_EXPECTANCY_R = val / 100.0
+                changed.append(f"MIN_EXPECTANCY_R={settings.MIN_EXPECTANCY_R:.3f}")
+
+            if "min_recency_win_rate_pct" in changes:
+                val = float(changes["min_recency_win_rate_pct"])
+                if not (0.0 <= val <= 100.0):
+                    return False, "min_recency_win_rate_pct muss zwischen 0 und 100 liegen."
+                settings.QUALITY_GATE_MIN_RECENCY_WR_PCT = val
+                changed.append(f"QUALITY_GATE_MIN_RECENCY_WR_PCT={val:.1f}")
+
+            if "min_profit_factor" in changes:
+                val = float(changes["min_profit_factor"])
+                if not (0.0 <= val <= 20.0):
+                    return False, "min_profit_factor muss zwischen 0.0 und 20.0 liegen."
+                settings.QUALITY_GATE_MIN_PROFIT_FACTOR = val
+                changed.append(f"QUALITY_GATE_MIN_PROFIT_FACTOR={val:.2f}")
+
+            if "max_losing_streak_to_trade" in changes:
+                val = int(changes["max_losing_streak_to_trade"])
+                if not (0 <= val <= 20):
+                    return False, "max_losing_streak_to_trade muss zwischen 0 und 20 liegen."
+                settings.QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER = val
+                changed.append(f"QUALITY_RISK_SCALE_LOSS_STREAK_TRIGGER={val}")
+
+            if "weak_phase_position_scale" in changes:
+                val = float(changes["weak_phase_position_scale"])
+                if not (0.1 <= val <= 1.0):
+                    return False, "weak_phase_position_scale muss zwischen 0.1 und 1.0 liegen."
+                settings.QUALITY_RISK_SCALE_MIN_FACTOR = val
+                changed.append(f"QUALITY_RISK_SCALE_MIN_FACTOR={val:.2f}")
+
+            if not changed:
+                return False, "Keine gültigen Runtime-Änderungen übergeben."
+
+            runtime_state.append_log("TELEGRAM runtime_tuning " + ", ".join(changed))
+            return True, "Runtime-Parameter aktualisiert: " + ", ".join(changed)
+        except Exception as e:
+            return False, f"Runtime-Tuning fehlgeschlagen: {type(e).__name__}"
 
     def stop(self):
         self.running = False

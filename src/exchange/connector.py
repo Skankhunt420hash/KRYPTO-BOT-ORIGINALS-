@@ -1,13 +1,44 @@
 import time
 from typing import Optional, List, Dict, Any, Tuple
 
-import ccxt
-import pandas as pd
+try:
+    import ccxt  # type: ignore
+    _CCXT_AVAILABLE = True
+except ModuleNotFoundError:
+    ccxt = None  # type: ignore
+    _CCXT_AVAILABLE = False
+
+try:
+    import pandas as pd
+except ModuleNotFoundError:
+    pd = None  # type: ignore
 
 from config.settings import settings
 from src.utils.logger import setup_logger
 
 logger = setup_logger("exchange")
+
+
+class _DependencyMissingError(Exception):
+    """Interner Markerfehler für fehlende optionale Runtime-Dependencies."""
+
+
+if _CCXT_AVAILABLE:
+    _CCXT_INSUFFICIENT_FUNDS = ccxt.InsufficientFunds
+    _CCXT_INVALID_ORDER = ccxt.InvalidOrder
+    _CCXT_NETWORK_ERROR = ccxt.NetworkError
+    _CCXT_EXCHANGE_ERROR = ccxt.ExchangeError
+    _CCXT_READ_RETRY_ERRORS = (
+        ccxt.NetworkError,
+        ccxt.RequestTimeout,
+        ccxt.DDoSProtection,
+    )
+else:
+    _CCXT_INSUFFICIENT_FUNDS = _DependencyMissingError
+    _CCXT_INVALID_ORDER = _DependencyMissingError
+    _CCXT_NETWORK_ERROR = _DependencyMissingError
+    _CCXT_EXCHANGE_ERROR = _DependencyMissingError
+    _CCXT_READ_RETRY_ERRORS = (_DependencyMissingError,)
 
 
 class ExchangeConnector:
@@ -20,7 +51,7 @@ class ExchangeConnector:
     def __init__(self):
         self.exchange_id = settings.EXCHANGE
         self.is_paper = settings.TRADING_MODE == "paper"
-        self._exchange: Optional[ccxt.Exchange] = None
+        self._exchange: Optional[Any] = None
         self._markets_cache: Optional[Dict[str, Any]] = None
         self._recent_order_fingerprints: Dict[str, float] = {}
         self._read_retry_max: int = int(getattr(settings, "EXCHANGE_READ_RETRY_MAX", 2))
@@ -37,6 +68,13 @@ class ExchangeConnector:
     # ------------------------------------------------------------------
 
     def _connect(self):
+        if not _CCXT_AVAILABLE:
+            logger.error(
+                "Dependency fehlt: 'ccxt' ist nicht installiert. "
+                "Exchange-Verbindung bleibt deaktiviert, Bot läuft im Degraded-Modus."
+            )
+            self._exchange = None
+            return
         try:
             exchange_class = getattr(ccxt, self.exchange_id)
             ex_id = str(self.exchange_id).lower()
@@ -101,7 +139,13 @@ class ExchangeConnector:
         symbol: str,
         timeframe: str = None,
         limit: int = None,
-    ) -> pd.DataFrame:
+    ):
+        if pd is None:
+            logger.error(
+                "Dependency fehlt: 'pandas' ist nicht installiert. "
+                "OHLCV-Daten können nicht geladen werden."
+            )
+            return _EmptyFrame()
         tf = timeframe or settings.TIMEFRAME
         lim = limit or settings.CANDLE_LIMIT
         try:
@@ -332,6 +376,8 @@ class ExchangeConnector:
             return {}
 
         try:
+            if self._exchange is None:
+                raise RuntimeError("exchange_not_connected")
             params = {}
             if self.exchange_id.lower() == "binance":
                 params["newClientOrderId"] = f"kb-{int(time.time()*1000)}"
@@ -350,16 +396,16 @@ class ExchangeConnector:
                 order.get("id", "n/a"),
             )
             return order or {}
-        except ccxt.InsufficientFunds as e:
+        except _CCXT_INSUFFICIENT_FUNDS as e:
             logger.error("Order abgelehnt (InsufficientFunds): %s", e)
             return {}
-        except ccxt.InvalidOrder as e:
+        except _CCXT_INVALID_ORDER as e:
             logger.error("Order abgelehnt (InvalidOrder): %s", e)
             return {}
-        except ccxt.NetworkError as e:
+        except _CCXT_NETWORK_ERROR as e:
             logger.error("Order Netzwerkfehler (kein Auto-Retry zur Mehrfachorder-Vermeidung): %s", e)
             return {}
-        except ccxt.ExchangeError as e:
+        except _CCXT_EXCHANGE_ERROR as e:
             logger.error("Order Exchange-Fehler: %s", e)
             return {}
         except Exception as e:
@@ -446,11 +492,13 @@ class ExchangeConnector:
         self._recent_order_fingerprints[fp] = time.time()
 
     def _call_with_retry(self, func, *, op: str):
+        if self._exchange is None:
+            raise RuntimeError("exchange_not_connected")
         last_exc = None
         for attempt in range(self._read_retry_max + 1):
             try:
                 return func()
-            except (ccxt.NetworkError, ccxt.RequestTimeout, ccxt.DDoSProtection) as e:
+            except _CCXT_READ_RETRY_ERRORS as e:
                 last_exc = e
                 if attempt >= self._read_retry_max:
                     break
@@ -483,3 +531,12 @@ class ExchangeConnector:
 
         logger.warning(f"PAPER Preis-Fallback aktiv für {symbol} (Ticker/OHLCV nicht verfügbar).")
         return 1.0
+
+
+class _EmptyFrame:
+    """
+    Minimaler DataFrame-Ersatz für Notbetrieb ohne pandas.
+    Nur .empty wird aktiv genutzt, damit Aufrufer sauber skippen können.
+    """
+
+    empty = True

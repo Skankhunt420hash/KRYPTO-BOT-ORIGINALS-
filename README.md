@@ -232,9 +232,9 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 #### 6.5 Verfügbare Commands
 
 - **Info / Monitoring**  
-  `/start`, `/help`, `/status`, `/summary`, `/mode`, `/strategy`, `/risk`, `/balance`, `/positions`, `/trades`, `/logs`
+  `/start`, `/help`, `/status`, `/summary`, `/analysis`, `/brain`, `/config`, `/mode`, `/strategy`, `/risk`, `/balance`, `/positions`, `/trades`, `/logs`
 - **Steuerung (sicherheitsbegrenzt)**  
-  `/pause`, `/resume`, `/riskoff`, `/riskon`, `/killswitch`, `/killswitchoff`, `/setmode paper`, `/setstrategy <name>`, `/stop_bot`, `/start_bot` *(nur wenn Start-Callback angebunden ist)*
+  `/pause`, `/resume`, `/riskoff`, `/riskon`, `/killswitch`, `/killswitchoff`, `/setmode paper`, `/setstrategy <name>`, `/setbrain <key> <value>`, `/setrisk <key> <value>`, `/stop_bot`, `/start_bot` *(nur wenn Start-Callback angebunden ist)*
 - **Supervisor (separater Bot-Prozess)**  
   `/botstart`, `/botstop`, `/botrestart`, `/botstatus`
 
@@ -310,13 +310,15 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 | `RISK_PER_TRADE_PCT`      | `1.0`           | Max. Risiko je Trade (% vom Konto, Backtest/Multi-Mode) |
 | `MAX_TOTAL_OPEN_RISK_PCT` | `10.0`          | Max. Summe aller offenen SL-Risiken (% vom Konto) |
 | `MAX_POSITIONS_TOTAL`     | `5`             | Max. Gesamtzahl gleichzeitiger Positionen (Multi-Mode) |
-| `DAILY_LOSS_LIMIT_PCT`    | `5.0`           | Tagesverlust-Limit in % des Startkapitals |
+| `DAILY_LOSS_LIMIT_PCT`    | `10.0`          | Tagesverlust-Limit in % des Startkapitals |
 | `COIN_COOLDOWN_MINUTES`   | `60`            | Cooldown nach Trade auf demselben Symbol (Minuten) |
 | `STRATEGY_COOLDOWN_MINUTES` | `30`          | Cooldown nach Verlust-Trade pro Strategie (Minuten) |
 | `RISK_BLOCK_HIGH_VOLATILITY` | `false`      | `true` = neue Trades im HIGH_VOLATILITY-Regime blockieren |
 | `STRATEGY_MIN_PERF_SCORE` | `0.0`           | Optionaler Performance-Gate \[0.0–1.0], z.B. 0.4 = Strategien mit Score < 0.4 werden im Meta-Selector ignoriert |
 | `BRAIN_MIN_SCORE_TO_TRADE` | `0`            | Brain-Gate aus bei 0; >0 = Mindestscore |
 | `BRAIN_RISKY_PHASE_SCORE` | `0.35`          | Unterhalb dieses Scores gilt die Phase als riskant |
+| `BRAIN_REWARD_WEIGHT`     | `0.08`          | Stärke des kurzfristigen Belohnungs-/Penalty-Bias im Scorer |
+| `BRAIN_REWARD_WINDOW`     | `12`            | Anzahl letzter Trades für das Reward-Signal je Strategie |
 | `TELEGRAM_PANEL_ENABLED`  | `false`         | `true` = Telegram-Control-Panel aktiviert (Polling) |
 | `TELEGRAM_PANEL_POLL_INTERVAL_SEC` | `10`   | Poll-Intervall des Panels (Sekunden) |
 | `TELEGRAM_PANEL_LOG_LINES` | `20`          | Anzahl Log-Zeilen für `/logs` |

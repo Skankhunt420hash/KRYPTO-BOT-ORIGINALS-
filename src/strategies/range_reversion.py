@@ -1,5 +1,6 @@
 import pandas as pd
 import ta
+from config.settings import settings
 from src.strategies.signal import EnhancedSignal, Side
 from src.strategies.base_strategy import EnhancedBaseStrategy
 from src.utils.logger import setup_logger
@@ -47,8 +48,17 @@ class RangeReversionStrategy(EnhancedBaseStrategy):
             df["atr"] = ta.volatility.AverageTrueRange(
                 df["high"], df["low"], df["close"], window=14
             ).average_true_range()
+            df["adx"] = ta.trend.ADXIndicator(
+                df["high"], df["low"], df["close"], window=14
+            ).adx()
 
             last = df.iloc[-1]
+            adx = float(last["adx"])
+            if adx > 24.0:
+                return self._no_signal(
+                    symbol, timeframe,
+                    f"ADX={adx:.1f} > 24 (Trend zu stark für Range-Reversion)",
+                )
             price = float(last["close"])
             bb_lower = float(last["bb_lower"])
             bb_upper = float(last["bb_upper"])
@@ -64,7 +74,8 @@ class RangeReversionStrategy(EnhancedBaseStrategy):
                 tp = bb_mid
                 rr = self._calc_rr(entry, sl, tp)
 
-                if rr >= 1.0:
+                min_rr = max(1.0, settings.MIN_RR)
+                if rr >= min_rr:
                     bb_distance = (bb_lower - price) / (atr + 1e-9)
                     rsi_extreme = (self.RSI_OVERSOLD - rsi) / self.RSI_OVERSOLD
                     confidence = round(40.0 + bb_distance * 20 + rsi_extreme * 30, 1)
@@ -95,7 +106,8 @@ class RangeReversionStrategy(EnhancedBaseStrategy):
                 tp = bb_mid
                 rr = self._calc_rr(entry, sl, tp)
 
-                if rr >= 1.0:
+                min_rr = max(1.0, settings.MIN_RR)
+                if rr >= min_rr:
                     bb_distance = (price - bb_upper) / (atr + 1e-9)
                     rsi_extreme = (rsi - self.RSI_OVERBOUGHT) / (100 - self.RSI_OVERBOUGHT)
                     confidence = round(40.0 + bb_distance * 20 + rsi_extreme * 30, 1)

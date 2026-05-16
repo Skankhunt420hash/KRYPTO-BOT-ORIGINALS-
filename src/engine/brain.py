@@ -83,7 +83,12 @@ class IntelligenceBrain:
             if best_entry is not None:
                 last_signal_score = float(best_entry.get("brain_score", 0.0))
 
-            if risky_phase and last_signal_score < min_trade_score:
+            # BRAIN_MIN_SCORE_TO_TRADE <= 0: Score-Gate aus (mehr Durchsatz, weniger Blocker)
+            if min_trade_score <= 0:
+                decision_reason = (
+                    f"brain_gate_off:{selector_winner.strategy_name}:{last_signal_score:.3f}"
+                )
+            elif risky_phase and last_signal_score < min_trade_score:
                 chosen = None
                 decision_reason = (
                     f"brain_risky_phase_block:{regime.value}:score={last_signal_score:.3f}"

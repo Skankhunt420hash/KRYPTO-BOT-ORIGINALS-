@@ -1,0 +1,26 @@
+# Optionaler zweiter Dienst: Safety-Watchdog (überwacht krypto-bot, Logs, Syntax).
+# Installation:
+#   sudo cp /root/krypto-bot/deploy/safety-watchdog.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now safety-watchdog
+#
+# In .env auf dem Server z.B.:
+#   SAFETY_WATCHDOG_RESTART_CMD=systemctl restart krypto-bot
+
+[Unit]
+Description=KRYPTO-BOT Safety Watchdog (Überwachung + sichere Reparatur)
+After=network-online.target krypto-bot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/root/krypto-bot
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/root/krypto-bot/.venv/bin/python /root/krypto-bot/safety_watchdog.py
+Restart=always
+RestartSec=20
+
+[Install]
+WantedBy=multi-user.target

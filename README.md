@@ -290,14 +290,14 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 | `EXCHANGE_DUPLICATE_WINDOW_SEC` | `15`      | Duplicate-Order-Schutzfenster (Sekunden) |
 | `TRADING_PAIRS`           | `BTC/USDT,...`  | Kommagetrennte Handelspaare           |
 | `TRADING_UNIVERSE`        | _(leer)_        | `kraken_perps` (Kraken Futures) oder `binance_usdm` (Binance USDT-M) |
-| `MIN_WIN_CHANCE_PCT`     | `80`            | Heuristische Mindest-„Gewinnchance“ für Entries (0 = aus) |
+| `MIN_WIN_CHANCE_PCT`     | `0`             | Heuristische Mindest-„Gewinnchance“ (0 = aus, mehr Trades) |
 | `LOSS_PATTERN_MEMORY_ENABLED` | `true`     | Wiederholte Verluste gleiches Setup → Entry-Sperre |
 | `LOSS_PATTERN_WINDOW_HOURS` | `72`         | Zeitfenster für Verlust-Zählung |
 | `LOSS_PATTERN_MAX_LOSSES` | `2`             | Ab so vielen Verlusten im Fenster Sperre |
 | `TRADING_UNIVERSE_MAX_SYMBOLS` | `0`        | Optional: max. Anzahl Symbole (0 = alle) |
 | `TIMEFRAME`               | `1h`            | Kerzen-Zeitrahmen                     |
 | `MAX_POSITION_SIZE_PERCENT` | `2.0`         | Max. Kapitaleinsatz pro Trade (%)     |
-| `MAX_OPEN_TRADES`         | `5`             | Max. gleichzeitige offene Positionen  |
+| `MAX_OPEN_TRADES`         | `8`             | Max. gleichzeitige offene Positionen  |
 | `STOP_LOSS_PERCENT`       | `2.0`           | Stop-Loss in %                        |
 | `TAKE_PROFIT_PERCENT`     | `4.0`           | Take-Profit in %                      |
 | `STRATEGY`                | `rsi_ema`       | `rsi_ema`, `macd_crossover`, `combined`, `auto` (Multi-Mode) |
@@ -315,7 +315,7 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 | `STRATEGY_COOLDOWN_MINUTES` | `30`          | Cooldown nach Verlust-Trade pro Strategie (Minuten) |
 | `RISK_BLOCK_HIGH_VOLATILITY` | `false`      | `true` = neue Trades im HIGH_VOLATILITY-Regime blockieren |
 | `STRATEGY_MIN_PERF_SCORE` | `0.0`           | Optionaler Performance-Gate \[0.0–1.0], z.B. 0.4 = Strategien mit Score < 0.4 werden im Meta-Selector ignoriert |
-| `BRAIN_MIN_SCORE_TO_TRADE` | `0.45`         | Brain-Gate: Mindestscore für Entry-Freigabe |
+| `BRAIN_MIN_SCORE_TO_TRADE` | `0`            | Brain-Gate aus bei 0; >0 = Mindestscore |
 | `BRAIN_RISKY_PHASE_SCORE` | `0.35`          | Unterhalb dieses Scores gilt die Phase als riskant |
 | `BRAIN_REWARD_WEIGHT`     | `0.08`          | Stärke des kurzfristigen Belohnungs-/Penalty-Bias im Scorer |
 | `BRAIN_REWARD_WINDOW`     | `12`            | Anzahl letzter Trades für das Reward-Signal je Strategie |

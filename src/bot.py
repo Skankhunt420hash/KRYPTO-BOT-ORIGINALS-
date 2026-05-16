@@ -1133,7 +1133,8 @@ class MultiStrategyBot:
         self._recovery_blocked_symbols: Set[str] = set()
         self._startup_checks_ok: bool = True
         self._startup_block_reason: str = ""
-        self._active_strategy_runtime: str = "AUTO"
+        # Anzeige im Panel/Telegram: vermeidet Missverständnis „Master/autoheal“ (Meta+AUTO+healthy).
+        self._active_strategy_runtime: str = "Multi (Meta-Selector)"
         self._last_selector_snapshot: Dict = {}
         self._last_brain_snapshot: Dict = {}
 
@@ -1260,12 +1261,18 @@ class MultiStrategyBot:
             return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
-            if raw.get("paused"):
-                runtime_control.pause_entries()
+            if bool(getattr(settings, "STATE_RECOVERY_RESTORE_PAUSED", True)):
+                if raw.get("paused"):
+                    runtime_control.pause_entries()
+                else:
+                    runtime_control.resume_entries()
             else:
                 runtime_control.resume_entries()
-            if raw.get("risk_off"):
-                runtime_control.enable_risk_off()
+            if bool(getattr(settings, "STATE_RECOVERY_RESTORE_RISK_OFF", True)):
+                if raw.get("risk_off"):
+                    runtime_control.enable_risk_off()
+                else:
+                    runtime_control.disable_risk_off()
             else:
                 runtime_control.disable_risk_off()
             preferred = str(raw.get("preferred_strategy") or "").strip()
@@ -2029,6 +2036,12 @@ class MultiStrategyBot:
                 regime=best.regime,
                 reason_rejected=hist_reason,
             )
+            self.tg.notify_trade_blocked(
+                symbol=symbol,
+                strategy=best.strategy_name,
+                side=best.side.value,
+                reason=hist_reason,
+            )
             self._record_last_decision(
                 symbol=symbol,
                 decision="blocked_historical_win_rate",
@@ -2086,6 +2099,12 @@ class MultiStrategyBot:
                     confidence=best.confidence,
                     regime=best.regime,
                     reason_rejected=reason_wc,
+                )
+                self.tg.notify_trade_blocked(
+                    symbol=symbol,
+                    strategy=best.strategy_name,
+                    side=best.side.value,
+                    reason=reason_wc,
                 )
                 self._record_last_decision(
                     symbol=symbol,
@@ -2497,6 +2516,29 @@ class MultiStrategyBot:
             market_context={},
         )
 
+    def _paper_undo_unwanted_control_locks(self) -> None:
+        """
+        Paper: hebt Pause/Risk-Off auf, die z. B. von einem alten Server-Fork
+        (MASTER AUTOHEAL) oder veraltetem Recovery-State gesetzt wurden.
+        Live: keine Wirkung.
+        """
+        if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
+            return
+        if not bool(getattr(settings, "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", True)):
+            return
+        ctrl = runtime_control.get_snapshot()
+        if not (ctrl.get("paused") or ctrl.get("risk_off")):
+            return
+        logger.warning(
+            "Paper: hebe Pause/Risk-Off auf (PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE) — "
+            "vorher paused=%s risk_off=%s",
+            ctrl.get("paused"),
+            ctrl.get("risk_off"),
+        )
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+        runtime_state.update_engine(paused=False, risk_off=False)
+
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
@@ -2539,6 +2581,8 @@ class MultiStrategyBot:
             )
             return
 
+        self._paper_undo_unwanted_control_locks()
+
         # Scorer zu Beginn jedes Zyklus aktualisieren (liest neue Trades aus DB)
         try:
             self.scorer.refresh()
@@ -2574,6 +2618,8 @@ class MultiStrategyBot:
         self._update_performance_tracking()
         self._sync_runtime_state()
         self._persist_recovery_state()
+
+        self._paper_undo_unwanted_control_locks()
 
         # Health-Monitor auswerten (Watchdog-Reaktionen, Snapshots)
         self.health.check_and_react()

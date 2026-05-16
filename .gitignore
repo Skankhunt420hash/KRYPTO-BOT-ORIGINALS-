@@ -16,6 +16,7 @@ env/
 
 # Konfiguration (sensible Daten)
 .env
+.env.local
 
 # Daten & Logs
 logs/*.log
@@ -33,3 +34,6 @@ data/*.sqlite
 
 # Jupyter
 .ipynb_checkpoints/
+
+# Versehentlicher Nested-Clone im Projektroot (nicht committen)
+KRYPTO-BOT-ORIGINALS-/

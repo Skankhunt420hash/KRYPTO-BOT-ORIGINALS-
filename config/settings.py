@@ -8,15 +8,15 @@ except ModuleNotFoundError:
     def load_dotenv(*args, **kwargs):
         return False
 
-# .env immer relativ zum Projekt-Root laden (nicht vom aktuellen cwd abhängig).
-# Das verhindert stille Fallbacks auf Defaults, wenn der Bot via systemd/Controller
-# aus einem anderen Arbeitsverzeichnis gestartet wird.
-_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+# Immer Projektroot/.env laden (unabhängig vom cwd), optional .env.local mit Override.
+_PROJECT_ROOT = Path(__file__).resolve().parent.parent
+_ENV_PATH = _PROJECT_ROOT / ".env"
 if _ENV_PATH.exists():
     load_dotenv(dotenv_path=_ENV_PATH, override=False)
 else:
-    # Fallback für lokale Sonderfälle (bisheriges Verhalten).
+    # Fallback für lokale Sonderfälle (bisheriges Verhalten ohne festen Pfad).
     load_dotenv(override=False)
+load_dotenv(dotenv_path=_PROJECT_ROOT / ".env.local", override=True)
 
 
 def _first_non_empty(*keys: str, default: str = "") -> str:
@@ -93,14 +93,16 @@ class Settings:
     MAX_POSITION_SIZE_PERCENT: float = float(
         os.getenv("MAX_POSITION_SIZE_PERCENT", 2.0)
     )
-    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 5))
+    MAX_OPEN_TRADES: int = int(os.getenv("MAX_OPEN_TRADES", 8))
     STOP_LOSS_PERCENT: float = float(os.getenv("STOP_LOSS_PERCENT", 2.0))
     TAKE_PROFIT_PERCENT: float = float(os.getenv("TAKE_PROFIT_PERCENT", 4.0))
     TRAILING_STOP: bool = os.getenv("TRAILING_STOP", "false").lower() == "true"
 
     # Heuristische Mindest-„Gewinnchance“ (0–100, siehe src/utils/win_chance.py).
-    # Trades mit niedrigerer Kennzahl werden nicht eröffnet. 0 = Filter deaktiviert.
-    MIN_WIN_CHANCE_PCT: float = float(os.getenv("MIN_WIN_CHANCE_PCT", "80"))
+    # Keine echte Trefferquote — nur Score aus Konfidenz/Brain/RR.
+    # 80 blockiert fast alle Signale (~0 Trades). Für ~5–10 Trades/Tag eher 55–65 testen.
+    # 0 = Filter komplett aus.
+    MIN_WIN_CHANCE_PCT: float = float(os.getenv("MIN_WIN_CHANCE_PCT", "0"))
     # Anteil der gemessenen Strategie-Win-Rate (DB) in der Entry-Kennzahl (0–1).
     # 0.35 = 35 % echte Historie, 65 % Heuristik – reduziert „Schein-80%“-Effekt.
     WIN_CHANCE_BLEND_ACTUAL_WR: float = float(
@@ -192,8 +194,14 @@ class Settings:
     )
     # Paper: Balance = Equity; kein Abzug des vollen Notionals beim Open (nur PnL beim Close).
     PAPER_EQUITY_ACCOUNT: bool = _env_bool("PAPER_EQUITY_ACCOUNT", default=True)
+    # Paper: jeden Zyklus Pause/Risk-Off aufheben (gegen Alt-Fork „MASTER AUTOHEAL“ / Panel).
+    # Live-Modus: wird nicht angewendet. Manuelles /pause im Paper: auf false setzen.
+    PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE: bool = _env_bool(
+        "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", default=True
+    )
 
-    STRATEGY: str = os.getenv("STRATEGY", "rsi_ema")
+    # auto = Multi-Strategie (Meta-Selector + Legacy-Adapter)
+    STRATEGY: str = os.getenv("STRATEGY", "auto")
 
     # Telegram Hauptschalter:
     # - bevorzugt: ENABLE_TELEGRAM
@@ -210,8 +218,8 @@ class Settings:
 
     TELEGRAM_BOT_TOKEN: str = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
     TELEGRAM_CHAT_ID: str = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-    # Mindest-Konfidenz (0-100) damit ein Signal eine Telegram-Meldung auslöst
-    TELEGRAM_MIN_CONFIDENCE: float = float(os.getenv("TELEGRAM_MIN_CONFIDENCE", 50.0))
+    # Sollte in der Regel ≤ MIN_CONFIDENCE sein, sonst fehlen Trade-Meldungen
+    TELEGRAM_MIN_CONFIDENCE: float = float(os.getenv("TELEGRAM_MIN_CONFIDENCE", 48.0))
     # Benachrichtigungslevel:
     # off      -> keine Telegram-Meldungen
     # critical -> nur kritische Risk-/Error-Events
@@ -253,6 +261,14 @@ class Settings:
     STATE_RECOVERY_ENABLED: bool = _env_bool("STATE_RECOVERY_ENABLED", default=True)
     STATE_RECOVERY_FILE: str = os.getenv(
         "STATE_RECOVERY_FILE", "data/runtime_recovery.json"
+    )
+    # Beim Neustart aus Recovery-Datei übernehmen (false = Entriegelung nach
+    # externem Risk-Off / manuell „festgefahren“, ohne Datei löschen zu müssen)
+    STATE_RECOVERY_RESTORE_PAUSED: bool = _env_bool(
+        "STATE_RECOVERY_RESTORE_PAUSED", default=True
+    )
+    STATE_RECOVERY_RESTORE_RISK_OFF: bool = _env_bool(
+        "STATE_RECOVERY_RESTORE_RISK_OFF", default=True
     )
     RECOVERY_MAX_OPEN_TRADES_RESTORE: int = int(
         os.getenv("RECOVERY_MAX_OPEN_TRADES_RESTORE", 100)
@@ -299,16 +315,19 @@ class Settings:
     # Multi-Modus:         auto
 
     # Mindest-Konfidenz für aktionsfähige Signale (0-100)
-    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", 40.0))
+    MIN_CONFIDENCE: float = float(os.getenv("MIN_CONFIDENCE", 42.0))
 
-    # Mindest-RR für aktionsfähige Signale
-    MIN_RR: float = float(os.getenv("MIN_RR", 1.5))
+    # Mindest-RR für aktionsfähige Signale (2% SL / 4% TP ≈ 2.0)
+    MIN_RR: float = float(os.getenv("MIN_RR", 1.05))
+
+    # Meta-Selector: Mindest-Regime-Fit (0.30–0.50 typisch)
+    MIN_REGIME_FIT: float = float(os.getenv("MIN_REGIME_FIT", 0.30))
 
     # ------------------------------------------------------------------
     # Risk Engine Cooldowns & Limits
     # ------------------------------------------------------------------
 
-    # Tagesverlust-Limit in % des Startkapitals (danach kein neues Trading)
+    # Tagesverlust-Limit in % des Startkapitals (<=0 = deaktiviert, siehe RiskEngine)
     DAILY_LOSS_LIMIT_PCT: float = float(os.getenv("DAILY_LOSS_LIMIT_PCT", 10.0))
 
     # Optionaler Volatilitäts-Stop: blockiert neue Trades in HIGH_VOLATILITY-Regimes
@@ -318,16 +337,16 @@ class Settings:
     )
 
     # Wartezeit nach Schließung einer Position auf demselben Coin (Minuten)
-    COIN_COOLDOWN_MINUTES: int = int(os.getenv("COIN_COOLDOWN_MINUTES", 60))
+    COIN_COOLDOWN_MINUTES: int = int(os.getenv("COIN_COOLDOWN_MINUTES", 25))
 
     # Wartezeit nach einem Verlust-Trade für dieselbe Strategie (Minuten)
-    STRATEGY_COOLDOWN_MINUTES: int = int(os.getenv("STRATEGY_COOLDOWN_MINUTES", 30))
+    STRATEGY_COOLDOWN_MINUTES: int = int(os.getenv("STRATEGY_COOLDOWN_MINUTES", 15))
 
     # Schutz vor doppelten Signalen: gleiche Strategie + Symbol in N Minuten (Minuten)
-    DUPLICATE_SIGNAL_MINUTES: int = int(os.getenv("DUPLICATE_SIGNAL_MINUTES", 15))
+    DUPLICATE_SIGNAL_MINUTES: int = int(os.getenv("DUPLICATE_SIGNAL_MINUTES", 8))
 
     # Wiederholte Verluste gleiche Strategie + Symbol: Entry sperren (Lernschicht)
-    LOSS_PATTERN_MEMORY_ENABLED: bool = _env_bool("LOSS_PATTERN_MEMORY_ENABLED", default=True)
+    LOSS_PATTERN_MEMORY_ENABLED: bool = _env_bool("LOSS_PATTERN_MEMORY_ENABLED", default=False)
     LOSS_PATTERN_MEMORY_FILE: str = os.getenv(
         "LOSS_PATTERN_MEMORY_FILE", "data/loss_pattern_memory.json"
     )
@@ -391,9 +410,12 @@ class Settings:
     CONTROL_STRATEGY_PRIORITY_BONUS: float = float(
         os.getenv("CONTROL_STRATEGY_PRIORITY_BONUS", 0.08)
     )
-    # Brain-Gate: Mindestsignal-Score fuer Entry-Freigabe (0..1)
+    # Brain-Gate: Mindest-Brain-Score für Entry (0..~1.5, typ. 0.35–0.55).
+    # Liegt oft UNTERHALB von MIN_WIN_CHANCE_PCT: Zuerst Meta-Selector, dann
+    # dieser Score – zu hohe Defaults wirken wie „keine Signale“ trotz Scan.
+    # 0 = Brain-Score-Gate aus (Meta-Selector reicht). >0 = Mindest-Score für Entry.
     BRAIN_MIN_SCORE_TO_TRADE: float = float(
-        os.getenv("BRAIN_MIN_SCORE_TO_TRADE", 0.45)
+        os.getenv("BRAIN_MIN_SCORE_TO_TRADE", 0.0)
     )
     # Unterhalb dieses Scores gilt die Marktphase als "riskant/unsauber"
     BRAIN_RISKY_PHASE_SCORE: float = float(
@@ -575,6 +597,39 @@ class Settings:
     # Grenzwerte für Ressourcen-Warnungen
     MAX_MEMORY_PCT: float = float(os.getenv("MAX_MEMORY_PCT", 80.0))
     MAX_CPU_PCT: float = float(os.getenv("MAX_CPU_PCT", 90.0))
+
+    # ------------------------------------------------------------------
+    # Safety Watchdog (separater Prozess: safety_watchdog.py)
+    # Überwacht den Handels-Bot, Logs, Syntax; optional Neustart.
+    # Kein „KI repariert beliebigen Code“ — nur definierte, sichere Schritte.
+    # ------------------------------------------------------------------
+    SAFETY_WATCHDOG_POLL_SEC: int = int(os.getenv("SAFETY_WATCHDOG_POLL_SEC", 120))
+    SAFETY_WATCHDOG_LOG_TAIL_LINES: int = int(
+        os.getenv("SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)
+    )
+    # Optional: eigene Log-Datei (leer = SUPERVISOR_BOT_LOGFILE). Bei systemd+journalctl ggf. leer lassen und nur Prozess-Check nutzen.
+    SAFETY_WATCHDOG_LOG_FILE: str = os.getenv("SAFETY_WATCHDOG_LOG_FILE", "").strip()
+    SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD: int = int(
+        os.getenv("SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)
+    )
+    # Shell-Befehl zum Neustart (leer = nur melden). z.B. systemctl restart krypto-bot
+    SAFETY_WATCHDOG_RESTART_CMD: str = os.getenv(
+        "SAFETY_WATCHDOG_RESTART_CMD", ""
+    ).strip()
+    SAFETY_WATCHDOG_RESTART_COOLDOWN_SEC: int = int(
+        os.getenv("SAFETY_WATCHDOG_RESTART_COOLDOWN_SEC", 1800)
+    )
+    SAFETY_WATCHDOG_RUN_COMPILEALL: bool = _env_bool(
+        "SAFETY_WATCHDOG_RUN_COMPILEALL", default=True
+    )
+    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (festgefahren)
+    SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY: bool = _env_bool(
+        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=True
+    )
+    # Nur wenn ruff installiert und explizit true — vorsichtig
+    SAFETY_WATCHDOG_RUFF_AUTOFIX: bool = _env_bool(
+        "SAFETY_WATCHDOG_RUFF_AUTOFIX", default=False
+    )
 
 
 settings = Settings()

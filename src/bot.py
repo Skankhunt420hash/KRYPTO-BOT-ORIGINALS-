@@ -1793,20 +1793,45 @@ class MultiStrategyBot:
         """
         is_live = settings.TRADING_MODE == "live"
 
-        if is_live and not settings.FUTURES_MODE:
-            logger.warning(
-                f"[yellow]SHORT BLOCKIERT (Spot-Modus)[/yellow] {symbol} | "
-                f"Strategie: {signal.strategy_name} | "
-                f"Für SHORT: FUTURES_MODE=true in .env setzen"
+        if is_live:
+            if settings.FUTURES_MODE:
+                reason = "short_live_futures_not_implemented"
+                logger.warning(
+                    f"[yellow]SHORT BLOCKIERT (Futures-Live nicht implementiert)[/yellow] "
+                    f"{symbol} | Strategie: {signal.strategy_name}"
+                )
+            else:
+                reason = "short_live_spot_disabled"
+                logger.warning(
+                    f"[yellow]SHORT BLOCKIERT (Spot-Modus)[/yellow] {symbol} | "
+                    f"Strategie: {signal.strategy_name} | "
+                    f"Für SHORT: FUTURES_MODE=true in .env setzen"
+                )
+            self.tg.notify_trade_blocked(
+                symbol=symbol,
+                strategy=signal.strategy_name,
+                side=signal.side.value,
+                reason=reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_live_short",
+                reason=reason,
+                strategy=signal.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=signal.regime or "UNKNOWN",
+                ranking=list((self._last_brain_snapshot or {}).get("last_strategy_ranking") or []),
+                chosen_strategy=signal.strategy_name,
+                signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0) or 0.0),
+                risk_decision="live_short_block",
+                allow_trade=False,
+                reject_reason=reason,
+                last_decision_reason=reason,
+                market_context={},
             )
             return
-
-        if is_live and settings.FUTURES_MODE:
-            logger.warning(
-                f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
-            )
-            # Fällt durch in Paper-Simulation
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(

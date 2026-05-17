@@ -109,10 +109,10 @@ class Settings:
     )
     # Paper: Balance = Equity; kein Abzug des vollen Notionals beim Open (nur PnL beim Close).
     PAPER_EQUITY_ACCOUNT: bool = _env_bool("PAPER_EQUITY_ACCOUNT", default=True)
-    # Paper: jeden Zyklus Pause/Risk-Off aufheben (gegen Alt-Fork „MASTER AUTOHEAL“ / Panel).
-    # Live-Modus: wird nicht angewendet. Manuelles /pause im Paper: auf false setzen.
+    # Paper: optional Pause/Risk-Off je Zyklus aufheben (nur fuer Alt-Fork-Recovery).
+    # Default false: manuelle /pause- und /riskoff-Sperren muessen erhalten bleiben.
     PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE: bool = _env_bool(
-        "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", default=True
+        "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", default=False
     )
 
     # auto = Multi-Strategie (Meta-Selector + Legacy-Adapter)
@@ -497,9 +497,9 @@ class Settings:
     SAFETY_WATCHDOG_RUN_COMPILEALL: bool = _env_bool(
         "SAFETY_WATCHDOG_RUN_COMPILEALL", default=True
     )
-    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (festgefahren)
+    # Paper: risk_off/paused in runtime_recovery.json zuruecksetzen (nur wenn Bot nicht laeuft)
     SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY: bool = _env_bool(
-        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=True
+        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=False
     )
     # Nur wenn ruff installiert und explizit true — vorsichtig
     SAFETY_WATCHDOG_RUFF_AUTOFIX: bool = _env_bool(

@@ -17,6 +17,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -63,8 +64,22 @@ def _find_bot_pids() -> List[int]:
 def _tail_log(path: Path, max_lines: int) -> List[str]:
     if not path.is_file():
         return []
+    max_lines = int(max_lines)
+    if max_lines <= 0:
+        return []
+    chunk_size = 8192
+    max_bytes = max(64 * 1024, max_lines * 4096)
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        data = bytearray()
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            pos = fh.tell()
+            while pos > 0 and data.count(b"\n") <= max_lines and len(data) < max_bytes:
+                read_size = min(chunk_size, pos, max_bytes - len(data))
+                pos -= read_size
+                fh.seek(pos)
+                data[:0] = fh.read(read_size)
+        raw = data.decode("utf-8", errors="replace").splitlines()
         return raw[-max_lines:] if len(raw) > max_lines else raw
     except OSError as e:
         logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)
@@ -118,11 +133,15 @@ def _maybe_ruff_autofix(root: Path) -> Tuple[bool, str]:
         return False, f"ruff: {e}"
 
 
-def _clear_stuck_recovery(root: Path) -> Tuple[bool, str]:
+def _clear_stuck_recovery(root: Path, bot_running: Optional[bool] = None) -> Tuple[bool, str]:
     if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
         return False, "nur paper"
     if not bool(getattr(settings, "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", True)):
         return False, "clear recovery aus"
+    if bot_running is None:
+        bot_running = bool(_find_bot_pids())
+    if bot_running:
+        return False, "bot laeuft; recovery nicht extern aendern"
     rel = getattr(settings, "STATE_RECOVERY_FILE", "data/runtime_recovery.json")
     path = Path(rel)
     if not path.is_absolute():
@@ -165,7 +184,13 @@ def _restart_bot(reason: str, tg: Optional[TelegramNotifier], last_mono: float) 
     if tg and tg.enabled:
         tg.notify_error("SAFETY_WATCHDOG_RESTART", f"{reason[:180]}\ncmd={cmd[:120]}")
     try:
-        subprocess.run(cmd, shell=True, timeout=120, check=False)
+        argv = shlex.split(cmd)
+        if not argv:
+            logger.warning("Neustart-Befehl leer nach Parsing: %s", reason)
+            return last_mono
+        subprocess.run(argv, timeout=120, check=False)
+    except ValueError as e:
+        logger.error("Neustart-Befehl ungueltig: %s", e)
     except Exception as e:
         logger.error("Neustart-Befehl fehlgeschlagen: %s", e)
     return now
@@ -194,14 +219,17 @@ def run_forever() -> None:
 
     while True:
         try:
-            # 1) Recovery-Datei (Paper)
-            cleared, msg = _clear_stuck_recovery(root)
+            # 1) Prozess lebendig?
+            pids = _find_bot_pids()
+
+            # 2) Recovery-Datei (Paper)
+            cleared, msg = _clear_stuck_recovery(root, bot_running=bool(pids))
             if cleared:
                 logger.warning("Recovery-Anpassung: %s", msg)
                 if tg.enabled:
                     tg.notify_error("SAFETY_WATCHDOG", msg)
 
-            # 2) Syntax
+            # 3) Syntax
             ok_c, cmsg = _run_compileall(root)
             if not ok_c:
                 logger.error("compileall: %s", cmsg)
@@ -209,11 +237,9 @@ def run_forever() -> None:
                     tg.notify_error("SAFETY_WATCHDOG_COMPILE", cmsg[:400])
                 # Kein Neustart: Syntaxfehler behebt restart nicht — manuell fixen.
 
-            # 3) Optional ruff
+            # 4) Optional ruff
             _maybe_ruff_autofix(root)
 
-            # 4) Prozess lebendig?
-            pids = _find_bot_pids()
             if not pids:
                 logger.error("Kein Bot-Prozess (main.py) gefunden")
                 if tg.enabled:

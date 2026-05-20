@@ -63,8 +63,26 @@ def _find_bot_pids() -> List[int]:
 def _tail_log(path: Path, max_lines: int) -> List[str]:
     if not path.is_file():
         return []
+    if max_lines <= 0:
+        return []
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        chunk_size = 8192
+        max_scan_bytes = max(1_048_576, max_lines * chunk_size)
+        chunks: List[bytes] = []
+        newline_count = 0
+        scanned = 0
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            pos = fh.tell()
+            while pos > 0 and newline_count <= max_lines and scanned < max_scan_bytes:
+                read_size = min(chunk_size, pos, max_scan_bytes - scanned)
+                pos -= read_size
+                fh.seek(pos)
+                chunk = fh.read(read_size)
+                chunks.append(chunk)
+                newline_count += chunk.count(b"\n")
+                scanned += read_size
+        raw = b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()
         return raw[-max_lines:] if len(raw) > max_lines else raw
     except OSError as e:
         logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)

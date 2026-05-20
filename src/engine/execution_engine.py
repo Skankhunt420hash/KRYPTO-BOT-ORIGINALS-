@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal
 from src.utils.logger import setup_logger
 
@@ -51,6 +52,10 @@ _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
 )
 
 
+class _RuntimeEntryBlocked(RuntimeError):
+    """Entry-Order was blocked by the runtime control plane."""
+
+
 def _is_retryable(exc: Exception) -> bool:
     """True = temporärer Fehler (Netzwerk, Timeout, Ratelimit) → Retry sinnvoll."""
     exc_type = type(exc).__name__
@@ -59,6 +64,16 @@ def _is_retryable(exc: Exception) -> bool:
         if pattern in exc_type or pattern in exc_msg:
             return False
     return True
+
+
+def _runtime_entry_block_reason() -> str:
+    """Return a hard block reason for new entries, or an empty string."""
+    ctrl = runtime_control.get_snapshot()
+    if ctrl.get("paused"):
+        return "CONTROL PAUSE: Neue Entries sind pausiert"
+    if ctrl.get("risk_off"):
+        return "RISK OFF: Neue Entries sind vorübergehend deaktiviert"
+    return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -268,6 +283,13 @@ class ExecutionEngine:
             self._check_rejection_limit()
             return ExecutionResult.rejected(fp, reason)
 
+        runtime_block = _runtime_entry_block_reason()
+        if runtime_block:
+            logger.warning(f"[yellow]{runtime_block}[/yellow]")
+            self._consecutive_rejections += 1
+            self._check_rejection_limit()
+            return ExecutionResult.rejected(fp, runtime_block)
+
         # 2. Preisabweichungs-Prüfung
         price_ok, deviation_pct, dev_reason = self._check_price_deviation(
             symbol, intended_price
@@ -292,7 +314,9 @@ class ExecutionEngine:
 
         # 4. Order ausführen
         try:
-            order, retries = self._execute_with_retry(symbol, order_side, amount)
+            order, retries = self._execute_with_retry(
+                symbol, order_side, amount, entry_order=True
+            )
             fill_price = _extract_fill_price(order, intended_price)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
@@ -333,6 +357,13 @@ class ExecutionEngine:
                 fingerprint=fp,
                 reason="",
             )
+
+        except _RuntimeEntryBlocked as e:
+            reason = str(e)
+            logger.warning(f"[yellow]{reason}[/yellow]")
+            self._consecutive_rejections += 1
+            self._check_rejection_limit()
+            return ExecutionResult.rejected(fp, reason)
 
         except Exception as e:
             self._on_failure(str(e))
@@ -394,7 +425,7 @@ class ExecutionEngine:
     # ── Interne Methoden ──────────────────────────────────────────────────
 
     def _execute_with_retry(
-        self, symbol: str, side: str, amount: float
+        self, symbol: str, side: str, amount: float, *, entry_order: bool = False
     ) -> Tuple[Dict[str, Any], int]:
         """
         Führt Order mit Retry + exponentiellem Backoff aus.
@@ -409,6 +440,11 @@ class ExecutionEngine:
         last_exc: Optional[Exception] = None
 
         for attempt in range(max_retries + 1):
+            if entry_order:
+                runtime_block = _runtime_entry_block_reason()
+                if runtime_block:
+                    raise _RuntimeEntryBlocked(runtime_block)
+
             try:
                 if side == "buy":
                     order = self._connector.create_market_buy_order(symbol, amount)

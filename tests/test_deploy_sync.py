@@ -57,7 +57,7 @@ class DeploySyncTests(unittest.TestCase):
             _run(["git", "commit", "-m", "initial"], cwd=seed, env=git_env)
             _run(["git", "remote", "add", "origin", str(origin)], cwd=seed, env=git_env)
             _run(["git", "push", "-u", "origin", "main"], cwd=seed, env=git_env)
-            _run(["git", "clone", str(origin), str(work)], cwd=tmp_path, env=git_env)
+            _run(["git", "clone", "-b", "main", str(origin), str(work)], cwd=tmp_path, env=git_env)
 
             (seed / "README.md").write_text("v2\n", encoding="utf-8")
             _run(["git", "add", "README.md"], cwd=seed, env=git_env)

@@ -19,11 +19,11 @@ class DeploySyncScriptTests(unittest.TestCase):
         bot_dir = root / "bot"
         (bot_dir / "data").mkdir(parents=True)
         (bot_dir / "data" / "runtime_recovery.json").write_text(
-            '{"paused": true, "risk_off": true}\n",
+            '{"paused": true, "risk_off": true}\n',
             encoding="utf-8",
         )
         (bot_dir / "data" / "daily_summary.json").write_text(
-            '{"days": [{"day": "today", "pnl_abs": -123.45}]}\n",
+            '{"days": [{"day": "today", "pnl_abs": -123.45}]}\n',
             encoding="utf-8",
         )
         return bot_dir

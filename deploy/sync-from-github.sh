@@ -64,6 +64,8 @@ git pull origin main --no-rebase || {
   exit 1
 }
 
+restore_runtime_files
+
 if [[ -f .venv/bin/pip ]]; then
   .venv/bin/pip install -q -r requirements.txt
 fi

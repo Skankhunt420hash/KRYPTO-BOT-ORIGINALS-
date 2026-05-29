@@ -64,7 +64,24 @@ def _tail_log(path: Path, max_lines: int) -> List[str]:
     if not path.is_file():
         return []
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        max_lines = max(1, int(max_lines))
+        chunk_size = 64 * 1024
+        max_bytes = max(chunk_size, min(16 * 1024 * 1024, max_lines * 4096))
+        chunks: List[bytes] = []
+        bytes_read = 0
+        newline_count = 0
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            pos = fh.tell()
+            while pos > 0 and newline_count <= max_lines and bytes_read < max_bytes:
+                read_size = min(chunk_size, pos, max_bytes - bytes_read)
+                pos -= read_size
+                fh.seek(pos)
+                chunk = fh.read(read_size)
+                chunks.append(chunk)
+                bytes_read += read_size
+                newline_count += chunk.count(b"\n")
+        raw = b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()
         return raw[-max_lines:] if len(raw) > max_lines else raw
     except OSError as e:
         logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)

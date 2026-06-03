@@ -41,7 +41,7 @@ class DeploySyncTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (origin_work / "data" / "daily_summary.json").write_text(
-                '{"source": "committed"}\n",
+                '{"source": "committed"}\n',
                 encoding="utf-8",
             )
             (origin_work / "README.md").write_text("v1\n", encoding="utf-8")

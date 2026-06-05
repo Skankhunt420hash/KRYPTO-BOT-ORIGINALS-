@@ -32,7 +32,6 @@ logger = setup_logger("safety_watchdog")
 
 _ERROR_RE = re.compile(
     r"(\bERROR\b|\bCRITICAL\b|Traceback|Exception:|Fatal Python error)",
-    re.IGNORECASE,
 )
 
 

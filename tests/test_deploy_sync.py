@@ -101,7 +101,7 @@ class DeploySyncTests(unittest.TestCase):
             env["SUDO_LOG"] = str(sudo_log)
 
             result = subprocess.run(
-                [str(SYNC_SCRIPT), str(server)],
+                ["bash", str(SYNC_SCRIPT), str(server)],
                 cwd=ROOT,
                 env=env,
                 text=True,

@@ -31,7 +31,7 @@ from src.utils.telegram_notifier import TelegramNotifier
 logger = setup_logger("safety_watchdog")
 
 _ERROR_RE = re.compile(
-    r"(ERROR|CRITICAL|Traceback|Exception:|Fatal Python error)",
+    r"(^|[\s\[])(ERROR|CRITICAL|Traceback|Exception:|Fatal Python error)([\s\]:]|$)",
     re.IGNORECASE,
 )
 
@@ -63,9 +63,25 @@ def _find_bot_pids() -> List[int]:
 def _tail_log(path: Path, max_lines: int) -> List[str]:
     if not path.is_file():
         return []
+    max_lines = max(0, int(max_lines))
+    if max_lines <= 0:
+        return []
+    chunk_size = 8192
+    max_bytes = max(65536, max_lines * 4096)
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return raw[-max_lines:] if len(raw) > max_lines else raw
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            pos = fh.tell()
+            data = bytearray()
+            while pos > 0 and data.count(b"\n") <= max_lines and len(data) < max_bytes:
+                read_size = min(chunk_size, pos, max_bytes - len(data))
+                if read_size <= 0:
+                    break
+                pos -= read_size
+                fh.seek(pos)
+                data[:0] = fh.read(read_size)
+        raw = bytes(data).decode("utf-8", errors="replace").splitlines()
+        return raw[-max_lines:]
     except OSError as e:
         logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)
         return []
@@ -121,7 +137,7 @@ def _maybe_ruff_autofix(root: Path) -> Tuple[bool, str]:
 def _clear_stuck_recovery(root: Path) -> Tuple[bool, str]:
     if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
         return False, "nur paper"
-    if not bool(getattr(settings, "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", True)):
+    if not bool(getattr(settings, "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", False)):
         return False, "clear recovery aus"
     rel = getattr(settings, "STATE_RECOVERY_FILE", "data/runtime_recovery.json")
     path = Path(rel)
@@ -177,18 +193,20 @@ def run_forever() -> None:
     poll = max(30, int(getattr(settings, "SAFETY_WATCHDOG_POLL_SEC", 120)))
     tail_n = max(50, int(getattr(settings, "SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)))
     err_thr = max(1, int(getattr(settings, "SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)))
-    log_rel = (getattr(settings, "SAFETY_WATCHDOG_LOG_FILE", "") or "").strip() or getattr(
-        settings, "SUPERVISOR_BOT_LOGFILE", "logs/bot_process.log"
-    )
-    log_path = Path(log_rel)
-    if not log_path.is_absolute():
+    raw_log_env = os.getenv("SAFETY_WATCHDOG_LOG_FILE")
+    if raw_log_env is None:
+        log_rel = getattr(settings, "SUPERVISOR_BOT_LOGFILE", "logs/bot_process.log")
+    else:
+        log_rel = raw_log_env.strip()
+    log_path: Optional[Path] = Path(log_rel) if log_rel else None
+    if log_path is not None and not log_path.is_absolute():
         log_path = root / log_path
 
     last_restart_mono = 0.0
     logger.info(
         "Safety-Watchdog start | poll=%ss | log=%s | restart_cmd=%s",
         poll,
-        log_path,
+        log_path if log_path is not None else "disabled",
         "set" if (getattr(settings, "SAFETY_WATCHDOG_RESTART_CMD", "") or "").strip() else "empty",
     )
 
@@ -221,7 +239,7 @@ def run_forever() -> None:
                 last_restart_mono = _restart_bot("bot_process_missing", tg, last_restart_mono)
 
             # 5) Log-Burst
-            lines = _tail_log(log_path, tail_n)
+            lines = _tail_log(log_path, tail_n) if log_path is not None else []
             n_err = _count_error_lines(lines)
             if n_err >= err_thr:
                 logger.error("Viele Fehlerzeilen im Log (%d/%d): Neustart erwägen", n_err, tail_n)

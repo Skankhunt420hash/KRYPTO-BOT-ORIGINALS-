@@ -77,6 +77,7 @@ class MultiStrategyBotSafetyTests(unittest.TestCase):
         bot._last_prices = {}
         bot._last_brain_snapshot = {}
         bot._active_strategy_runtime = "TestStrategy"
+        bot._recovery_blocked_symbols = set()
         bot.decisions = []
         bot._market_context = lambda df: {}
         bot._record_last_decision = lambda **kwargs: bot.decisions.append(kwargs)

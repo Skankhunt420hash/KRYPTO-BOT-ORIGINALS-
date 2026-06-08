@@ -31,7 +31,7 @@ from src.utils.telegram_notifier import TelegramNotifier
 logger = setup_logger("safety_watchdog")
 
 _ERROR_RE = re.compile(
-    r"(ERROR|CRITICAL|Traceback|Exception:|Fatal Python error)",
+    r"(^|\s|\[)(ERROR|CRITICAL)(\s|:|\]|$)|Traceback \(most recent call last\):|Exception:|Fatal Python error",
     re.IGNORECASE,
 )
 
@@ -63,9 +63,24 @@ def _find_bot_pids() -> List[int]:
 def _tail_log(path: Path, max_lines: int) -> List[str]:
     if not path.is_file():
         return []
+    if max_lines <= 0:
+        return []
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
-        return raw[-max_lines:] if len(raw) > max_lines else raw
+        chunks: List[bytes] = []
+        line_count = 0
+        block_size = 8192
+        with path.open("rb") as f:
+            f.seek(0, os.SEEK_END)
+            pos = f.tell()
+            while pos > 0 and line_count <= max_lines:
+                read_size = min(block_size, pos)
+                pos -= read_size
+                f.seek(pos)
+                chunk = f.read(read_size)
+                chunks.append(chunk)
+                line_count += chunk.count(b"\n")
+        raw = b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()
+        return raw[-max_lines:]
     except OSError as e:
         logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)
         return []

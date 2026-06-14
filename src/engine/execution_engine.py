@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal
 from src.utils.logger import setup_logger
 
@@ -290,6 +291,14 @@ class ExecutionEngine:
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             return ExecutionResult.rejected(fp, reason)
 
+        # Runtime-Control ist die letzte Entry-Sperre vor dem Connector-Call.
+        # Exits laufen bewusst ueber execute_exit() und bleiben davon unberuehrt.
+        ctrl = runtime_control.get_snapshot()
+        if ctrl.get("paused"):
+            return ExecutionResult.rejected(fp, "CONTROL PAUSE: Neue Entries sind pausiert")
+        if ctrl.get("risk_off"):
+            return ExecutionResult.rejected(fp, "RISK OFF: Neue Entries sind voruebergehend deaktiviert")
+
         # 4. Order ausführen
         try:
             order, retries = self._execute_with_retry(symbol, order_side, amount)
@@ -382,7 +391,7 @@ class ExecutionEngine:
 
         except Exception as e:
             self._on_failure(str(e))
-            reason = f"EXIT FEHLER (Position wird lokal geschlossen): {type(e).__name__}: {str(e)[:120]}"
+            reason = f"EXIT FEHLER (Position bleibt lokal offen): {type(e).__name__}: {str(e)[:120]}"
             logger.error(f"[red]{reason}[/red]")
             if self._tg:
                 self._tg.notify_error(

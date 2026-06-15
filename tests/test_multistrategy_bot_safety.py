@@ -93,6 +93,7 @@ class MultiStrategyBotSafetyTests(unittest.TestCase):
         bot._active_strategy_runtime = "test"
         bot._last_prices = {}
         bot._last_brain_snapshot = {}
+        bot._recovery_blocked_symbols = set()
         return bot
 
     def test_failed_exit_keeps_position_and_db_trade_open(self):

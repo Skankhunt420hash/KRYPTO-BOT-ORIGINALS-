@@ -416,6 +416,11 @@ class ExecutionEngine:
                     order = self._connector.create_market_sell_order(symbol, amount)
 
                 if not order:
+                    if not self.is_paper:
+                        raise RuntimeError(
+                            "Leeres Live-Order-Ergebnis vom Connector; "
+                            "Order-Status ist mehrdeutig, kein Auto-Retry"
+                        )
                     raise ValueError("Leeres Order-Ergebnis vom Connector")
 
                 # TODO: Partial-Fill-Handling für Live-Exchange
@@ -428,6 +433,11 @@ class ExecutionEngine:
             except Exception as exc:
                 last_exc = exc
                 retryable = _is_retryable(exc)
+                if (
+                    not self.is_paper
+                    and "Order-Status ist mehrdeutig" in str(exc)
+                ):
+                    retryable = False
 
                 logger.warning(
                     f"Order-Versuch {attempt + 1}/{max_retries + 1} fehlgeschlagen | "

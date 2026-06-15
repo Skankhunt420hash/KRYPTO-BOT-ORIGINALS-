@@ -380,7 +380,7 @@ class RiskEngine(RiskManager):
         if settings.LIVE_TEST_MODE:
             daily_limit_pct = float(getattr(settings, "LIVE_TEST_DAILY_LOSS_LIMIT_PCT", daily_limit_pct))
         if daily_limit_pct > 0:
-            daily_limit = self._initial_balance * (daily_limit_pct / 100)
+            daily_limit = float(account_equity_usdt) * (daily_limit_pct / 100)
             if abs(self._daily_loss) >= daily_limit:
                 return _deny(
                     f"LIVE HARD GATE: DAILY LOSS LIMIT "

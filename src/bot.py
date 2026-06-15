@@ -1226,8 +1226,27 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"Position bleibt lokal offen"
                     )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason=exit_result.reason,
+                        strategy=position.strategy_name,
+                    )
+                    self._log_decision_cycle(
+                        symbol=symbol,
+                        regime="EXIT_FAILED",
+                        ranking=[],
+                        chosen_strategy=position.strategy_name,
+                        signal_score=0.0,
+                        risk_decision="exit_failed_keep_open",
+                        allow_trade=False,
+                        reject_reason=exit_result.reason,
+                        last_decision_reason=exit_reason,
+                        market_context=market_ctx,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -1662,10 +1681,7 @@ class MultiStrategyBot:
                 )
                 return
 
-        # 6. Signal registrieren (Duplikatschutz)
-        self.risk.register_signal(best)
-
-        # 7. Order ausführen via Execution Engine (Retry, Slippage, Fail-Safes)
+        # 6. Order ausführen via Execution Engine (Retry, Slippage, Fail-Safes)
         if best.side == Side.LONG:
             self._notify_mini_live_order(
                 symbol=symbol, side="buy", amount=amount, entry=best.entry
@@ -1698,6 +1714,7 @@ class MultiStrategyBot:
                 )
                 return
 
+            self.risk.register_signal(best)
             self.risk.open_with_signal(best, amount)
             _snap = self._last_brain_snapshot or {}
             _bs_raw = _snap.get("last_signal_score")
@@ -1804,9 +1821,27 @@ class MultiStrategyBot:
         if is_live and settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+                f"{symbol} – Order wird blockiert"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_live_blocked",
+                reason="live_futures_short_not_implemented",
+                strategy=signal.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=signal.regime or "UNKNOWN",
+                ranking=list((self._last_brain_snapshot or {}).get("last_strategy_ranking") or []),
+                chosen_strategy=signal.strategy_name,
+                signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0) or 0.0),
+                risk_decision="live_futures_short_blocked",
+                allow_trade=False,
+                reject_reason="live_futures_short_not_implemented",
+                last_decision_reason=signal.reason,
+                market_context={},
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(
@@ -1840,6 +1875,7 @@ class MultiStrategyBot:
             )
             return
 
+        self.risk.register_signal(signal)
         self.risk.open_with_signal(signal, amount)
         _snap_s = self._last_brain_snapshot or {}
         _bs_raw_s = _snap_s.get("last_signal_score")

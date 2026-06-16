@@ -48,7 +48,12 @@ _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
     "OrderNotFound",
     "InvalidAddress",
     "InvalidNonce",
+    "OrderResultUnavailable",
 )
+
+
+class OrderResultUnavailable(RuntimeError):
+    """Connector returned no order result; do not retry create-order blindly."""
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -382,7 +387,7 @@ class ExecutionEngine:
 
         except Exception as e:
             self._on_failure(str(e))
-            reason = f"EXIT FEHLER (Position wird lokal geschlossen): {type(e).__name__}: {str(e)[:120]}"
+            reason = f"EXIT FEHLER (Position bleibt lokal offen): {type(e).__name__}: {str(e)[:120]}"
             logger.error(f"[red]{reason}[/red]")
             if self._tg:
                 self._tg.notify_error(
@@ -416,7 +421,7 @@ class ExecutionEngine:
                     order = self._connector.create_market_sell_order(symbol, amount)
 
                 if not order:
-                    raise ValueError("Leeres Order-Ergebnis vom Connector")
+                    raise OrderResultUnavailable("Leeres Order-Ergebnis vom Connector")
 
                 # TODO: Partial-Fill-Handling für Live-Exchange
                 # status = order.get("status", "unknown")

@@ -49,7 +49,7 @@ class DeploySyncTests(unittest.TestCase):
             run(["git", "commit", "-m", "seed runtime files"], cwd=seed)
             run(["git", "remote", "add", "origin", str(origin)], cwd=seed)
             run(["git", "push", "-u", "origin", "main"], cwd=seed)
-            run(["git", "clone", str(origin), str(bot_dir)], cwd=root)
+            run(["git", "clone", "-b", "main", str(origin), str(bot_dir)], cwd=root)
 
             (bot_dir / "data" / "runtime_recovery.json").write_text(
                 '{"paused": true, "risk_off": true}\n',

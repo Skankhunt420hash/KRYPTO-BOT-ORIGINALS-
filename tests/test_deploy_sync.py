@@ -71,7 +71,7 @@ class DeploySyncTests(unittest.TestCase):
             env["PATH"] = f"{fake_bin}{os.pathsep}{env['PATH']}"
             env["SUDO_LOG"] = str(sudo_log)
 
-            run([str(SCRIPT), str(bot_dir)], cwd=root, env=env)
+            run(["bash", str(SCRIPT), str(bot_dir)], cwd=root, env=env)
 
             self.assertIn(
                 '"paused": true',

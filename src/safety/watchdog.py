@@ -31,9 +31,11 @@ from src.utils.telegram_notifier import TelegramNotifier
 logger = setup_logger("safety_watchdog")
 
 _ERROR_RE = re.compile(
-    r"(ERROR|CRITICAL|Traceback|Exception:|Fatal Python error)",
+    r"(^|\s|\[)(ERROR|CRITICAL)(\s|\]|:|-)|Traceback|Exception:|Fatal Python error",
     re.IGNORECASE,
 )
+_TAIL_CHUNK_BYTES = 8192
+_TAIL_MAX_BYTES = 2 * 1024 * 1024
 
 
 def _project_root() -> Path:
@@ -63,8 +65,25 @@ def _find_bot_pids() -> List[int]:
 def _tail_log(path: Path, max_lines: int) -> List[str]:
     if not path.is_file():
         return []
+    max_lines = max(0, int(max_lines))
+    if max_lines == 0:
+        return []
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        chunks: List[bytes] = []
+        bytes_read = 0
+        newlines_seen = 0
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            pos = fh.tell()
+            while pos > 0 and newlines_seen <= max_lines and bytes_read < _TAIL_MAX_BYTES:
+                read_size = min(_TAIL_CHUNK_BYTES, pos, _TAIL_MAX_BYTES - bytes_read)
+                pos -= read_size
+                fh.seek(pos)
+                chunk = fh.read(read_size)
+                chunks.append(chunk)
+                bytes_read += len(chunk)
+                newlines_seen += chunk.count(b"\n")
+        raw = b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()
         return raw[-max_lines:] if len(raw) > max_lines else raw
     except OSError as e:
         logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)
@@ -121,7 +140,7 @@ def _maybe_ruff_autofix(root: Path) -> Tuple[bool, str]:
 def _clear_stuck_recovery(root: Path) -> Tuple[bool, str]:
     if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
         return False, "nur paper"
-    if not bool(getattr(settings, "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", True)):
+    if not bool(getattr(settings, "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", False)):
         return False, "clear recovery aus"
     rel = getattr(settings, "STATE_RECOVERY_FILE", "data/runtime_recovery.json")
     path = Path(rel)
@@ -171,24 +190,34 @@ def _restart_bot(reason: str, tg: Optional[TelegramNotifier], last_mono: float) 
     return now
 
 
+def _resolve_log_path(root: Path) -> Optional[Path]:
+    raw = os.environ.get("SAFETY_WATCHDOG_LOG_FILE")
+    if raw is not None:
+        raw = raw.strip()
+        if not raw:
+            return None
+        log_rel = raw
+    else:
+        log_rel = getattr(settings, "SUPERVISOR_BOT_LOGFILE", "logs/bot_process.log")
+    log_path = Path(log_rel)
+    if not log_path.is_absolute():
+        log_path = root / log_path
+    return log_path
+
+
 def run_forever() -> None:
     root = _project_root()
     tg = TelegramNotifier()
     poll = max(30, int(getattr(settings, "SAFETY_WATCHDOG_POLL_SEC", 120)))
     tail_n = max(50, int(getattr(settings, "SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)))
     err_thr = max(1, int(getattr(settings, "SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)))
-    log_rel = (getattr(settings, "SAFETY_WATCHDOG_LOG_FILE", "") or "").strip() or getattr(
-        settings, "SUPERVISOR_BOT_LOGFILE", "logs/bot_process.log"
-    )
-    log_path = Path(log_rel)
-    if not log_path.is_absolute():
-        log_path = root / log_path
+    log_path = _resolve_log_path(root)
 
     last_restart_mono = 0.0
     logger.info(
         "Safety-Watchdog start | poll=%ss | log=%s | restart_cmd=%s",
         poll,
-        log_path,
+        log_path if log_path is not None else "disabled",
         "set" if (getattr(settings, "SAFETY_WATCHDOG_RESTART_CMD", "") or "").strip() else "empty",
     )
 
@@ -221,16 +250,17 @@ def run_forever() -> None:
                 last_restart_mono = _restart_bot("bot_process_missing", tg, last_restart_mono)
 
             # 5) Log-Burst
-            lines = _tail_log(log_path, tail_n)
-            n_err = _count_error_lines(lines)
-            if n_err >= err_thr:
-                logger.error("Viele Fehlerzeilen im Log (%d/%d): Neustart erwägen", n_err, tail_n)
-                if tg.enabled:
-                    tg.notify_error(
-                        "SAFETY_WATCHDOG_LOG",
-                        f"ERROR-Zeilen im Tail: {n_err} (Schwelle {err_thr})",
-                    )
-                last_restart_mono = _restart_bot(f"log_error_burst n={n_err}", tg, last_restart_mono)
+            if log_path is not None:
+                lines = _tail_log(log_path, tail_n)
+                n_err = _count_error_lines(lines)
+                if n_err >= err_thr:
+                    logger.error("Viele Fehlerzeilen im Log (%d/%d): Neustart erwägen", n_err, tail_n)
+                    if tg.enabled:
+                        tg.notify_error(
+                            "SAFETY_WATCHDOG_LOG",
+                            f"ERROR-Zeilen im Tail: {n_err} (Schwelle {err_thr})",
+                        )
+                    last_restart_mono = _restart_bot(f"log_error_burst n={n_err}", tg, last_restart_mono)
 
         except Exception as e:
             logger.exception("Safety-Watchdog Schleifenfehler: %s", e)

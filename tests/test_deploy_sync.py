@@ -62,7 +62,7 @@ class DeploySyncTests(unittest.TestCase):
             encoding="utf-8",
         )
         (bot_dir / "data" / "daily_summary.json").write_text(
-            '{"daily": "local"}\n",
+            '{"daily": "local"}\n',
             encoding="utf-8",
         )
         return bot_dir

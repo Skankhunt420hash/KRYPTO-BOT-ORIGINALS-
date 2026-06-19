@@ -64,6 +64,7 @@ class MultiStrategyBotExitSafetyTests(unittest.TestCase):
         bot.health = _Health()
         bot.decision_repo = _DisabledDecisionRepo()
         bot._active_strategy_runtime = "TestStrategy"
+        bot._last_prices = {}
         bot._open_trade_ids = {"BTC/USDT": 123}
 
         MultiStrategyBot._process_pair(bot, "BTC/USDT")

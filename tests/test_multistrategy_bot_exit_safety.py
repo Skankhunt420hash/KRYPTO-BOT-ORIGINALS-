@@ -49,6 +49,11 @@ class _DisabledDecisionRepo:
     available = False
 
 
+class _Health:
+    def update_data_freshness(self, symbol):
+        pass
+
+
 class MultiStrategyBotExitSafetyTests(unittest.TestCase):
     def test_failed_exit_order_keeps_local_position_and_trade_id_open(self):
         bot = object.__new__(MultiStrategyBot)
@@ -56,6 +61,7 @@ class MultiStrategyBotExitSafetyTests(unittest.TestCase):
         bot.exchange = _ExchangeWithStopLossData()
         bot.risk = _RiskWithOpenLong()
         bot.exec_engine = _FailingExecutionEngine()
+        bot.health = _Health()
         bot.decision_repo = _DisabledDecisionRepo()
         bot._active_strategy_runtime = "TestStrategy"
         bot._open_trade_ids = {"BTC/USDT": 123}

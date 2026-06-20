@@ -25,9 +25,10 @@ import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from config.settings import settings
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal
 from src.utils.logger import setup_logger
 
@@ -48,7 +49,17 @@ _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
     "OrderNotFound",
     "InvalidAddress",
     "InvalidNonce",
+    "OrderResultUnavailable",
+    "RuntimeControlBlocked",
 )
+
+
+class OrderResultUnavailable(Exception):
+    """Connector konnte nicht sicher bestätigen, ob eine Order ausgeführt wurde."""
+
+
+class RuntimeControlBlocked(Exception):
+    """Pause/Risk-Off wurde unmittelbar vor einem Entry-Orderversuch aktiv."""
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -212,6 +223,14 @@ class ExecutionEngine:
 
         return True
 
+    def _entry_control_block_reason(self) -> Optional[str]:
+        ctrl = runtime_control.get_snapshot()
+        if ctrl.get("paused"):
+            return "CONTROL PAUSE: Neue Entries sind pausiert"
+        if ctrl.get("risk_off"):
+            return "RISK OFF: Neue Entries sind vorübergehend deaktiviert"
+        return None
+
     def get_status(self) -> dict:
         """Gibt den aktuellen Status der Engine zurück (für Logging/Monitoring)."""
         return {
@@ -290,9 +309,21 @@ class ExecutionEngine:
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             return ExecutionResult.rejected(fp, reason)
 
+        control_reason = self._entry_control_block_reason()
+        if control_reason:
+            logger.warning(f"[yellow]{control_reason}[/yellow]")
+            self._consecutive_rejections += 1
+            self._check_rejection_limit()
+            return ExecutionResult.rejected(fp, control_reason)
+
         # 4. Order ausführen
         try:
-            order, retries = self._execute_with_retry(symbol, order_side, amount)
+            order, retries = self._execute_with_retry(
+                symbol,
+                order_side,
+                amount,
+                before_attempt=self._entry_control_block_reason,
+            )
             fill_price = _extract_fill_price(order, intended_price)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
@@ -334,6 +365,12 @@ class ExecutionEngine:
                 reason="",
             )
 
+        except RuntimeControlBlocked as e:
+            self._consecutive_rejections += 1
+            self._check_rejection_limit()
+            reason = str(e)
+            logger.warning(f"[yellow]{reason}[/yellow]")
+            return ExecutionResult.rejected(fp, reason)
         except Exception as e:
             self._on_failure(str(e))
             reason = f"EXECUTION FEHLER: {type(e).__name__}: {str(e)[:120]}"
@@ -382,7 +419,7 @@ class ExecutionEngine:
 
         except Exception as e:
             self._on_failure(str(e))
-            reason = f"EXIT FEHLER (Position wird lokal geschlossen): {type(e).__name__}: {str(e)[:120]}"
+            reason = f"EXIT FEHLER (Position bleibt lokal offen): {type(e).__name__}: {str(e)[:120]}"
             logger.error(f"[red]{reason}[/red]")
             if self._tg:
                 self._tg.notify_error(
@@ -394,7 +431,12 @@ class ExecutionEngine:
     # ── Interne Methoden ──────────────────────────────────────────────────
 
     def _execute_with_retry(
-        self, symbol: str, side: str, amount: float
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        *,
+        before_attempt: Optional[Callable[[], Optional[str]]] = None,
     ) -> Tuple[Dict[str, Any], int]:
         """
         Führt Order mit Retry + exponentiellem Backoff aus.
@@ -410,13 +452,20 @@ class ExecutionEngine:
 
         for attempt in range(max_retries + 1):
             try:
+                if before_attempt:
+                    block_reason = before_attempt()
+                    if block_reason:
+                        raise RuntimeControlBlocked(block_reason)
+
                 if side == "buy":
                     order = self._connector.create_market_buy_order(symbol, amount)
                 else:
                     order = self._connector.create_market_sell_order(symbol, amount)
 
                 if not order:
-                    raise ValueError("Leeres Order-Ergebnis vom Connector")
+                    raise OrderResultUnavailable(
+                        "Leeres Order-Ergebnis vom Connector; Status auf Exchange unbekannt"
+                    )
 
                 # TODO: Partial-Fill-Handling für Live-Exchange
                 # status = order.get("status", "unknown")

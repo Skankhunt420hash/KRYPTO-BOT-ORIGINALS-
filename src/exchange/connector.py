@@ -419,6 +419,12 @@ class ExchangeConnector:
     def _has_sufficient_balance(self, symbol: str, side: str, amount: float, price: float) -> bool:
         bal = self.fetch_balance() or {}
         market = self._get_market(symbol)
+        is_derivative = bool(getattr(settings, "FUTURES_MODE", False)) or bool(
+            market.get("swap") or market.get("future") or market.get("contract")
+        )
+        if is_derivative:
+            # Futures/Swaps laufen über Margin; Spot-Base-Bestand ist kein valider Sell-Guard.
+            return True
         base = market.get("base")
         quote = market.get("quote")
         try:

@@ -100,7 +100,8 @@ class RiskManager:
         )
         self.open_positions[symbol] = position
         cost = price * amount
-        self.balance -= cost
+        if not paper_equity_ledger_enabled():
+            self.balance -= cost
 
         logger.info(
             f"[green]Position eröffnet:[/green] {symbol} | "

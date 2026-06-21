@@ -85,6 +85,7 @@ class CriticalTradingSafetyTests(unittest.TestCase):
         bot.decision_repo = _FakeDecisionRepo()
         bot._open_trade_ids = {symbol: 123}
         bot._last_prices = {}
+        bot._recovery_blocked_symbols = set()
         bot._active_strategy_runtime = "SafetyTest"
 
         bot._process_pair(symbol)

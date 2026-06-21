@@ -159,7 +159,7 @@ class Settings:
         os.getenv("TELEGRAM_PANEL_LOG_LINES", 20)
     )
     # Kommagetrennte Liste von Chat-/User-IDs, die das Panel bedienen dürfen.
-    # Leer = kein Whitelisting (nicht empfohlen in produktiven Umgebungen).
+    # Leer = Fallback auf TELEGRAM_CHAT_ID; ohne Chat-ID bleibt das Panel aus.
     TELEGRAM_PANEL_ALLOWED_IDS: str = os.getenv("TELEGRAM_PANEL_ALLOWED_IDS", "")
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///data/trades.db")
@@ -482,7 +482,8 @@ class Settings:
     SAFETY_WATCHDOG_LOG_TAIL_LINES: int = int(
         os.getenv("SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)
     )
-    # Optional: eigene Log-Datei (leer = SUPERVISOR_BOT_LOGFILE). Bei systemd+journalctl ggf. leer lassen und nur Prozess-Check nutzen.
+    # Optional: eigene Log-Datei. Unset = SUPERVISOR_BOT_LOGFILE; explizit leer = Log-Prüfung aus.
+    SAFETY_WATCHDOG_LOG_FILE_CONFIGURED: bool = "SAFETY_WATCHDOG_LOG_FILE" in os.environ
     SAFETY_WATCHDOG_LOG_FILE: str = os.getenv("SAFETY_WATCHDOG_LOG_FILE", "").strip()
     SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD: int = int(
         os.getenv("SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)
@@ -497,9 +498,10 @@ class Settings:
     SAFETY_WATCHDOG_RUN_COMPILEALL: bool = _env_bool(
         "SAFETY_WATCHDOG_RUN_COMPILEALL", default=True
     )
-    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (festgefahren)
+    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (festgefahren).
+    # Opt-in, damit bewusste Safety-Locks nicht automatisch gelöscht werden.
     SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY: bool = _env_bool(
-        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=True
+        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=False
     )
     # Nur wenn ruff installiert und explizit true — vorsichtig
     SAFETY_WATCHDOG_RUFF_AUTOFIX: bool = _env_bool(

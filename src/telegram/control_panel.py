@@ -107,11 +107,15 @@ class TelegramControlPanel:
         self._log_lines = int(
             getattr(settings, "TELEGRAM_PANEL_LOG_LINES", 20)
         )
-        # Optionales Whitelisting: kommaseparierte User-/Chat-IDs
+        # Whitelisting: bevorzugt explizite IDs, sonst nur den Haupt-Chat.
         raw_ids = getattr(settings, "TELEGRAM_PANEL_ALLOWED_IDS", "")
         self._allowed_ids = {
             part.strip() for part in raw_ids.split(",") if part.strip()
         }
+        if not self._allowed_ids and self._chat_id:
+            self._allowed_ids = {str(self._chat_id).strip()}
+        if self._enabled and not self._allowed_ids:
+            self._enabled = False
 
         self._notifier = notifier or TelegramNotifier()
         self._callbacks = callbacks or PanelCallbacks()
@@ -144,10 +148,15 @@ class TelegramControlPanel:
                 logger.warning(
                     "Telegram-Control-Panel deaktiviert: TELEGRAM_BOT_TOKEN fehlt."
                 )
+            elif settings.TELEGRAM_ENABLED and settings.TELEGRAM_PANEL_ENABLED and not self._allowed_ids:
+                logger.warning(
+                    "Telegram-Control-Panel deaktiviert: keine erlaubte Chat-ID konfiguriert "
+                    "(TELEGRAM_PANEL_ALLOWED_IDS oder TELEGRAM_CHAT_ID setzen)."
+                )
             logger.info(
                 "Telegram-Control-Panel deaktiviert "
                 "(ENABLE_TELEGRAM/TELEGRAM_ENABLED=false, "
-                "TELEGRAM_PANEL_ENABLED=false oder kein Bot-Token gesetzt)"
+                "TELEGRAM_PANEL_ENABLED=false, kein Bot-Token oder keine erlaubte Chat-ID gesetzt)"
             )
 
     # ------------------------------------------------------------------
@@ -329,7 +338,7 @@ class TelegramControlPanel:
         if self._allowed_ids and chat_id not in self._allowed_ids:
             logger.warning(
                 "Telegram-Panel: Chat %s nicht in TELEGRAM_PANEL_ALLOWED_IDS – Befehl ignoriert "
-                "(Whitelist anpassen oder leer lassen).",
+                "(Whitelist anpassen).",
                 chat_id,
             )
             return

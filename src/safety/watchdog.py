@@ -64,11 +64,49 @@ def _tail_log(path: Path, max_lines: int) -> List[str]:
     if not path.is_file():
         return []
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        chunk_size = 8192
+        chunks: List[bytes] = []
+        lines_found = 0
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            pos = fh.tell()
+            while pos > 0 and lines_found <= max_lines:
+                read_size = min(chunk_size, pos)
+                pos -= read_size
+                fh.seek(pos)
+                chunk = fh.read(read_size)
+                chunks.append(chunk)
+                lines_found += chunk.count(b"\n")
+        raw = b"".join(reversed(chunks)).decode("utf-8", errors="replace").splitlines()
         return raw[-max_lines:] if len(raw) > max_lines else raw
     except OSError as e:
         logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)
         return []
+
+
+def _read_new_log_lines(path: Path, offset: int, max_lines: int) -> Tuple[List[str], int]:
+    if not path.is_file():
+        return [], 0
+    try:
+        size = path.stat().st_size
+        if size <= 0:
+            return [], 0
+        if offset < 0 or offset > size:
+            offset = 0
+        max_bytes = 1024 * 1024
+        start = offset
+        if size - start > max_bytes:
+            start = max(0, size - max_bytes)
+        with path.open("rb") as fh:
+            fh.seek(start)
+            data = fh.read(size - start)
+        if start > 0 and start != offset:
+            _, _, data = data.partition(b"\n")
+        raw = data.decode("utf-8", errors="replace").splitlines()
+        return (raw[-max_lines:] if len(raw) > max_lines else raw), size
+    except OSError as e:
+        logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)
+        return [], offset
 
 
 def _count_error_lines(lines: List[str]) -> int:
@@ -143,7 +181,9 @@ def _clear_stuck_recovery(root: Path) -> Tuple[bool, str]:
     if not changed:
         return False, "recovery schon frei"
     try:
-        path.write_text(json.dumps(data, ensure_ascii=True, indent=2), encoding="utf-8")
+        tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=True, indent=2), encoding="utf-8")
+        os.replace(tmp, path)
         return True, "recovery paused/risk_off zurückgesetzt"
     except OSError as e:
         return False, f"recovery schreiben: {e}"
@@ -177,18 +217,22 @@ def run_forever() -> None:
     poll = max(30, int(getattr(settings, "SAFETY_WATCHDOG_POLL_SEC", 120)))
     tail_n = max(50, int(getattr(settings, "SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)))
     err_thr = max(1, int(getattr(settings, "SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)))
-    log_rel = (getattr(settings, "SAFETY_WATCHDOG_LOG_FILE", "") or "").strip() or getattr(
-        settings, "SUPERVISOR_BOT_LOGFILE", "logs/bot_process.log"
-    )
-    log_path = Path(log_rel)
-    if not log_path.is_absolute():
-        log_path = root / log_path
+    log_rel = (getattr(settings, "SAFETY_WATCHDOG_LOG_FILE", "") or "").strip()
+    log_configured = bool(getattr(settings, "SAFETY_WATCHDOG_LOG_FILE_CONFIGURED", False))
+    if log_configured and not log_rel:
+        log_path: Optional[Path] = None
+    else:
+        log_rel = log_rel or getattr(settings, "SUPERVISOR_BOT_LOGFILE", "logs/bot_process.log")
+        log_path = Path(log_rel)
+        if not log_path.is_absolute():
+            log_path = root / log_path
 
     last_restart_mono = 0.0
+    last_log_offset = 0
     logger.info(
         "Safety-Watchdog start | poll=%ss | log=%s | restart_cmd=%s",
         poll,
-        log_path,
+        log_path if log_path is not None else "disabled",
         "set" if (getattr(settings, "SAFETY_WATCHDOG_RESTART_CMD", "") or "").strip() else "empty",
     )
 
@@ -221,16 +265,17 @@ def run_forever() -> None:
                 last_restart_mono = _restart_bot("bot_process_missing", tg, last_restart_mono)
 
             # 5) Log-Burst
-            lines = _tail_log(log_path, tail_n)
-            n_err = _count_error_lines(lines)
-            if n_err >= err_thr:
-                logger.error("Viele Fehlerzeilen im Log (%d/%d): Neustart erwägen", n_err, tail_n)
-                if tg.enabled:
-                    tg.notify_error(
-                        "SAFETY_WATCHDOG_LOG",
-                        f"ERROR-Zeilen im Tail: {n_err} (Schwelle {err_thr})",
-                    )
-                last_restart_mono = _restart_bot(f"log_error_burst n={n_err}", tg, last_restart_mono)
+            if log_path is not None:
+                lines, last_log_offset = _read_new_log_lines(log_path, last_log_offset, tail_n)
+                n_err = _count_error_lines(lines)
+                if n_err >= err_thr:
+                    logger.error("Viele neue Fehlerzeilen im Log (%d/%d): Neustart erwägen", n_err, tail_n)
+                    if tg.enabled:
+                        tg.notify_error(
+                            "SAFETY_WATCHDOG_LOG",
+                            f"Neue ERROR-Zeilen: {n_err} (Schwelle {err_thr})",
+                        )
+                    last_restart_mono = _restart_bot(f"log_error_burst n={n_err}", tg, last_restart_mono)
 
         except Exception as e:
             logger.exception("Safety-Watchdog Schleifenfehler: %s", e)

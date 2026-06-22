@@ -157,6 +157,7 @@ def make_bot(close: float, position: Position):
     bot.decision_repo = DummyRepo()
     bot.health = DummyHealth()
     bot._open_trade_ids = {position.symbol: 123}
+    bot._last_prices = {}
     bot._recovery_blocked_symbols = set()
     bot._active_strategy_runtime = "Test"
     bot._last_brain_snapshot = {}

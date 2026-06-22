@@ -55,9 +55,17 @@ class DummyHealth:
     def __init__(self):
         self.heartbeats = 0
         self.checks = 0
+        self.fresh_symbols = []
+        self.errors = []
 
     def update_heartbeat(self):
         self.heartbeats += 1
+
+    def update_data_freshness(self, symbol):
+        self.fresh_symbols.append(symbol)
+
+    def record_error(self, level, message):
+        self.errors.append((level, message))
 
     def check_and_react(self):
         self.checks += 1
@@ -147,6 +155,7 @@ def make_bot(close: float, position: Position):
     bot.perf_tracker = DummyPerfTracker()
     bot.tg = DummyTelegram()
     bot.decision_repo = DummyRepo()
+    bot.health = DummyHealth()
     bot._open_trade_ids = {position.symbol: 123}
     bot._recovery_blocked_symbols = set()
     bot._active_strategy_runtime = "Test"

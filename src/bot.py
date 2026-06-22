@@ -1158,7 +1158,7 @@ class MultiStrategyBot:
             logger.error(f"Live-Kapital-Snapshot fehlgeschlagen für {symbol}: {e}")
             return 0.0, 0.0
 
-    def _process_pair(self, symbol: str):
+    def _process_pair(self, symbol: str, allow_entries: bool = True):
         """Führt den vollständigen Analyse- und Ausführungszyklus für ein Pair durch."""
         if symbol in self._recovery_blocked_symbols:
             logger.warning(
@@ -1226,8 +1226,15 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"Position bleibt lokal offen"
                     )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason=exit_result.reason,
+                        strategy=position.strategy_name,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -1288,6 +1295,26 @@ class MultiStrategyBot:
                 allow_trade=False,
                 reject_reason="open_position_exists",
                 last_decision_reason="open_position_exists",
+                market_context=market_ctx,
+            )
+            return
+
+        if not allow_entries:
+            self._record_last_decision(
+                symbol=symbol,
+                decision="entries_paused",
+                reason="execution_unhealthy",
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime="ENTRY_PAUSED",
+                ranking=[],
+                chosen_strategy="",
+                signal_score=0.0,
+                risk_decision="entries_paused",
+                allow_trade=False,
+                reject_reason="execution_unhealthy",
+                last_decision_reason="execution_unhealthy",
                 market_context=market_ctx,
             )
             return
@@ -1804,9 +1831,27 @@ class MultiStrategyBot:
         if is_live and settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+                f"{symbol} – Entry blockiert"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_live_blocked",
+                reason="live_futures_short_not_implemented",
+                strategy=signal.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=signal.regime or "UNKNOWN",
+                ranking=list((self._last_brain_snapshot or {}).get("last_strategy_ranking") or []),
+                chosen_strategy=signal.strategy_name,
+                signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0) or 0.0),
+                risk_decision="short_live_blocked",
+                allow_trade=False,
+                reject_reason="live_futures_short_not_implemented",
+                last_decision_reason="live_futures_short_not_implemented",
+                market_context={},
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(
@@ -1965,13 +2010,14 @@ class MultiStrategyBot:
         # Heartbeat aktualisieren (Health Monitor Liveness-Tracking)
         self.health.update_heartbeat()
 
+        entries_allowed = True
         # Execution Engine Gesundheitscheck (Circuit Breaker, Emergency Pause, Kill-Switch)
         if not self.exec_engine.is_healthy:
             status = self.exec_engine.get_status()
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             logger.warning(
                 f"[yellow]EXECUTION PAUSIERT[/yellow] – "
-                f"Zyklus übersprungen | Grund: {reason} | "
+                f"neue Entries blockiert, offene Positionen werden weiter geprüft | Grund: {reason} | "
                 f"Status: CB={status['circuit_state']} "
                 f"Errors={status['consecutive_errors']} "
                 f"KillSwitch={status['kill_switch']}"
@@ -1984,7 +2030,7 @@ class MultiStrategyBot:
                     "strategy": self._active_strategy_runtime,
                 }
             )
-            return
+            entries_allowed = False
 
         self._paper_undo_unwanted_control_locks()
 
@@ -1996,7 +2042,7 @@ class MultiStrategyBot:
 
         for symbol in self.pairs:
             try:
-                self._process_pair(symbol)
+                self._process_pair(symbol, allow_entries=entries_allowed)
             except Exception as e:
                 logger.error(f"Unerwarteter Fehler bei {symbol}: {e}")
                 self.health.record_error("error", f"{symbol}: {e}")

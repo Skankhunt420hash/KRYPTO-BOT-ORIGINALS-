@@ -1158,6 +1158,107 @@ class MultiStrategyBot:
             logger.error(f"Live-Kapital-Snapshot fehlgeschlagen für {symbol}: {e}")
             return 0.0, 0.0
 
+    def _attempt_position_exit(
+        self, symbol: str, current_price: float, exit_reason: str
+    ) -> bool:
+        """Versucht eine offene Position zu schließen; lokaler State folgt nur erfolgreicher Order."""
+        position = self.risk.open_positions.get(symbol)
+        if not position:
+            return False
+
+        entry_price = position.entry_price
+        pos_size = position.amount
+        pos_side = position.side
+
+        # LONG schließen: Sell-Order / SHORT schließen: Buy-Order (zurückkaufen)
+        exit_side = "sell" if pos_side == "long" else "buy"
+        exit_result = self.exec_engine.execute_exit(symbol, exit_side, position.amount)
+        if not exit_result.success:
+            logger.error(
+                f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
+                f"{exit_result.reason} | Position bleibt lokal offen"
+            )
+            try:
+                self.health.record_error("error", f"{symbol}: Exit fehlgeschlagen")
+            except Exception:
+                pass
+            self._record_last_decision(
+                symbol=symbol,
+                decision="exit_failed",
+                reason=exit_result.reason,
+                strategy=position.strategy_name,
+            )
+            return True
+
+        pnl = self.risk.close_position(symbol, current_price)
+
+        side_label = "[LONG]" if pos_side == "long" else "[SHORT]"
+        pnl_str = f"{pnl:+.4f} USDT" if pnl is not None else "?"
+        logger.info(
+            f"[bold]EXIT {side_label}[/bold] {symbol} | "
+            f"Grund: {exit_reason} | PnL: {pnl_str}"
+        )
+
+        # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
+        trade_id = self._open_trade_ids.pop(symbol, None)
+        if pnl is not None:
+            cost = entry_price * pos_size
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+            if trade_id is not None:
+                self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
+            try:
+                self.perf_tracker.refresh()
+            except Exception:
+                pass
+            self.tg.notify_trade_closed(
+                symbol=symbol,
+                side=pos_side,
+                entry=entry_price,
+                exit_price=current_price,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                reason=exit_reason,
+                strategy=position.strategy_name,
+                is_paper=settings.TRADING_MODE == "paper",
+            )
+            self._record_trade_event(
+                event="closed",
+                symbol=symbol,
+                side=pos_side,
+                strategy=position.strategy_name,
+                pnl=pnl,
+                reason=exit_reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="exit_closed",
+                reason=exit_reason,
+                strategy=position.strategy_name,
+            )
+        return True
+
+    def _process_open_position_exits(self) -> None:
+        """Prüft risk-reduzierende Exits auch dann, wenn neue Entries gegated sind."""
+        for symbol in list(self.risk.open_positions.keys()):
+            try:
+                df = self.exchange.fetch_ohlcv(symbol)
+                if df.empty:
+                    logger.warning(
+                        f"{symbol} | Keine OHLCV-Daten für Exit-Prüfung erhalten"
+                    )
+                    continue
+                current_price = float(df["close"].iloc[-1])
+                self._last_prices[symbol] = current_price
+                exit_reason = self.risk.check_exit_conditions(symbol, current_price)
+                if exit_reason:
+                    self._attempt_position_exit(symbol, current_price, exit_reason)
+            except Exception as e:
+                logger.error(f"Exit-Prüfung für offene Position fehlgeschlagen {symbol}: {e}")
+                try:
+                    self.health.record_error("error", f"{symbol}: Exit-Prüfung {e}")
+                except Exception:
+                    pass
+
     def _process_pair(self, symbol: str):
         """Führt den vollständigen Analyse- und Ausführungszyklus für ein Pair durch."""
         if symbol in self._recovery_blocked_symbols:
@@ -1211,69 +1312,7 @@ class MultiStrategyBot:
         # 1. Exits prüfen (SL, TP, Trailing Stop) – side-aware
         exit_reason = self.risk.check_exit_conditions(symbol, current_price)
         if exit_reason:
-            position = self.risk.open_positions.get(symbol)
-            if position:
-                entry_price = position.entry_price
-                pos_size = position.amount
-                pos_side = position.side
-
-                # LONG schließen: Sell-Order / SHORT schließen: Buy-Order (zurückkaufen)
-                exit_side = "sell" if pos_side == "long" else "buy"
-                exit_result = self.exec_engine.execute_exit(
-                    symbol, exit_side, position.amount
-                )
-                if not exit_result.success:
-                    logger.error(
-                        f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
-                        f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
-                    )
-
-                pnl = self.risk.close_position(symbol, current_price)
-
-                side_label = "[LONG]" if pos_side == "long" else "[SHORT]"
-                pnl_str = f"{pnl:+.4f} USDT" if pnl is not None else "?"
-                logger.info(
-                    f"[bold]EXIT {side_label}[/bold] {symbol} | "
-                    f"Grund: {exit_reason} | PnL: {pnl_str}"
-                )
-
-                # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
-                trade_id = self._open_trade_ids.pop(symbol, None)
-                if pnl is not None:
-                    cost = entry_price * pos_size
-                    pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
-                    if trade_id is not None:
-                        self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
-                    try:
-                        self.perf_tracker.refresh()
-                    except Exception:
-                        pass
-                    self.tg.notify_trade_closed(
-                        symbol=symbol,
-                        side=pos_side,
-                        entry=entry_price,
-                        exit_price=current_price,
-                        pnl=pnl,
-                        pnl_pct=pnl_pct,
-                        reason=exit_reason,
-                        strategy=position.strategy_name,
-                        is_paper=settings.TRADING_MODE == "paper",
-                    )
-                    self._record_trade_event(
-                        event="closed",
-                        symbol=symbol,
-                        side=pos_side,
-                        strategy=position.strategy_name,
-                        pnl=pnl,
-                        reason=exit_reason,
-                    )
-                    self._record_last_decision(
-                        symbol=symbol,
-                        decision="exit_closed",
-                        reason=exit_reason,
-                        strategy=position.strategy_name,
-                    )
+            self._attempt_position_exit(symbol, current_price, exit_reason)
             return
 
         # Offene Position: kein neuer Einstieg
@@ -1802,11 +1841,36 @@ class MultiStrategyBot:
             return
 
         if is_live and settings.FUTURES_MODE:
-            logger.warning(
-                f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+            reason = "SHORT (Futures-Live) noch nicht implementiert"
+            logger.error(
+                f"[red]{reason}[/red] {symbol} | "
+                "Live-Order wird nicht ausgeführt"
             )
-            # Fällt durch in Paper-Simulation
+            self.tg.notify_trade_blocked(
+                symbol=symbol,
+                strategy=signal.strategy_name,
+                side=signal.side.value,
+                reason=reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_short_live_unimplemented",
+                reason=reason,
+                strategy=signal.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=signal.regime or "UNKNOWN",
+                ranking=list((self._last_brain_snapshot or {}).get("last_strategy_ranking") or []),
+                chosen_strategy=signal.strategy_name,
+                signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0) or 0.0),
+                risk_decision="blocked_short_live_unimplemented",
+                allow_trade=False,
+                reject_reason=reason,
+                last_decision_reason=reason,
+                market_context={},
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(
@@ -1948,6 +2012,7 @@ class MultiStrategyBot:
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
         if not self._startup_checks_ok:
+            self._process_open_position_exits()
             reason = self._startup_block_reason or "startup_checks_failed"
             logger.error(
                 f"[red]STARTUP-GATE AKTIV[/red] – Zyklus übersprungen | Grund: {reason}"
@@ -1967,6 +2032,7 @@ class MultiStrategyBot:
 
         # Execution Engine Gesundheitscheck (Circuit Breaker, Emergency Pause, Kill-Switch)
         if not self.exec_engine.is_healthy:
+            self._process_open_position_exits()
             status = self.exec_engine.get_status()
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             logger.warning(

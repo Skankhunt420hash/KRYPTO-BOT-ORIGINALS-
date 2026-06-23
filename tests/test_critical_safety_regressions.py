@@ -124,6 +124,9 @@ class _FakeHealth:
     def update_heartbeat(self):
         pass
 
+    def update_data_freshness(self, symbol):
+        pass
+
     def check_and_react(self):
         pass
 

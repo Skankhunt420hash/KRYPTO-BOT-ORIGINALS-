@@ -109,6 +109,7 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
         bot = MultiStrategyBot.__new__(MultiStrategyBot)
         bot._active_strategy_runtime = "TestStrategy"
         bot._last_brain_snapshot = {}
+        bot._last_prices = {}
         bot._recovery_blocked_symbols = set()
         bot.decision_repo = DummyDecisionRepo()
         return bot

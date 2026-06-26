@@ -1226,8 +1226,15 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        "Position bleibt lokal/DB offen"
                     )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed_position_kept_open",
+                        reason=exit_result.reason,
+                        strategy=position.strategy_name,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -1804,9 +1811,15 @@ class MultiStrategyBot:
         if is_live and settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+                f"{symbol} – echte Sell-Order blockiert"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_live_futures_blocked",
+                reason="live_futures_short_not_implemented",
+                strategy=signal.strategy_name,
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(
@@ -1929,7 +1942,7 @@ class MultiStrategyBot:
         """
         if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
             return
-        if not bool(getattr(settings, "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", True)):
+        if not bool(getattr(settings, "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", False)):
             return
         ctrl = runtime_control.get_snapshot()
         if not (ctrl.get("paused") or ctrl.get("risk_off")):

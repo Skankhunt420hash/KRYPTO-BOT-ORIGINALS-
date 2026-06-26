@@ -112,7 +112,7 @@ class Settings:
     # Paper: jeden Zyklus Pause/Risk-Off aufheben (gegen Alt-Fork „MASTER AUTOHEAL“ / Panel).
     # Live-Modus: wird nicht angewendet. Manuelles /pause im Paper: auf false setzen.
     PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE: bool = _env_bool(
-        "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", default=True
+        "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", default=False
     )
 
     # auto = Multi-Strategie (Meta-Selector + Legacy-Adapter)
@@ -482,8 +482,10 @@ class Settings:
     SAFETY_WATCHDOG_LOG_TAIL_LINES: int = int(
         os.getenv("SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)
     )
-    # Optional: eigene Log-Datei (leer = SUPERVISOR_BOT_LOGFILE). Bei systemd+journalctl ggf. leer lassen und nur Prozess-Check nutzen.
-    SAFETY_WATCHDOG_LOG_FILE: str = os.getenv("SAFETY_WATCHDOG_LOG_FILE", "").strip()
+    # Optional: eigene Log-Datei. Unset = SUPERVISOR_BOT_LOGFILE, explizit leer = Log-Check aus.
+    SAFETY_WATCHDOG_LOG_FILE = os.getenv("SAFETY_WATCHDOG_LOG_FILE")
+    if SAFETY_WATCHDOG_LOG_FILE is not None:
+        SAFETY_WATCHDOG_LOG_FILE = SAFETY_WATCHDOG_LOG_FILE.strip()
     SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD: int = int(
         os.getenv("SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)
     )
@@ -499,7 +501,7 @@ class Settings:
     )
     # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (festgefahren)
     SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY: bool = _env_bool(
-        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=True
+        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=False
     )
     # Nur wenn ruff installiert und explizit true — vorsichtig
     SAFETY_WATCHDOG_RUFF_AUTOFIX: bool = _env_bool(

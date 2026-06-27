@@ -1,5 +1,6 @@
 import unittest
 
+from config.settings import settings
 from src.engine.risk_engine import RiskEngine
 from src.strategies.signal import EnhancedSignal, Side
 
@@ -22,6 +23,10 @@ class RiskEngineTests(unittest.TestCase):
         )
 
     def test_daily_loss_limit_blocks_signal(self):
+        old_limit = settings.DAILY_LOSS_LIMIT_PCT
+        settings.DAILY_LOSS_LIMIT_PCT = 5.0
+        self.addCleanup(setattr, settings, "DAILY_LOSS_LIMIT_PCT", old_limit)
+
         engine = RiskEngine(initial_balance=10_000.0)
         sig = self._make_dummy_signal()
 

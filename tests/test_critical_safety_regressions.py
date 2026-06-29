@@ -17,10 +17,16 @@ from src.utils.risk_manager import Position
 
 
 class _DummyHealth:
+    def update_heartbeat(self):
+        pass
+
     def update_data_freshness(self, symbol):
         pass
 
     def record_error(self, level, message):
+        pass
+
+    def check_and_react(self):
         pass
 
 
@@ -37,6 +43,7 @@ class _FailingExitEngine:
 class _RecordingEntryEngine:
     def __init__(self):
         self.calls = []
+        self.is_healthy = True
 
     def execute_entry(self, **kwargs):
         self.calls.append(kwargs)
@@ -50,6 +57,28 @@ class _RecordingEntryEngine:
             fingerprint="entry",
             reason="",
         )
+
+    def get_status(self):
+        return {
+            "pause_reason": "",
+            "circuit_state": "closed",
+            "consecutive_errors": 0,
+            "kill_switch": False,
+        }
+
+
+class _UnhealthyExecutionEngine(_RecordingEntryEngine):
+    def __init__(self):
+        super().__init__()
+        self.is_healthy = False
+
+    def get_status(self):
+        return {
+            "pause_reason": "emergency pause",
+            "circuit_state": "open",
+            "consecutive_errors": 5,
+            "kill_switch": True,
+        }
 
 
 class _DummyRepo:
@@ -100,6 +129,17 @@ class _DummyRisk:
         self.open_positions.pop(symbol, None)
         return -3.0
 
+    def get_stats(self):
+        return {
+            "balance": 10_000.0,
+            "total_pnl": 0.0,
+            "total_trades": 0,
+            "winrate_pct": 0.0,
+            "open_positions": len(self.open_positions),
+            "daily_loss": 0.0,
+            "portfolio_risk_pct": 0.0,
+        }
+
 
 def _make_bot_for_exit_test():
     bot = MultiStrategyBot.__new__(MultiStrategyBot)
@@ -118,6 +158,26 @@ def _make_bot_for_exit_test():
     bot._logged_cycles = []
     bot._record_last_decision = lambda **kwargs: bot._recorded_decisions.append(kwargs)
     bot._log_decision_cycle = lambda **kwargs: bot._logged_cycles.append(kwargs)
+    return bot
+
+
+def _make_bot_for_cycle_test(exec_engine=None):
+    bot = MultiStrategyBot.__new__(MultiStrategyBot)
+    bot.pairs = ["BTC/USDT"]
+    bot.health = _DummyHealth()
+    bot.risk = _DummyRisk()
+    bot.exec_engine = exec_engine or _RecordingEntryEngine()
+    bot.scorer = type("Scorer", (), {"refresh": lambda self: None})()
+    bot.tg = _DummyTelegram()
+    bot._startup_checks_ok = True
+    bot._startup_block_reason = ""
+    bot._active_strategy_runtime = "UnitStrategy"
+    bot._processed_pairs = []
+    bot._process_pair = lambda symbol: bot._processed_pairs.append(symbol)
+    bot._paper_undo_unwanted_control_locks = lambda: None
+    bot._update_performance_tracking = lambda: None
+    bot._sync_runtime_state = lambda: None
+    bot._persist_recovery_state = lambda: None
     return bot
 
 
@@ -195,6 +255,22 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
         self.assertFalse(result.success)
         self.assertIn("CONTROL PAUSE", result.reason)
         self.assertEqual(connector.orders, [])
+
+    def test_execution_pause_still_processes_pairs_for_exits(self):
+        bot = _make_bot_for_cycle_test(exec_engine=_UnhealthyExecutionEngine())
+
+        bot.run_cycle()
+
+        self.assertEqual(bot._processed_pairs, ["BTC/USDT"])
+
+    def test_startup_block_still_processes_pairs_for_exits(self):
+        bot = _make_bot_for_cycle_test()
+        bot._startup_checks_ok = False
+        bot._startup_block_reason = "orphan_exchange_positions:ETH/USDT"
+
+        bot.run_cycle()
+
+        self.assertEqual(bot._processed_pairs, ["BTC/USDT"])
 
     def test_watchdog_defaults_preserve_manual_control_locks(self):
         self.assertFalse(settings.PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE)

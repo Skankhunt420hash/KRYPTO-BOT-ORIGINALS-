@@ -1977,7 +1977,8 @@ class MultiStrategyBot:
         if not self._startup_checks_ok:
             reason = self._startup_block_reason or "startup_checks_failed"
             logger.error(
-                f"[red]STARTUP-GATE AKTIV[/red] – Zyklus übersprungen | Grund: {reason}"
+                f"[red]STARTUP-GATE AKTIV[/red] – neue Entries bleiben blockiert, "
+                f"offene Positionen werden weiter geprüft | Grund: {reason}"
             )
             runtime_state.set_last_decision(
                 {
@@ -1987,7 +1988,6 @@ class MultiStrategyBot:
                     "strategy": self._active_strategy_runtime,
                 }
             )
-            return
 
         # Heartbeat aktualisieren (Health Monitor Liveness-Tracking)
         self.health.update_heartbeat()
@@ -1998,7 +1998,7 @@ class MultiStrategyBot:
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             logger.warning(
                 f"[yellow]EXECUTION PAUSIERT[/yellow] – "
-                f"Zyklus übersprungen | Grund: {reason} | "
+                f"neue Entries werden blockiert, offene Positionen werden weiter geprüft | Grund: {reason} | "
                 f"Status: CB={status['circuit_state']} "
                 f"Errors={status['consecutive_errors']} "
                 f"KillSwitch={status['kill_switch']}"
@@ -2011,7 +2011,6 @@ class MultiStrategyBot:
                     "strategy": self._active_strategy_runtime,
                 }
             )
-            return
 
         self._paper_undo_unwanted_control_locks()
 

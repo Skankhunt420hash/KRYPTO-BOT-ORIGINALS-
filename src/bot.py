@@ -1226,8 +1226,15 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"Position bleibt lokal offen"
                     )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason=exit_result.reason,
+                        strategy=position.strategy_name,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -1793,6 +1800,19 @@ class MultiStrategyBot:
         """
         is_live = settings.TRADING_MODE == "live"
 
+        if not bool(getattr(settings, "SHORT_ENABLED", True)):
+            logger.warning(
+                f"[yellow]SHORT BLOCKIERT[/yellow] {symbol} | "
+                f"Strategie: {signal.strategy_name} | SHORT_ENABLED=false"
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_blocked",
+                reason="SHORT_ENABLED=false",
+                strategy=signal.strategy_name,
+            )
+            return
+
         if is_live and not settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT BLOCKIERT (Spot-Modus)[/yellow] {symbol} | "
@@ -1802,11 +1822,18 @@ class MultiStrategyBot:
             return
 
         if is_live and settings.FUTURES_MODE:
-            logger.warning(
-                f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+            reason = "SHORT Futures-Live noch nicht implementiert"
+            logger.error(
+                f"[red]SHORT BLOCKIERT (Futures-Live)[/red] {symbol} | "
+                f"Strategie: {signal.strategy_name} | {reason}"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_blocked",
+                reason=reason,
+                strategy=signal.strategy_name,
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(
@@ -1950,7 +1977,8 @@ class MultiStrategyBot:
         if not self._startup_checks_ok:
             reason = self._startup_block_reason or "startup_checks_failed"
             logger.error(
-                f"[red]STARTUP-GATE AKTIV[/red] – Zyklus übersprungen | Grund: {reason}"
+                f"[red]STARTUP-GATE AKTIV[/red] – neue Entries bleiben blockiert, "
+                f"offene Positionen werden weiter geprüft | Grund: {reason}"
             )
             runtime_state.set_last_decision(
                 {
@@ -1960,7 +1988,6 @@ class MultiStrategyBot:
                     "strategy": self._active_strategy_runtime,
                 }
             )
-            return
 
         # Heartbeat aktualisieren (Health Monitor Liveness-Tracking)
         self.health.update_heartbeat()
@@ -1971,7 +1998,7 @@ class MultiStrategyBot:
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             logger.warning(
                 f"[yellow]EXECUTION PAUSIERT[/yellow] – "
-                f"Zyklus übersprungen | Grund: {reason} | "
+                f"neue Entries werden blockiert, offene Positionen werden weiter geprüft | Grund: {reason} | "
                 f"Status: CB={status['circuit_state']} "
                 f"Errors={status['consecutive_errors']} "
                 f"KillSwitch={status['kill_switch']}"
@@ -1984,7 +2011,6 @@ class MultiStrategyBot:
                     "strategy": self._active_strategy_runtime,
                 }
             )
-            return
 
         self._paper_undo_unwanted_control_locks()
 

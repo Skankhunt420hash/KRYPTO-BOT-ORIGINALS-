@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal
 from src.utils.logger import setup_logger
 
@@ -48,6 +49,8 @@ _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
     "OrderNotFound",
     "InvalidAddress",
     "InvalidNonce",
+    "EntryControlBlocked",
+    "Leeres Order-Ergebnis vom Connector",
 )
 
 
@@ -59,6 +62,16 @@ def _is_retryable(exc: Exception) -> bool:
         if pattern in exc_type or pattern in exc_msg:
             return False
     return True
+
+
+def _entry_control_block_reason() -> str:
+    """Liefert die aktive Runtime-Entry-Sperre, ohne Exit-Orders zu beeinflussen."""
+    ctrl = runtime_control.get_snapshot()
+    if ctrl.get("paused"):
+        return "CONTROL PAUSE: Neue Entries sind pausiert"
+    if ctrl.get("risk_off"):
+        return "RISK OFF: Neue Entries sind vorübergehend deaktiviert"
+    return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -284,15 +297,27 @@ class ExecutionEngine:
             self._check_rejection_limit()
             return ExecutionResult.rejected(fp, dev_reason, deviation_pct=deviation_pct)
 
-        # 3. Circuit Breaker / Emergency Pause
+        # 3. Runtime-Control ist die letzte Entry-Sperre vor dem Connector.
+        control_reason = _entry_control_block_reason()
+        if control_reason:
+            logger.warning(f"[yellow]{control_reason}[/yellow]")
+            self._consecutive_rejections += 1
+            self._check_rejection_limit()
+            return ExecutionResult.rejected(
+                fp, control_reason, deviation_pct=deviation_pct
+            )
+
+        # 4. Circuit Breaker / Emergency Pause
         if not self.is_healthy:
             status = self.get_status()
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             return ExecutionResult.rejected(fp, reason)
 
-        # 4. Order ausführen
+        # 5. Order ausführen
         try:
-            order, retries = self._execute_with_retry(symbol, order_side, amount)
+            order, retries = self._execute_with_retry(
+                symbol, order_side, amount, enforce_entry_control=True
+            )
             fill_price = _extract_fill_price(order, intended_price)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
@@ -382,7 +407,7 @@ class ExecutionEngine:
 
         except Exception as e:
             self._on_failure(str(e))
-            reason = f"EXIT FEHLER (Position wird lokal geschlossen): {type(e).__name__}: {str(e)[:120]}"
+            reason = f"EXIT FEHLER (Position bleibt offen): {type(e).__name__}: {str(e)[:120]}"
             logger.error(f"[red]{reason}[/red]")
             if self._tg:
                 self._tg.notify_error(
@@ -394,7 +419,12 @@ class ExecutionEngine:
     # ── Interne Methoden ──────────────────────────────────────────────────
 
     def _execute_with_retry(
-        self, symbol: str, side: str, amount: float
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        *,
+        enforce_entry_control: bool = False,
     ) -> Tuple[Dict[str, Any], int]:
         """
         Führt Order mit Retry + exponentiellem Backoff aus.
@@ -410,6 +440,10 @@ class ExecutionEngine:
 
         for attempt in range(max_retries + 1):
             try:
+                if enforce_entry_control:
+                    control_reason = _entry_control_block_reason()
+                    if control_reason:
+                        raise RuntimeError(f"EntryControlBlocked: {control_reason}")
                 if side == "buy":
                     order = self._connector.create_market_buy_order(symbol, amount)
                 else:

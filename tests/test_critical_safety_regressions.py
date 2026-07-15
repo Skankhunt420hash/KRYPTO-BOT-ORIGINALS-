@@ -17,6 +17,8 @@ from src.engine.runtime_control import runtime_control
 from src.safety.watchdog import (
     _clear_stuck_recovery,
     _count_error_lines,
+    _initial_log_cursor,
+    _read_new_log_lines,
     _tail_log,
 )
 from src.strategies.signal import EnhancedSignal, Side
@@ -123,6 +125,28 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
             "2026-01-01 | bot | CRITICAL | state corrupt",
         ]
         self.assertEqual(_count_error_lines(lines), 2)
+
+    def test_watchdog_log_cursor_ignores_stale_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bot.log"
+            path.write_text(
+                "\n".join("ERROR stale failure" for _ in range(30)) + "\n",
+                encoding="utf-8",
+            )
+            identity, offset = _initial_log_cursor(path)
+            path.write_text(
+                path.read_text(encoding="utf-8")
+                + "INFO recovered\n"
+                + "ERROR new failure\n",
+                encoding="utf-8",
+            )
+
+            lines, identity, offset = _read_new_log_lines(
+                path, identity, offset, max_lines=500
+            )
+
+            self.assertEqual(lines, ["INFO recovered", "ERROR new failure"])
+            self.assertEqual(_count_error_lines(lines), 1)
 
     def test_short_enabled_blocks_native_short_signals(self):
         old_short_enabled = settings.SHORT_ENABLED

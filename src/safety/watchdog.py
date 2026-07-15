@@ -91,6 +91,41 @@ def _count_error_lines(lines: List[str]) -> int:
     return sum(1 for ln in lines if _ERROR_RE.search(ln))
 
 
+def _initial_log_cursor(path: Path) -> Tuple[Optional[Tuple[int, int]], int]:
+    """Startet hinter vorhandenem Log-Inhalt, damit alte Fehler keinen Neustart auslösen."""
+    try:
+        stat = path.stat()
+        return (stat.st_dev, stat.st_ino), stat.st_size
+    except OSError:
+        return None, 0
+
+
+def _read_new_log_lines(
+    path: Path,
+    identity: Optional[Tuple[int, int]],
+    offset: int,
+    max_lines: int,
+) -> Tuple[List[str], Optional[Tuple[int, int]], int]:
+    """Liest nur seit dem letzten Poll angehängte, begrenzte Log-Daten."""
+    if max_lines <= 0:
+        return [], identity, offset
+    try:
+        stat = path.stat()
+        current_identity = (stat.st_dev, stat.st_ino)
+        if current_identity != identity or stat.st_size < offset:
+            offset = 0
+        max_bytes = max(64 * 1024, min(2 * 1024 * 1024, max_lines * 4096))
+        with path.open("rb") as fh:
+            fh.seek(offset)
+            raw = fh.read(max_bytes)
+            new_offset = fh.tell()
+        lines = raw.decode("utf-8", errors="replace").splitlines()
+        return lines[-max_lines:], current_identity, new_offset
+    except OSError as e:
+        logger.warning("Log-Updates lesen fehlgeschlagen %s: %s", path, e)
+        return [], identity, offset
+
+
 def _run_compileall(root: Path) -> Tuple[bool, str]:
     if not bool(getattr(settings, "SAFETY_WATCHDOG_RUN_COMPILEALL", True)):
         return True, "compileall übersprungen"
@@ -201,6 +236,9 @@ def run_forever() -> None:
     log_path: Optional[Path] = Path(log_rel) if log_rel else None
     if log_path is not None and not log_path.is_absolute():
         log_path = root / log_path
+    log_identity, log_offset = (
+        _initial_log_cursor(log_path) if log_path is not None else (None, 0)
+    )
 
     last_restart_mono = 0.0
     logger.info(
@@ -240,7 +278,9 @@ def run_forever() -> None:
 
             # 5) Log-Burst
             if log_path is not None:
-                lines = _tail_log(log_path, tail_n)
+                lines, log_identity, log_offset = _read_new_log_lines(
+                    log_path, log_identity, log_offset, tail_n
+                )
                 n_err = _count_error_lines(lines)
                 if n_err >= err_thr:
                     logger.error("Viele Fehlerzeilen im Log (%d/%d): Neustart erwägen", n_err, tail_n)

@@ -320,42 +320,112 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
 
     def test_empty_connector_result_is_not_retried(self):
         old_retries = settings.EXECUTION_MAX_RETRIES
+        old_pending_file = settings.EXECUTION_PENDING_ORDERS_FILE
         settings.EXECUTION_MAX_RETRIES = 3
-        try:
-            connector = SimpleNamespace(
-                fetch_ticker=Mock(return_value={"last": 100.0}),
-                create_market_buy_order=Mock(return_value={}),
+        with tempfile.TemporaryDirectory() as tmp:
+            settings.EXECUTION_PENDING_ORDERS_FILE = str(
+                Path(tmp) / "pending_orders.json"
             )
-            engine = ExecutionEngine(connector)
+            try:
+                connector = SimpleNamespace(
+                    create_market_sell_order=Mock(return_value={}),
+                )
+                engine = ExecutionEngine(connector)
+                first = engine.execute_exit("TEST/USDT", "sell", 1.0)
 
-            result = engine.execute_entry(
-                "TEST/USDT", "buy", 1.0, self._long_signal()
-            )
+                after_restart = SimpleNamespace(
+                    create_market_sell_order=Mock(
+                        return_value={"id": "duplicate", "status": "closed"}
+                    )
+                )
+                restarted_engine = ExecutionEngine(after_restart)
+                second = restarted_engine.execute_exit(
+                    "TEST/USDT", "sell", 1.0
+                )
 
-            self.assertFalse(result.success)
-            connector.create_market_buy_order.assert_called_once()
-        finally:
-            settings.EXECUTION_MAX_RETRIES = old_retries
+                self.assertFalse(first.success)
+                self.assertFalse(second.success)
+                connector.create_market_sell_order.assert_called_once()
+                after_restart.create_market_sell_order.assert_not_called()
+            finally:
+                settings.EXECUTION_MAX_RETRIES = old_retries
+                settings.EXECUTION_PENDING_ORDERS_FILE = old_pending_file
 
     def test_unconfirmed_exit_is_not_closed_or_sent_twice(self):
-        connector = SimpleNamespace(
-            create_market_sell_order=Mock(
-                return_value={
-                    "id": "pending-exit",
-                    "status": "open",
-                    "remaining": 1.0,
-                }
+        old_pending_file = settings.EXECUTION_PENDING_ORDERS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            settings.EXECUTION_PENDING_ORDERS_FILE = str(
+                Path(tmp) / "pending_orders.json"
             )
-        )
-        engine = ExecutionEngine(connector)
+            try:
+                connector = SimpleNamespace(
+                    create_market_sell_order=Mock(
+                        return_value={
+                            "id": "pending-exit",
+                            "status": "open",
+                            "remaining": 1.0,
+                        }
+                    )
+                )
+                engine = ExecutionEngine(connector)
+                first = engine.execute_exit("TEST/USDT", "sell", 1.0)
+                restarted = ExecutionEngine(connector)
+                second = restarted.execute_exit("TEST/USDT", "sell", 1.0)
 
-        first = engine.execute_exit("TEST/USDT", "sell", 1.0)
-        second = engine.execute_exit("TEST/USDT", "sell", 1.0)
+                self.assertFalse(first.success)
+                self.assertIn("OrderConfirmationPending", first.reason)
+                self.assertFalse(second.success)
+                connector.create_market_sell_order.assert_called_once()
+            finally:
+                settings.EXECUTION_PENDING_ORDERS_FILE = old_pending_file
 
-        self.assertFalse(first.success)
-        self.assertIn("OrderConfirmationPending", first.reason)
-        self.assertFalse(second.success)
-        connector.create_market_sell_order.assert_called_once()
+    def test_terminal_partial_fill_remains_pending(self):
+        old_pending_file = settings.EXECUTION_PENDING_ORDERS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            settings.EXECUTION_PENDING_ORDERS_FILE = str(
+                Path(tmp) / "pending_orders.json"
+            )
+            try:
+                connector = SimpleNamespace(
+                    create_market_sell_order=Mock(
+                        return_value={
+                            "id": "partial-exit",
+                            "status": "canceled",
+                            "filled": 0.4,
+                            "remaining": 0.6,
+                        }
+                    )
+                )
+                engine = ExecutionEngine(connector)
+
+                result = engine.execute_exit("TEST/USDT", "sell", 1.0)
+
+                self.assertFalse(result.success)
+                self.assertIn("OrderConfirmationPending", result.reason)
+                self.assertTrue(
+                    Path(settings.EXECUTION_PENDING_ORDERS_FILE).is_file()
+                )
+            finally:
+                settings.EXECUTION_PENDING_ORDERS_FILE = old_pending_file
+
+    def test_incomplete_order_response_remains_pending(self):
+        old_pending_file = settings.EXECUTION_PENDING_ORDERS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            settings.EXECUTION_PENDING_ORDERS_FILE = str(
+                Path(tmp) / "pending_orders.json"
+            )
+            try:
+                connector = SimpleNamespace(
+                    create_market_sell_order=Mock(return_value={"id": "ambiguous"})
+                )
+                engine = ExecutionEngine(connector)
+
+                result = engine.execute_exit("TEST/USDT", "sell", 1.0)
+
+                self.assertFalse(result.success)
+                self.assertIn("OrderConfirmationPending", result.reason)
+            finally:
+                settings.EXECUTION_PENDING_ORDERS_FILE = old_pending_file
 
     def test_deploy_sync_preserves_runtime_files_and_service_order(self):
         script = Path(__file__).parents[1] / "deploy" / "sync-from-github.sh"
@@ -468,6 +538,50 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
             self.assertIn("Dienste bleiben gestoppt", result.stderr)
+            calls = call_log.read_text(encoding="utf-8")
+            self.assertNotIn("sudo systemctl start krypto-bot", calls)
+            self.assertNotIn("sudo systemctl start safety-watchdog", calls)
+
+    def test_deploy_does_not_start_previously_inactive_services(self):
+        script = Path(__file__).parents[1] / "deploy" / "sync-from-github.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "data").mkdir()
+            (root / "data" / "daily_summary.json").write_text(
+                '{"days":[]}', encoding="utf-8"
+            )
+            (root / "data" / "runtime_recovery.json").write_text(
+                '{"risk_off":true}', encoding="utf-8"
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            call_log = root / "calls.log"
+            (bin_dir / "git").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "git $*" >> "$CALL_LOG"\n',
+                encoding="utf-8",
+            )
+            (bin_dir / "sudo").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "sudo $*" >> "$CALL_LOG"\n'
+                'if [[ "$*" == systemctl\\ is-active* ]]; then exit 1; fi\n',
+                encoding="utf-8",
+            )
+            for executable in ("git", "sudo"):
+                (bin_dir / executable).chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["CALL_LOG"] = str(call_log)
+
+            result = subprocess.run(
+                ["bash", str(script), str(root)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
             calls = call_log.read_text(encoding="utf-8")
             self.assertNotIn("sudo systemctl start krypto-bot", calls)
             self.assertNotIn("sudo systemctl start safety-watchdog", calls)

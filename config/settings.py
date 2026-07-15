@@ -390,6 +390,10 @@ class Settings:
 
     # Initiale Wartezeit (Sekunden) zwischen Retries – verdoppelt sich exponentiell
     EXECUTION_RETRY_BACKOFF_SEC: float = float(os.getenv("EXECUTION_RETRY_BACKOFF_SEC", 2.0))
+    # Persistente Sperre für angenommene, aber nicht bestätigt gefüllte Orders.
+    EXECUTION_PENDING_ORDERS_FILE: str = os.getenv(
+        "EXECUTION_PENDING_ORDERS_FILE", "data/execution_pending_orders.json"
+    ).strip()
 
     # Maximale erlaubte Preisabweichung zwischen Signal-Entry und aktuellem Ticker (%)
     # 0.0 = Prüfung deaktiviert

@@ -20,11 +20,13 @@ Backtest-unabhängig: kein direkter Kontakt zum Backtest-Modul.
 TradingBot (Legacy): bleibt komplett unverändert.
 """
 
+import json
 import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
@@ -53,6 +55,7 @@ _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
     "Leeres Order-Ergebnis vom Connector",
     "OrderConfirmationPending",
     "OrderTerminalFailure",
+    "PendingOrderStateUnavailable",
 )
 
 
@@ -179,6 +182,19 @@ class ExecutionEngine:
         self._fingerprints: Dict[str, float] = {}
         # Angenommene, aber nicht als gefüllt bestätigte Orders dürfen nicht dupliziert werden.
         self._pending_orders: Dict[Tuple[str, str], str] = {}
+        pending_path = str(
+            getattr(
+                settings,
+                "EXECUTION_PENDING_ORDERS_FILE",
+                "data/execution_pending_orders.json",
+            )
+            or ""
+        ).strip()
+        self._pending_orders_file: Optional[Path] = (
+            Path(pending_path) if pending_path else None
+        )
+        self._pending_state_valid = True
+        self._load_pending_orders()
 
         # ── Slippage-Event-Fenster ────────────────────────────────────
         self._slippage_events: deque = deque(
@@ -258,7 +274,84 @@ class ExecutionEngine:
         self._pause_reason = ""
         self._slippage_events.clear()
         self._pending_orders.clear()
+        self._pending_state_valid = True
+        self._persist_pending_orders()
         logger.info("[green]ExecutionEngine: manueller Reset durchgeführt[/green]")
+
+    def _load_pending_orders(self) -> None:
+        path = self._pending_orders_file
+        if path is None or not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for item in payload.get("orders", []):
+                symbol = str(item.get("symbol") or "").strip()
+                side = str(item.get("side") or "").strip()
+                order_id = str(item.get("order_id") or "unknown")
+                if symbol and side:
+                    self._pending_orders[(symbol, side)] = order_id
+            if self._pending_orders:
+                self._emergency_paused = True
+                self._pause_reason = (
+                    "UNBESTÄTIGTE ORDER AUS RECOVERY: manuelle Börsenprüfung erforderlich"
+                )
+                logger.error(
+                    "[red]%s[/red] | %s",
+                    self._pause_reason,
+                    self._pending_orders,
+                )
+        except Exception as e:
+            self._pending_state_valid = False
+            self._emergency_paused = True
+            self._pause_reason = (
+                "PENDING-ORDER-STATE UNLESBAR: Orders bleiben fail-closed"
+            )
+            logger.error("[red]%s[/red]: %s", self._pause_reason, e)
+
+    def _persist_pending_orders(self) -> bool:
+        path = self._pending_orders_file
+        if path is None:
+            return True
+        try:
+            if not self._pending_orders:
+                path.unlink(missing_ok=True)
+                return True
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "orders": [
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "order_id": order_id,
+                    }
+                    for (symbol, side), order_id in sorted(self._pending_orders.items())
+                ]
+            }
+            tmp = path.with_name(f".{path.name}.tmp")
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+            return True
+        except OSError as e:
+            self._pending_state_valid = False
+            self._emergency_paused = True
+            self._pause_reason = (
+                "PENDING-ORDER-STATE NICHT PERSISTIERT: Orders bleiben fail-closed"
+            )
+            logger.error("[red]%s[/red]: %s", self._pause_reason, e)
+            return False
+
+    def _mark_order_pending(
+        self, symbol: str, side: str, order_id: str, status: str
+    ) -> None:
+        self._pending_orders[(symbol, side)] = order_id or "unknown"
+        self._persist_pending_orders()
+        self._trigger_pause(
+            f"ORDER NICHT BESTÄTIGT: {symbol} {side} "
+            f"id={order_id or 'unknown'} status={status or 'unknown'}"
+        )
 
     # ── Öffentliche Ausführungs-Methoden ──────────────────────────────────
 
@@ -438,30 +531,47 @@ class ExecutionEngine:
     ) -> None:
         """Akzeptiert nur bestätigte Fills; unklare Orders werden hart gegen Duplikate gesperrt."""
         status = str(order.get("status") or "").strip().lower()
-        if status in {"canceled", "cancelled", "rejected", "expired"}:
+        order_id = str(order.get("id") or "unknown")
+        tolerance = max(abs(float(requested_amount)) * 1e-8, 1e-12)
+
+        def _optional_float(name: str) -> Optional[float]:
+            raw = order.get(name)
+            if raw is None:
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+
+        filled = _optional_float("filled")
+        remaining = _optional_float("remaining")
+        terminal_failure = status in {
+            "canceled",
+            "cancelled",
+            "rejected",
+            "expired",
+        }
+        if terminal_failure and filled is not None and filled <= tolerance:
             raise RuntimeError(
                 f"OrderTerminalFailure: {symbol} {side} status={status}"
             )
 
-        remaining_raw = order.get("remaining")
-        try:
-            remaining = float(remaining_raw) if remaining_raw is not None else 0.0
-        except (TypeError, ValueError):
-            remaining = 0.0
-        pending = status in {"open", "pending", "new"} or remaining > max(
-            abs(float(requested_amount)) * 1e-8, 1e-12
+        confirmed = status == "filled" or (
+            status == "closed"
+            and (
+                (filled is not None and filled >= float(requested_amount) - tolerance)
+                or (filled is None and remaining is not None and remaining <= tolerance)
+                or self.is_paper
+            )
         )
-        if pending:
-            key = (symbol, side)
-            order_id = str(order.get("id") or "unknown")
-            self._pending_orders[key] = order_id
-            self._trigger_pause(
-                f"ORDER NICHT BESTÄTIGT: {symbol} {side} id={order_id} status={status or 'unknown'}"
-            )
-            raise RuntimeError(
-                f"OrderConfirmationPending: {symbol} {side} id={order_id} "
-                f"status={status or 'unknown'} remaining={remaining}"
-            )
+        if confirmed:
+            return
+
+        self._mark_order_pending(symbol, side, order_id, status)
+        raise RuntimeError(
+            f"OrderConfirmationPending: {symbol} {side} id={order_id} "
+            f"status={status or 'unknown'} filled={filled} remaining={remaining}"
+        )
 
     def _execute_with_retry(
         self,
@@ -485,6 +595,10 @@ class ExecutionEngine:
 
         for attempt in range(max_retries + 1):
             try:
+                if not self._pending_state_valid:
+                    raise RuntimeError(
+                        "PendingOrderStateUnavailable: manuelle Prüfung erforderlich"
+                    )
                 pending_id = self._pending_orders.get((symbol, side))
                 if pending_id:
                     raise RuntimeError(
@@ -500,12 +614,12 @@ class ExecutionEngine:
                     order = self._connector.create_market_sell_order(symbol, amount)
 
                 if not order:
-                    raise ValueError("Leeres Order-Ergebnis vom Connector")
-
-                # TODO: Partial-Fill-Handling für Live-Exchange
-                # status = order.get("status", "unknown")
-                # if status == "canceled": raise ...
-                # if status == "open": warte auf Fill ...
+                    self._mark_order_pending(
+                        symbol, side, "unknown", "empty_connector_result"
+                    )
+                    raise RuntimeError(
+                        "OrderConfirmationPending: Leeres Order-Ergebnis vom Connector"
+                    )
 
                 return order, attempt  # Erfolg
 

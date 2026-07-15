@@ -84,7 +84,11 @@ if [[ -f .venv/bin/pip ]]; then
   .venv/bin/pip install -q -r requirements.txt
 fi
 
-sudo systemctl start krypto-bot
-sudo systemctl start safety-watchdog 2>/dev/null || true
-sudo systemctl status krypto-bot --no-pager || true
+if [[ "$BOT_WAS_ACTIVE" -eq 1 ]]; then
+  sudo systemctl start krypto-bot
+  sudo systemctl status krypto-bot --no-pager || true
+fi
+if [[ "$WATCHDOG_WAS_ACTIVE" -eq 1 ]]; then
+  sudo systemctl start safety-watchdog 2>/dev/null || true
+fi
 echo "==> Logs: sudo journalctl -u krypto-bot -n 50 --no-pager"

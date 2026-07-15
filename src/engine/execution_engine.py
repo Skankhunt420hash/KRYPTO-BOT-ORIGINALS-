@@ -20,14 +20,17 @@ Backtest-unabhängig: kein direkter Kontakt zum Backtest-Modul.
 TradingBot (Legacy): bleibt komplett unverändert.
 """
 
+import json
 import os
 import time
 from collections import deque
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal
 from src.utils.logger import setup_logger
 
@@ -48,6 +51,11 @@ _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
     "OrderNotFound",
     "InvalidAddress",
     "InvalidNonce",
+    "EntryControlBlocked",
+    "Leeres Order-Ergebnis vom Connector",
+    "OrderConfirmationPending",
+    "OrderTerminalFailure",
+    "PendingOrderStateUnavailable",
 )
 
 
@@ -59,6 +67,16 @@ def _is_retryable(exc: Exception) -> bool:
         if pattern in exc_type or pattern in exc_msg:
             return False
     return True
+
+
+def _entry_control_block_reason() -> str:
+    """Liefert die aktive Runtime-Entry-Sperre, ohne Exit-Orders zu beeinflussen."""
+    ctrl = runtime_control.get_snapshot()
+    if ctrl.get("paused"):
+        return "CONTROL PAUSE: Neue Entries sind pausiert"
+    if ctrl.get("risk_off"):
+        return "RISK OFF: Neue Entries sind vorübergehend deaktiviert"
+    return ""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -162,6 +180,29 @@ class ExecutionEngine:
         # ── Fingerprint-Cache (Duplicate-Schutz) ──────────────────────
         # fingerprint → unix-timestamp der letzten Ausführung
         self._fingerprints: Dict[str, float] = {}
+        # Angenommene, aber nicht als gefüllt bestätigte Orders dürfen nicht dupliziert werden.
+        self._pending_orders: Dict[Tuple[str, str], str] = {}
+        pending_path = str(
+            getattr(
+                settings,
+                "EXECUTION_PENDING_ORDERS_FILE",
+                "data/execution_pending_orders.json",
+            )
+            or ""
+        ).strip()
+        self._pending_orders_file: Optional[Path] = (
+            Path(pending_path) if pending_path else None
+        )
+        self._pending_state_valid = True
+        if self._pending_orders_file is None:
+            self._pending_state_valid = False
+            self._emergency_paused = True
+            self._pause_reason = (
+                "PENDING-ORDER-PERSISTENZ DEAKTIVIERT: Orders bleiben fail-closed"
+            )
+            logger.error("[red]%s[/red]", self._pause_reason)
+        else:
+            self._load_pending_orders()
 
         # ── Slippage-Event-Fenster ────────────────────────────────────
         self._slippage_events: deque = deque(
@@ -198,7 +239,11 @@ class ExecutionEngine:
         if self._emergency_paused:
             return False
 
-        # 3. Circuit Breaker: Cooldown abgelaufen?
+        # 3. Noch nicht vom Caller bestätigter lokaler/DB-Commit.
+        if self._pending_orders or not self._pending_state_valid:
+            return False
+
+        # 4. Circuit Breaker: Cooldown abgelaufen?
         if self._circuit_state == CircuitState.OPEN:
             elapsed = time.monotonic() - self._circuit_opened_at
             if elapsed >= settings.CIRCUIT_BREAKER_COOLDOWN_SEC:
@@ -223,6 +268,10 @@ class ExecutionEngine:
             "consecutive_rejections": self._consecutive_rejections,
             "slippage_events": len(self._slippage_events),
             "kill_switch": _kill_switch_active(),
+            "pending_orders": {
+                f"{symbol}:{side}": order_id
+                for (symbol, side), order_id in self._pending_orders.items()
+            },
         }
 
     def reset(self) -> None:
@@ -236,7 +285,116 @@ class ExecutionEngine:
         self._emergency_paused = False
         self._pause_reason = ""
         self._slippage_events.clear()
+        self._pending_orders.clear()
+        self._pending_state_valid = True
+        self._persist_pending_orders()
         logger.info("[green]ExecutionEngine: manueller Reset durchgeführt[/green]")
+
+    def _load_pending_orders(self) -> None:
+        path = self._pending_orders_file
+        if path is None or not path.exists():
+            return
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            for item in payload.get("orders", []):
+                symbol = str(item.get("symbol") or "").strip()
+                side = str(item.get("side") or "").strip()
+                order_id = str(item.get("order_id") or "unknown")
+                if symbol and side:
+                    self._pending_orders[(symbol, side)] = order_id
+            if self._pending_orders:
+                self._emergency_paused = True
+                self._pause_reason = (
+                    "UNBESTÄTIGTE ORDER AUS RECOVERY: manuelle Börsenprüfung erforderlich"
+                )
+                logger.error(
+                    "[red]%s[/red] | %s",
+                    self._pause_reason,
+                    self._pending_orders,
+                )
+        except Exception as e:
+            self._pending_state_valid = False
+            self._emergency_paused = True
+            self._pause_reason = (
+                "PENDING-ORDER-STATE UNLESBAR: Orders bleiben fail-closed"
+            )
+            logger.error("[red]%s[/red]: %s", self._pause_reason, e)
+
+    def _persist_pending_orders(self) -> bool:
+        path = self._pending_orders_file
+        if path is None:
+            self._pending_state_valid = False
+            return False
+        try:
+            if not self._pending_orders:
+                path.unlink(missing_ok=True)
+                return True
+            path.parent.mkdir(parents=True, exist_ok=True)
+            payload = {
+                "orders": [
+                    {
+                        "symbol": symbol,
+                        "side": side,
+                        "order_id": order_id,
+                    }
+                    for (symbol, side), order_id in sorted(self._pending_orders.items())
+                ]
+            }
+            tmp = path.with_name(f".{path.name}.tmp")
+            tmp.write_text(
+                json.dumps(payload, ensure_ascii=True, indent=2),
+                encoding="utf-8",
+            )
+            os.replace(tmp, path)
+            return True
+        except OSError as e:
+            self._pending_state_valid = False
+            self._emergency_paused = True
+            self._pause_reason = (
+                "PENDING-ORDER-STATE NICHT PERSISTIERT: Orders bleiben fail-closed"
+            )
+            logger.error("[red]%s[/red]: %s", self._pause_reason, e)
+            return False
+
+    def _reserve_order_submission(self, symbol: str, side: str) -> bool:
+        """Persistiert eine Write-ahead-Sperre, bevor der Connector eine Order sieht."""
+        self._pending_orders[(symbol, side)] = "submission-started"
+        if self._persist_pending_orders():
+            return True
+        return False
+
+    def _clear_order_pending(self, symbol: str, side: str) -> bool:
+        key = (symbol, side)
+        old_value = self._pending_orders.pop(key, None)
+        if self._persist_pending_orders():
+            return True
+        if old_value is not None:
+            self._pending_orders[key] = old_value
+        return False
+
+    def _mark_order_pending(
+        self, symbol: str, side: str, order_id: str, status: str
+    ) -> None:
+        self._pending_orders[(symbol, side)] = order_id or "unknown"
+        self._persist_pending_orders()
+        self._trigger_pause(
+            f"ORDER NICHT BESTÄTIGT: {symbol} {side} "
+            f"id={order_id or 'unknown'} status={status or 'unknown'}"
+        )
+
+    def acknowledge_order(self, symbol: str, side: str) -> bool:
+        """Entfernt die Write-ahead-Sperre erst nach lokalem und DB-Commit."""
+        if self._clear_order_pending(symbol, side):
+            logger.info(
+                "[green]ORDER-STATE COMMIT BESTÄTIGT[/green] %s %s",
+                symbol,
+                side.upper(),
+            )
+            return True
+        self._trigger_pause(
+            f"ORDER-STATE ACK FEHLER: {symbol} {side} bleibt fail-closed"
+        )
+        return False
 
     # ── Öffentliche Ausführungs-Methoden ──────────────────────────────────
 
@@ -284,15 +442,28 @@ class ExecutionEngine:
             self._check_rejection_limit()
             return ExecutionResult.rejected(fp, dev_reason, deviation_pct=deviation_pct)
 
-        # 3. Circuit Breaker / Emergency Pause
+        # 3. Runtime-Control ist die letzte Entry-Sperre vor dem Connector.
+        control_reason = _entry_control_block_reason()
+        if control_reason:
+            logger.warning(f"[yellow]{control_reason}[/yellow]")
+            self._consecutive_rejections += 1
+            self._check_rejection_limit()
+            return ExecutionResult.rejected(
+                fp, control_reason, deviation_pct=deviation_pct
+            )
+
+        # 4. Circuit Breaker / Emergency Pause
         if not self.is_healthy:
             status = self.get_status()
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             return ExecutionResult.rejected(fp, reason)
 
-        # 4. Order ausführen
+        # 5. Order ausführen
         try:
-            order, retries = self._execute_with_retry(symbol, order_side, amount)
+            order, retries = self._execute_with_retry(
+                symbol, order_side, amount, enforce_entry_control=True
+            )
+            self._require_confirmed_order(order, symbol, order_side, amount)
             fill_price = _extract_fill_price(order, intended_price)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
@@ -361,6 +532,7 @@ class ExecutionEngine:
 
         try:
             order, retries = self._execute_with_retry(symbol, order_side, amount)
+            self._require_confirmed_order(order, symbol, order_side, amount)
             fill_price = _extract_fill_price(order, 0.0)
             self._on_success()
 
@@ -382,7 +554,7 @@ class ExecutionEngine:
 
         except Exception as e:
             self._on_failure(str(e))
-            reason = f"EXIT FEHLER (Position wird lokal geschlossen): {type(e).__name__}: {str(e)[:120]}"
+            reason = f"EXIT FEHLER (Position bleibt offen): {type(e).__name__}: {str(e)[:120]}"
             logger.error(f"[red]{reason}[/red]")
             if self._tg:
                 self._tg.notify_error(
@@ -393,8 +565,69 @@ class ExecutionEngine:
 
     # ── Interne Methoden ──────────────────────────────────────────────────
 
+    def _require_confirmed_order(
+        self,
+        order: Dict[str, Any],
+        symbol: str,
+        side: str,
+        requested_amount: float,
+    ) -> None:
+        """Akzeptiert nur bestätigte Fills; unklare Orders werden hart gegen Duplikate gesperrt."""
+        status = str(order.get("status") or "").strip().lower()
+        order_id = str(order.get("id") or "unknown")
+        tolerance = max(abs(float(requested_amount)) * 1e-8, 1e-12)
+
+        def _optional_float(name: str) -> Optional[float]:
+            raw = order.get(name)
+            if raw is None:
+                return None
+            try:
+                return float(raw)
+            except (TypeError, ValueError):
+                return None
+
+        filled = _optional_float("filled")
+        remaining = _optional_float("remaining")
+        terminal_failure = status in {
+            "canceled",
+            "cancelled",
+            "rejected",
+            "expired",
+        }
+        if terminal_failure and filled is not None and filled <= tolerance:
+            if not self._clear_order_pending(symbol, side):
+                raise RuntimeError(
+                    "PendingOrderStateUnavailable: terminale Order konnte "
+                    "nicht sicher aus Pending-State entfernt werden"
+                )
+            raise RuntimeError(
+                f"OrderTerminalFailure: {symbol} {side} status={status}"
+            )
+
+        confirmed = status == "filled" or (
+            status == "closed"
+            and (
+                (filled is not None and filled >= float(requested_amount) - tolerance)
+                or (filled is None and remaining is not None and remaining <= tolerance)
+                or self.is_paper
+            )
+        )
+        if confirmed:
+            return
+
+        self._mark_order_pending(symbol, side, order_id, status)
+        raise RuntimeError(
+            f"OrderConfirmationPending: {symbol} {side} id={order_id} "
+            f"status={status or 'unknown'} filled={filled} remaining={remaining}"
+        )
+
     def _execute_with_retry(
-        self, symbol: str, side: str, amount: float
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        *,
+        enforce_entry_control: bool = False,
     ) -> Tuple[Dict[str, Any], int]:
         """
         Führt Order mit Retry + exponentiellem Backoff aus.
@@ -410,24 +643,52 @@ class ExecutionEngine:
 
         for attempt in range(max_retries + 1):
             try:
+                if not self._pending_state_valid:
+                    raise RuntimeError(
+                        "PendingOrderStateUnavailable: manuelle Prüfung erforderlich"
+                    )
+                pending_id = self._pending_orders.get((symbol, side))
+                if pending_id:
+                    raise RuntimeError(
+                        f"OrderConfirmationPending: {symbol} {side} id={pending_id}"
+                    )
+                if enforce_entry_control:
+                    control_reason = _entry_control_block_reason()
+                    if control_reason:
+                        raise RuntimeError(f"EntryControlBlocked: {control_reason}")
+                if not self._reserve_order_submission(symbol, side):
+                    raise RuntimeError(
+                        "PendingOrderStateUnavailable: Write-ahead-Sperre "
+                        "konnte nicht persistiert werden"
+                    )
                 if side == "buy":
                     order = self._connector.create_market_buy_order(symbol, amount)
                 else:
                     order = self._connector.create_market_sell_order(symbol, amount)
 
                 if not order:
-                    raise ValueError("Leeres Order-Ergebnis vom Connector")
-
-                # TODO: Partial-Fill-Handling für Live-Exchange
-                # status = order.get("status", "unknown")
-                # if status == "canceled": raise ...
-                # if status == "open": warte auf Fill ...
+                    self._mark_order_pending(
+                        symbol, side, "unknown", "empty_connector_result"
+                    )
+                    raise RuntimeError(
+                        "OrderConfirmationPending: Leeres Order-Ergebnis vom Connector"
+                    )
 
                 return order, attempt  # Erfolg
 
             except Exception as exc:
                 last_exc = exc
                 retryable = _is_retryable(exc)
+                if (symbol, side) in self._pending_orders:
+                    if "OrderConfirmationPending" not in str(exc):
+                        self._mark_order_pending(
+                            symbol,
+                            side,
+                            self._pending_orders.get((symbol, side), "unknown"),
+                            type(exc).__name__,
+                        )
+                    # Nach möglicher Übermittlung ist kein automatischer Create-Retry sicher.
+                    retryable = False
 
                 logger.warning(
                     f"Order-Versuch {attempt + 1}/{max_retries + 1} fehlgeschlagen | "

@@ -145,7 +145,19 @@ class TradingBot:
                 entry_price = position.entry_price
                 pos_size = position.amount
 
-                self.exchange.create_market_sell_order(symbol, position.amount)
+                order = self.exchange.create_market_sell_order(symbol, position.amount)
+                if not order:
+                    logger.error(
+                        f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
+                        "Position bleibt lokal offen"
+                    )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason="exit_order_failed",
+                        strategy=self.strategy.name,
+                    )
+                    return
                 pnl = self.risk.close_position(symbol, current_price)
 
                 # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
@@ -1158,9 +1170,122 @@ class MultiStrategyBot:
             logger.error(f"Live-Kapital-Snapshot fehlgeschlagen für {symbol}: {e}")
             return 0.0, 0.0
 
+    def _attempt_position_exit(
+        self, symbol: str, current_price: float, exit_reason: str
+    ) -> bool:
+        """Schließt lokalen und DB-State nur nach einer erfolgreichen Exit-Order."""
+        position = self.risk.open_positions.get(symbol)
+        if not position:
+            return False
+
+        entry_price = position.entry_price
+        pos_size = position.amount
+        pos_side = position.side
+        exit_side = "sell" if pos_side == "long" else "buy"
+        exit_result = self.exec_engine.execute_exit(symbol, exit_side, position.amount)
+        if not exit_result.success:
+            logger.error(
+                f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
+                f"{exit_result.reason} | Position bleibt lokal offen"
+            )
+            try:
+                self.health.record_error("error", f"{symbol}: Exit fehlgeschlagen")
+            except Exception:
+                pass
+            self._record_last_decision(
+                symbol=symbol,
+                decision="exit_failed",
+                reason=exit_result.reason,
+                strategy=position.strategy_name,
+            )
+            return True
+
+        pnl = self.risk.close_position(symbol, current_price)
+        side_label = "[LONG]" if pos_side == "long" else "[SHORT]"
+        pnl_str = f"{pnl:+.4f} USDT" if pnl is not None else "?"
+        logger.info(
+            f"[bold]EXIT {side_label}[/bold] {symbol} | "
+            f"Grund: {exit_reason} | PnL: {pnl_str}"
+        )
+
+        trade_id = self._open_trade_ids.pop(symbol, None)
+        if pnl is not None:
+            cost = entry_price * pos_size
+            pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+            db_committed = True
+            if trade_id is not None:
+                db_committed = bool(
+                    self.repo.close_trade(
+                        trade_id, current_price, pnl, pnl_pct, exit_reason
+                    )
+                )
+            if db_committed:
+                self.exec_engine.acknowledge_order(symbol, exit_side)
+            else:
+                logger.error(
+                    "[red]EXIT-DB-COMMIT FEHLER[/red] %s | "
+                    "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                    symbol,
+                )
+            try:
+                self.perf_tracker.refresh()
+            except Exception:
+                pass
+            self.tg.notify_trade_closed(
+                symbol=symbol,
+                side=pos_side,
+                entry=entry_price,
+                exit_price=current_price,
+                pnl=pnl,
+                pnl_pct=pnl_pct,
+                reason=exit_reason,
+                strategy=position.strategy_name,
+                is_paper=settings.TRADING_MODE == "paper",
+            )
+            self._record_trade_event(
+                event="closed",
+                symbol=symbol,
+                side=pos_side,
+                strategy=position.strategy_name,
+                pnl=pnl,
+                reason=exit_reason,
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="exit_closed",
+                reason=exit_reason,
+                strategy=position.strategy_name,
+            )
+        return True
+
+    def _process_open_position_exits(self) -> None:
+        """Prüft risk-reduzierende Exits auch bei gesperrten neuen Entries."""
+        for symbol in list(self.risk.open_positions.keys()):
+            try:
+                df = self.exchange.fetch_ohlcv(symbol)
+                if df.empty:
+                    logger.warning(
+                        f"{symbol} | Keine OHLCV-Daten für Exit-Prüfung erhalten"
+                    )
+                    continue
+                current_price = float(df["close"].iloc[-1])
+                self._last_prices[symbol] = current_price
+                exit_reason = self.risk.check_exit_conditions(symbol, current_price)
+                if exit_reason:
+                    self._attempt_position_exit(symbol, current_price, exit_reason)
+            except Exception as e:
+                logger.error(f"Exit-Prüfung für offene Position fehlgeschlagen {symbol}: {e}")
+                try:
+                    self.health.record_error("error", f"{symbol}: Exit-Prüfung {e}")
+                except Exception:
+                    pass
+
     def _process_pair(self, symbol: str):
         """Führt den vollständigen Analyse- und Ausführungszyklus für ein Pair durch."""
-        if symbol in self._recovery_blocked_symbols:
+        if (
+            symbol in self._recovery_blocked_symbols
+            and symbol not in self.risk.open_positions
+        ):
             logger.warning(
                 f"[yellow]RECOVERY BLOCK[/yellow] {symbol} | "
                 "Symbol nach Neustart konservativ gesperrt"
@@ -1211,69 +1336,7 @@ class MultiStrategyBot:
         # 1. Exits prüfen (SL, TP, Trailing Stop) – side-aware
         exit_reason = self.risk.check_exit_conditions(symbol, current_price)
         if exit_reason:
-            position = self.risk.open_positions.get(symbol)
-            if position:
-                entry_price = position.entry_price
-                pos_size = position.amount
-                pos_side = position.side
-
-                # LONG schließen: Sell-Order / SHORT schließen: Buy-Order (zurückkaufen)
-                exit_side = "sell" if pos_side == "long" else "buy"
-                exit_result = self.exec_engine.execute_exit(
-                    symbol, exit_side, position.amount
-                )
-                if not exit_result.success:
-                    logger.error(
-                        f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
-                        f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
-                    )
-
-                pnl = self.risk.close_position(symbol, current_price)
-
-                side_label = "[LONG]" if pos_side == "long" else "[SHORT]"
-                pnl_str = f"{pnl:+.4f} USDT" if pnl is not None else "?"
-                logger.info(
-                    f"[bold]EXIT {side_label}[/bold] {symbol} | "
-                    f"Grund: {exit_reason} | PnL: {pnl_str}"
-                )
-
-                # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
-                trade_id = self._open_trade_ids.pop(symbol, None)
-                if pnl is not None:
-                    cost = entry_price * pos_size
-                    pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
-                    if trade_id is not None:
-                        self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
-                    try:
-                        self.perf_tracker.refresh()
-                    except Exception:
-                        pass
-                    self.tg.notify_trade_closed(
-                        symbol=symbol,
-                        side=pos_side,
-                        entry=entry_price,
-                        exit_price=current_price,
-                        pnl=pnl,
-                        pnl_pct=pnl_pct,
-                        reason=exit_reason,
-                        strategy=position.strategy_name,
-                        is_paper=settings.TRADING_MODE == "paper",
-                    )
-                    self._record_trade_event(
-                        event="closed",
-                        symbol=symbol,
-                        side=pos_side,
-                        strategy=position.strategy_name,
-                        pnl=pnl,
-                        reason=exit_reason,
-                    )
-                    self._record_last_decision(
-                        symbol=symbol,
-                        decision="exit_closed",
-                        reason=exit_reason,
-                        strategy=position.strategy_name,
-                    )
+            self._attempt_position_exit(symbol, current_price, exit_reason)
             return
 
         # Offene Position: kein neuer Einstieg
@@ -1698,7 +1761,14 @@ class MultiStrategyBot:
                 )
                 return
 
-            self.risk.open_with_signal(best, amount)
+            opened_position = self.risk.open_with_signal(best, amount)
+            if opened_position is None:
+                logger.error(
+                    "[red]ENTRY-STATE-COMMIT FEHLER[/red] %s | "
+                    "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                    symbol,
+                )
+                return
             _snap = self._last_brain_snapshot or {}
             _bs_raw = _snap.get("last_signal_score")
             _brain_f = float(_bs_raw) if _bs_raw is not None else None
@@ -1738,6 +1808,13 @@ class MultiStrategyBot:
             )
             if trade_id:
                 self._open_trade_ids[symbol] = trade_id
+                self.exec_engine.acknowledge_order(symbol, "buy")
+            else:
+                logger.error(
+                    "[red]ENTRY-DB-COMMIT FEHLER[/red] %s | "
+                    "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                    symbol,
+                )
             self.tg.notify_trade_opened(
                 symbol=symbol,
                 side="long",
@@ -1793,6 +1870,19 @@ class MultiStrategyBot:
         """
         is_live = settings.TRADING_MODE == "live"
 
+        if not bool(getattr(settings, "SHORT_ENABLED", True)):
+            logger.warning(
+                f"[yellow]SHORT BLOCKIERT[/yellow] {symbol} | "
+                f"Strategie: {signal.strategy_name} | SHORT_ENABLED=false"
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_blocked",
+                reason="short_disabled",
+                strategy=signal.strategy_name,
+            )
+            return
+
         if is_live and not settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT BLOCKIERT (Spot-Modus)[/yellow] {symbol} | "
@@ -1802,11 +1892,17 @@ class MultiStrategyBot:
             return
 
         if is_live and settings.FUTURES_MODE:
-            logger.warning(
-                f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+            logger.error(
+                f"[red]SHORT BLOCKIERT (Futures-Live nicht implementiert)[/red] "
+                f"{symbol} | Strategie: {signal.strategy_name}"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_blocked",
+                reason="live_futures_short_not_implemented",
+                strategy=signal.strategy_name,
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(
@@ -1840,7 +1936,14 @@ class MultiStrategyBot:
             )
             return
 
-        self.risk.open_with_signal(signal, amount)
+        opened_position = self.risk.open_with_signal(signal, amount)
+        if opened_position is None:
+            logger.error(
+                "[red]SHORT-STATE-COMMIT FEHLER[/red] %s | "
+                "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                symbol,
+            )
+            return
         _snap_s = self._last_brain_snapshot or {}
         _bs_raw_s = _snap_s.get("last_signal_score")
         _brain_fs = float(_bs_raw_s) if _bs_raw_s is not None else None
@@ -1880,6 +1983,13 @@ class MultiStrategyBot:
         )
         if trade_id:
             self._open_trade_ids[symbol] = trade_id
+            self.exec_engine.acknowledge_order(symbol, "sell")
+        else:
+            logger.error(
+                "[red]SHORT-DB-COMMIT FEHLER[/red] %s | "
+                "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                symbol,
+            )
         self.tg.notify_trade_opened(
             symbol=symbol,
             side="short",
@@ -1929,7 +2039,7 @@ class MultiStrategyBot:
         """
         if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
             return
-        if not bool(getattr(settings, "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", True)):
+        if not bool(getattr(settings, "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", False)):
             return
         ctrl = runtime_control.get_snapshot()
         if not (ctrl.get("paused") or ctrl.get("risk_off")):
@@ -1948,6 +2058,7 @@ class MultiStrategyBot:
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
         if not self._startup_checks_ok:
+            self._process_open_position_exits()
             reason = self._startup_block_reason or "startup_checks_failed"
             logger.error(
                 f"[red]STARTUP-GATE AKTIV[/red] – Zyklus übersprungen | Grund: {reason}"
@@ -1967,6 +2078,7 @@ class MultiStrategyBot:
 
         # Execution Engine Gesundheitscheck (Circuit Breaker, Emergency Pause, Kill-Switch)
         if not self.exec_engine.is_healthy:
+            self._process_open_position_exits()
             status = self.exec_engine.get_status()
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             logger.warning(

@@ -22,6 +22,7 @@ env/
 logs/*.log
 data/*.db
 data/*.sqlite
+data/execution_pending_orders.json
 
 # IDE
 .idea/

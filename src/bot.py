@@ -1212,8 +1212,21 @@ class MultiStrategyBot:
         if pnl is not None:
             cost = entry_price * pos_size
             pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
+            db_committed = True
             if trade_id is not None:
-                self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
+                db_committed = bool(
+                    self.repo.close_trade(
+                        trade_id, current_price, pnl, pnl_pct, exit_reason
+                    )
+                )
+            if db_committed:
+                self.exec_engine.acknowledge_order(symbol, exit_side)
+            else:
+                logger.error(
+                    "[red]EXIT-DB-COMMIT FEHLER[/red] %s | "
+                    "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                    symbol,
+                )
             try:
                 self.perf_tracker.refresh()
             except Exception:
@@ -1748,7 +1761,14 @@ class MultiStrategyBot:
                 )
                 return
 
-            self.risk.open_with_signal(best, amount)
+            opened_position = self.risk.open_with_signal(best, amount)
+            if opened_position is None:
+                logger.error(
+                    "[red]ENTRY-STATE-COMMIT FEHLER[/red] %s | "
+                    "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                    symbol,
+                )
+                return
             _snap = self._last_brain_snapshot or {}
             _bs_raw = _snap.get("last_signal_score")
             _brain_f = float(_bs_raw) if _bs_raw is not None else None
@@ -1788,6 +1808,13 @@ class MultiStrategyBot:
             )
             if trade_id:
                 self._open_trade_ids[symbol] = trade_id
+                self.exec_engine.acknowledge_order(symbol, "buy")
+            else:
+                logger.error(
+                    "[red]ENTRY-DB-COMMIT FEHLER[/red] %s | "
+                    "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                    symbol,
+                )
             self.tg.notify_trade_opened(
                 symbol=symbol,
                 side="long",
@@ -1909,7 +1936,14 @@ class MultiStrategyBot:
             )
             return
 
-        self.risk.open_with_signal(signal, amount)
+        opened_position = self.risk.open_with_signal(signal, amount)
+        if opened_position is None:
+            logger.error(
+                "[red]SHORT-STATE-COMMIT FEHLER[/red] %s | "
+                "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                symbol,
+            )
+            return
         _snap_s = self._last_brain_snapshot or {}
         _bs_raw_s = _snap_s.get("last_signal_score")
         _brain_fs = float(_bs_raw_s) if _bs_raw_s is not None else None
@@ -1949,6 +1983,13 @@ class MultiStrategyBot:
         )
         if trade_id:
             self._open_trade_ids[symbol] = trade_id
+            self.exec_engine.acknowledge_order(symbol, "sell")
+        else:
+            logger.error(
+                "[red]SHORT-DB-COMMIT FEHLER[/red] %s | "
+                "Order-Sperre bleibt für manuelle Prüfung aktiv",
+                symbol,
+            )
         self.tg.notify_trade_opened(
             symbol=symbol,
             side="short",

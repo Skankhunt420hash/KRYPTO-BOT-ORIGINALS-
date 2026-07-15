@@ -239,7 +239,11 @@ class ExecutionEngine:
         if self._emergency_paused:
             return False
 
-        # 3. Circuit Breaker: Cooldown abgelaufen?
+        # 3. Noch nicht vom Caller bestätigter lokaler/DB-Commit.
+        if self._pending_orders or not self._pending_state_valid:
+            return False
+
+        # 4. Circuit Breaker: Cooldown abgelaufen?
         if self._circuit_state == CircuitState.OPEN:
             elapsed = time.monotonic() - self._circuit_opened_at
             if elapsed >= settings.CIRCUIT_BREAKER_COOLDOWN_SEC:
@@ -377,6 +381,20 @@ class ExecutionEngine:
             f"ORDER NICHT BESTÄTIGT: {symbol} {side} "
             f"id={order_id or 'unknown'} status={status or 'unknown'}"
         )
+
+    def acknowledge_order(self, symbol: str, side: str) -> bool:
+        """Entfernt die Write-ahead-Sperre erst nach lokalem und DB-Commit."""
+        if self._clear_order_pending(symbol, side):
+            logger.info(
+                "[green]ORDER-STATE COMMIT BESTÄTIGT[/green] %s %s",
+                symbol,
+                side.upper(),
+            )
+            return True
+        self._trigger_pause(
+            f"ORDER-STATE ACK FEHLER: {symbol} {side} bleibt fail-closed"
+        )
+        return False
 
     # ── Öffentliche Ausführungs-Methoden ──────────────────────────────────
 
@@ -595,11 +613,6 @@ class ExecutionEngine:
             )
         )
         if confirmed:
-            if not self._clear_order_pending(symbol, side):
-                raise RuntimeError(
-                    "PendingOrderStateUnavailable: bestätigte Order konnte "
-                    "nicht sicher aus Pending-State entfernt werden"
-                )
             return
 
         self._mark_order_pending(symbol, side, order_id, status)

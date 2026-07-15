@@ -234,6 +234,55 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
             strategy="TestStrategy",
         )
 
+    def test_successful_exit_acknowledges_after_database_commit(self):
+        symbol = "BTC/USDT"
+        position = Position(
+            symbol=symbol,
+            entry_price=100.0,
+            amount=1.0,
+            stop_loss=95.0,
+            take_profit=110.0,
+            side="long",
+            strategy_name="TestStrategy",
+        )
+        events = []
+
+        class FakeRisk:
+            open_positions = {symbol: position}
+
+            def close_position(self, checked_symbol, current_price):
+                events.append("local")
+                self.open_positions.pop(checked_symbol)
+                return 5.0
+
+        class FakeRepo:
+            def close_trade(self, *args):
+                events.append("db")
+                return True
+
+        class FakeExecution:
+            def execute_exit(self, *args):
+                return SimpleNamespace(success=True, reason="")
+
+            def acknowledge_order(self, *args):
+                events.append("ack")
+                return True
+
+        bot = MultiStrategyBot.__new__(MultiStrategyBot)
+        bot.risk = FakeRisk()
+        bot.exec_engine = FakeExecution()
+        bot.repo = FakeRepo()
+        bot.perf_tracker = SimpleNamespace(refresh=Mock())
+        bot.tg = SimpleNamespace(notify_trade_closed=Mock())
+        bot.health = SimpleNamespace(record_error=Mock())
+        bot._open_trade_ids = {symbol: 123}
+        bot._record_trade_event = Mock()
+        bot._record_last_decision = Mock()
+
+        bot._attempt_position_exit(symbol, 105.0, "take_profit")
+
+        self.assertEqual(events, ["local", "db", "ack"])
+
     def test_unhealthy_execution_gate_still_checks_open_position_exits(self):
         symbol = "BTC/USDT"
         position = Position(
@@ -448,6 +497,38 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
                 self.assertFalse(result.success)
                 self.assertIn("PendingOrderStateUnavailable", result.reason)
                 connector.create_market_sell_order.assert_not_called()
+            finally:
+                settings.EXECUTION_PENDING_ORDERS_FILE = old_pending_file
+
+    def test_confirmed_fill_stays_pending_until_caller_commit(self):
+        old_pending_file = settings.EXECUTION_PENDING_ORDERS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            pending_file = Path(tmp) / "pending_orders.json"
+            settings.EXECUTION_PENDING_ORDERS_FILE = str(pending_file)
+            try:
+                connector = SimpleNamespace(
+                    create_market_sell_order=Mock(
+                        return_value={
+                            "id": "filled-exit",
+                            "status": "closed",
+                            "filled": 1.0,
+                            "remaining": 0.0,
+                        }
+                    )
+                )
+                engine = ExecutionEngine(connector)
+
+                result = engine.execute_exit("TEST/USDT", "sell", 1.0)
+                self.assertTrue(result.success)
+                self.assertTrue(pending_file.is_file())
+
+                restarted = ExecutionEngine(connector)
+                retry = restarted.execute_exit("TEST/USDT", "sell", 1.0)
+                self.assertFalse(retry.success)
+                connector.create_market_sell_order.assert_called_once()
+
+                self.assertTrue(engine.acknowledge_order("TEST/USDT", "sell"))
+                self.assertFalse(pending_file.exists())
             finally:
                 settings.EXECUTION_PENDING_ORDERS_FILE = old_pending_file
 

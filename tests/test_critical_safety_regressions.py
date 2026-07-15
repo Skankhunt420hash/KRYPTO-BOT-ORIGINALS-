@@ -148,6 +148,22 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
             self.assertEqual(lines, ["INFO recovered", "ERROR new failure"])
             self.assertEqual(_count_error_lines(lines), 1)
 
+    def test_watchdog_log_cursor_detects_copytruncate_rotation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bot.log"
+            path.write_text("OLD " + ("x" * 100_000), encoding="utf-8")
+            identity, offset = _initial_log_cursor(path)
+            path.write_text(
+                "NEW ERROR after rotation\n" + ("y" * 110_000),
+                encoding="utf-8",
+            )
+
+            lines, _, _ = _read_new_log_lines(
+                path, identity, offset, max_lines=500
+            )
+
+            self.assertTrue(lines[0].startswith("NEW ERROR after rotation"))
+
     def test_short_enabled_blocks_native_short_signals(self):
         old_short_enabled = settings.SHORT_ENABLED
         try:
@@ -321,6 +337,26 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
         finally:
             settings.EXECUTION_MAX_RETRIES = old_retries
 
+    def test_unconfirmed_exit_is_not_closed_or_sent_twice(self):
+        connector = SimpleNamespace(
+            create_market_sell_order=Mock(
+                return_value={
+                    "id": "pending-exit",
+                    "status": "open",
+                    "remaining": 1.0,
+                }
+            )
+        )
+        engine = ExecutionEngine(connector)
+
+        first = engine.execute_exit("TEST/USDT", "sell", 1.0)
+        second = engine.execute_exit("TEST/USDT", "sell", 1.0)
+
+        self.assertFalse(first.success)
+        self.assertIn("OrderConfirmationPending", first.reason)
+        self.assertFalse(second.success)
+        connector.create_market_sell_order.assert_called_once()
+
     def test_deploy_sync_preserves_runtime_files_and_service_order(self):
         script = Path(__file__).parents[1] / "deploy" / "sync-from-github.sh"
         with tempfile.TemporaryDirectory() as tmp:
@@ -347,7 +383,10 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
             fake_sudo = bin_dir / "sudo"
             fake_sudo.write_text(
                 "#!/usr/bin/env bash\n"
-                'echo "sudo $*" >> "$CALL_LOG"\n',
+                'echo "sudo $*" >> "$CALL_LOG"\n'
+                'if [[ "$*" == "systemctl stop krypto-bot" ]]; then\n'
+                '  echo \'{"risk_off":true,"state":"final"}\' > data/runtime_recovery.json\n'
+                "fi\n",
                 encoding="utf-8",
             )
             fake_git.chmod(0o755)
@@ -366,7 +405,10 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
 
             self.assertEqual(result.returncode, 0, result.stderr)
             self.assertEqual(daily.read_text(encoding="utf-8"), '{"days":["local"]}')
-            self.assertEqual(recovery.read_text(encoding="utf-8"), '{"risk_off":true}')
+            self.assertEqual(
+                recovery.read_text(encoding="utf-8"),
+                '{"risk_off":true,"state":"final"}\n',
+            )
             calls = call_log.read_text(encoding="utf-8").splitlines()
             self.assertLess(
                 calls.index("sudo systemctl stop safety-watchdog"),
@@ -376,6 +418,59 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
                 calls.index("sudo systemctl start krypto-bot"),
                 calls.index("sudo systemctl start safety-watchdog"),
             )
+
+    def test_deploy_restore_failure_keeps_services_stopped(self):
+        script = Path(__file__).parents[1] / "deploy" / "sync-from-github.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "data").mkdir()
+            (root / "data" / "daily_summary.json").write_text(
+                '{"days":["local"]}', encoding="utf-8"
+            )
+            (root / "data" / "runtime_recovery.json").write_text(
+                '{"risk_off":true}', encoding="utf-8"
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            call_log = root / "calls.log"
+            (bin_dir / "git").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "git $*" >> "$CALL_LOG"\n'
+                'if [[ "$1" == "restore" ]]; then\n'
+                '  echo \'{"risk_off":false}\' > data/runtime_recovery.json\n'
+                "fi\n",
+                encoding="utf-8",
+            )
+            (bin_dir / "sudo").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "sudo $*" >> "$CALL_LOG"\n',
+                encoding="utf-8",
+            )
+            (bin_dir / "cp").write_text(
+                "#!/usr/bin/env bash\n"
+                'if [[ "$1" == /tmp/* ]]; then exit 1; fi\n'
+                'exec /bin/cp "$@"\n',
+                encoding="utf-8",
+            )
+            for executable in ("git", "sudo", "cp"):
+                (bin_dir / executable).chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["CALL_LOG"] = str(call_log)
+
+            result = subprocess.run(
+                ["bash", str(script), str(root)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("Dienste bleiben gestoppt", result.stderr)
+            calls = call_log.read_text(encoding="utf-8")
+            self.assertNotIn("sudo systemctl start krypto-bot", calls)
+            self.assertNotIn("sudo systemctl start safety-watchdog", calls)
 
 
 if __name__ == "__main__":

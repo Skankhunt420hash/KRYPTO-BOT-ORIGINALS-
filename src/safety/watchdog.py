@@ -21,8 +21,9 @@ import shutil
 import subprocess
 import sys
 import time
+from collections import deque
 from pathlib import Path
-from typing import List, Optional, Tuple
+from typing import Deque, List, Optional, Tuple
 
 from config.settings import settings
 from src.utils.logger import setup_logger
@@ -91,27 +92,34 @@ def _count_error_lines(lines: List[str]) -> int:
     return sum(1 for ln in lines if _ERROR_RE.search(ln))
 
 
-def _initial_log_cursor(path: Path) -> Tuple[Optional[Tuple[int, int]], int]:
+def _log_identity(path: Path) -> Tuple[int, int, bytes]:
+    stat = path.stat()
+    with path.open("rb") as fh:
+        prefix = fh.read(256)
+    return stat.st_dev, stat.st_ino, prefix
+
+
+def _initial_log_cursor(path: Path) -> Tuple[Optional[Tuple[int, int, bytes]], int]:
     """Startet hinter vorhandenem Log-Inhalt, damit alte Fehler keinen Neustart auslösen."""
     try:
         stat = path.stat()
-        return (stat.st_dev, stat.st_ino), stat.st_size
+        return _log_identity(path), stat.st_size
     except OSError:
         return None, 0
 
 
 def _read_new_log_lines(
     path: Path,
-    identity: Optional[Tuple[int, int]],
+    identity: Optional[Tuple[int, int, bytes]],
     offset: int,
     max_lines: int,
-) -> Tuple[List[str], Optional[Tuple[int, int]], int]:
+) -> Tuple[List[str], Optional[Tuple[int, int, bytes]], int]:
     """Liest nur seit dem letzten Poll angehängte, begrenzte Log-Daten."""
     if max_lines <= 0:
         return [], identity, offset
     try:
         stat = path.stat()
-        current_identity = (stat.st_dev, stat.st_ino)
+        current_identity = _log_identity(path)
         if current_identity != identity or stat.st_size < offset:
             offset = 0
         max_bytes = max(64 * 1024, min(2 * 1024 * 1024, max_lines * 4096))
@@ -239,6 +247,7 @@ def run_forever() -> None:
     log_identity, log_offset = (
         _initial_log_cursor(log_path) if log_path is not None else (None, 0)
     )
+    recent_log_lines: Deque[str] = deque(maxlen=tail_n)
 
     last_restart_mono = 0.0
     logger.info(
@@ -281,7 +290,8 @@ def run_forever() -> None:
                 lines, log_identity, log_offset = _read_new_log_lines(
                     log_path, log_identity, log_offset, tail_n
                 )
-                n_err = _count_error_lines(lines)
+                recent_log_lines.extend(lines)
+                n_err = _count_error_lines(list(recent_log_lines))
                 if n_err >= err_thr:
                     logger.error("Viele Fehlerzeilen im Log (%d/%d): Neustart erwägen", n_err, tail_n)
                     if tg.enabled:
@@ -290,6 +300,8 @@ def run_forever() -> None:
                             f"ERROR-Zeilen im Tail: {n_err} (Schwelle {err_thr})",
                         )
                     last_restart_mono = _restart_bot(f"log_error_burst n={n_err}", tg, last_restart_mono)
+                    # Derselbe Burst darf nach Cooldown keinen gesunden Bot erneut starten.
+                    recent_log_lines.clear()
 
         except Exception as e:
             logger.exception("Safety-Watchdog Schleifenfehler: %s", e)

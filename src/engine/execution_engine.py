@@ -51,6 +51,8 @@ _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
     "InvalidNonce",
     "EntryControlBlocked",
     "Leeres Order-Ergebnis vom Connector",
+    "OrderConfirmationPending",
+    "OrderTerminalFailure",
 )
 
 
@@ -175,6 +177,8 @@ class ExecutionEngine:
         # ── Fingerprint-Cache (Duplicate-Schutz) ──────────────────────
         # fingerprint → unix-timestamp der letzten Ausführung
         self._fingerprints: Dict[str, float] = {}
+        # Angenommene, aber nicht als gefüllt bestätigte Orders dürfen nicht dupliziert werden.
+        self._pending_orders: Dict[Tuple[str, str], str] = {}
 
         # ── Slippage-Event-Fenster ────────────────────────────────────
         self._slippage_events: deque = deque(
@@ -236,6 +240,10 @@ class ExecutionEngine:
             "consecutive_rejections": self._consecutive_rejections,
             "slippage_events": len(self._slippage_events),
             "kill_switch": _kill_switch_active(),
+            "pending_orders": {
+                f"{symbol}:{side}": order_id
+                for (symbol, side), order_id in self._pending_orders.items()
+            },
         }
 
     def reset(self) -> None:
@@ -249,6 +257,7 @@ class ExecutionEngine:
         self._emergency_paused = False
         self._pause_reason = ""
         self._slippage_events.clear()
+        self._pending_orders.clear()
         logger.info("[green]ExecutionEngine: manueller Reset durchgeführt[/green]")
 
     # ── Öffentliche Ausführungs-Methoden ──────────────────────────────────
@@ -318,6 +327,7 @@ class ExecutionEngine:
             order, retries = self._execute_with_retry(
                 symbol, order_side, amount, enforce_entry_control=True
             )
+            self._require_confirmed_order(order, symbol, order_side, amount)
             fill_price = _extract_fill_price(order, intended_price)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
@@ -386,6 +396,7 @@ class ExecutionEngine:
 
         try:
             order, retries = self._execute_with_retry(symbol, order_side, amount)
+            self._require_confirmed_order(order, symbol, order_side, amount)
             fill_price = _extract_fill_price(order, 0.0)
             self._on_success()
 
@@ -418,6 +429,40 @@ class ExecutionEngine:
 
     # ── Interne Methoden ──────────────────────────────────────────────────
 
+    def _require_confirmed_order(
+        self,
+        order: Dict[str, Any],
+        symbol: str,
+        side: str,
+        requested_amount: float,
+    ) -> None:
+        """Akzeptiert nur bestätigte Fills; unklare Orders werden hart gegen Duplikate gesperrt."""
+        status = str(order.get("status") or "").strip().lower()
+        if status in {"canceled", "cancelled", "rejected", "expired"}:
+            raise RuntimeError(
+                f"OrderTerminalFailure: {symbol} {side} status={status}"
+            )
+
+        remaining_raw = order.get("remaining")
+        try:
+            remaining = float(remaining_raw) if remaining_raw is not None else 0.0
+        except (TypeError, ValueError):
+            remaining = 0.0
+        pending = status in {"open", "pending", "new"} or remaining > max(
+            abs(float(requested_amount)) * 1e-8, 1e-12
+        )
+        if pending:
+            key = (symbol, side)
+            order_id = str(order.get("id") or "unknown")
+            self._pending_orders[key] = order_id
+            self._trigger_pause(
+                f"ORDER NICHT BESTÄTIGT: {symbol} {side} id={order_id} status={status or 'unknown'}"
+            )
+            raise RuntimeError(
+                f"OrderConfirmationPending: {symbol} {side} id={order_id} "
+                f"status={status or 'unknown'} remaining={remaining}"
+            )
+
     def _execute_with_retry(
         self,
         symbol: str,
@@ -440,6 +485,11 @@ class ExecutionEngine:
 
         for attempt in range(max_retries + 1):
             try:
+                pending_id = self._pending_orders.get((symbol, side))
+                if pending_id:
+                    raise RuntimeError(
+                        f"OrderConfirmationPending: {symbol} {side} id={pending_id}"
+                    )
                 if enforce_entry_control:
                     control_reason = _entry_control_block_reason()
                     if control_reason:

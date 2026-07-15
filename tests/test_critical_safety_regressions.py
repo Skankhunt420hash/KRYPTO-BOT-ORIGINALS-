@@ -427,6 +427,30 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
             finally:
                 settings.EXECUTION_PENDING_ORDERS_FILE = old_pending_file
 
+    def test_pending_persistence_failure_blocks_before_connector(self):
+        old_pending_file = settings.EXECUTION_PENDING_ORDERS_FILE
+        with tempfile.TemporaryDirectory() as tmp:
+            not_a_directory = Path(tmp) / "not-a-directory"
+            not_a_directory.write_text("occupied", encoding="utf-8")
+            settings.EXECUTION_PENDING_ORDERS_FILE = str(
+                not_a_directory / "pending_orders.json"
+            )
+            try:
+                connector = SimpleNamespace(
+                    create_market_sell_order=Mock(
+                        return_value={"id": "must-not-run", "status": "closed"}
+                    )
+                )
+                engine = ExecutionEngine(connector)
+
+                result = engine.execute_exit("TEST/USDT", "sell", 1.0)
+
+                self.assertFalse(result.success)
+                self.assertIn("PendingOrderStateUnavailable", result.reason)
+                connector.create_market_sell_order.assert_not_called()
+            finally:
+                settings.EXECUTION_PENDING_ORDERS_FILE = old_pending_file
+
     def test_deploy_sync_preserves_runtime_files_and_service_order(self):
         script = Path(__file__).parents[1] / "deploy" / "sync-from-github.sh"
         with tempfile.TemporaryDirectory() as tmp:
@@ -585,6 +609,50 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
             calls = call_log.read_text(encoding="utf-8")
             self.assertNotIn("sudo systemctl start krypto-bot", calls)
             self.assertNotIn("sudo systemctl start safety-watchdog", calls)
+
+    def test_deploy_aborts_when_active_watchdog_cannot_stop(self):
+        script = Path(__file__).parents[1] / "deploy" / "sync-from-github.sh"
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "data").mkdir()
+            (root / "data" / "daily_summary.json").write_text(
+                '{"days":[]}', encoding="utf-8"
+            )
+            (root / "data" / "runtime_recovery.json").write_text(
+                '{"risk_off":true}', encoding="utf-8"
+            )
+            bin_dir = root / "bin"
+            bin_dir.mkdir()
+            call_log = root / "calls.log"
+            (bin_dir / "git").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "git $*" >> "$CALL_LOG"\n',
+                encoding="utf-8",
+            )
+            (bin_dir / "sudo").write_text(
+                "#!/usr/bin/env bash\n"
+                'echo "sudo $*" >> "$CALL_LOG"\n'
+                'if [[ "$*" == "systemctl stop safety-watchdog" ]]; then exit 1; fi\n',
+                encoding="utf-8",
+            )
+            for executable in ("git", "sudo"):
+                (bin_dir / executable).chmod(0o755)
+            env = os.environ.copy()
+            env["PATH"] = f"{bin_dir}:{env['PATH']}"
+            env["CALL_LOG"] = str(call_log)
+
+            result = subprocess.run(
+                ["bash", str(script), str(root)],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=30,
+            )
+
+            self.assertNotEqual(result.returncode, 0)
+            calls = call_log.read_text(encoding="utf-8")
+            self.assertNotIn("git fetch", calls)
+            self.assertNotIn("sudo systemctl stop krypto-bot", calls)
 
 
 if __name__ == "__main__":

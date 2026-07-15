@@ -11,6 +11,8 @@ BACKUP_DIR="$(mktemp -d)"
 RESTORED_RUNTIME=0
 BOT_WAS_ACTIVE=0
 WATCHDOG_WAS_ACTIVE=0
+BOT_STOPPED=0
+WATCHDOG_STOPPED=0
 
 backup_runtime_files() {
   for f in "${RUNTIME_FILES[@]}"; do
@@ -48,10 +50,10 @@ cleanup() {
   fi
   rm -rf "$BACKUP_DIR"
   if [[ "$status" -ne 0 && "$restore_ok" -eq 1 ]]; then
-    if [[ "$BOT_WAS_ACTIVE" -eq 1 ]]; then
+    if [[ "$BOT_WAS_ACTIVE" -eq 1 && "$BOT_STOPPED" -eq 1 ]]; then
       sudo systemctl start krypto-bot 2>/dev/null || true
     fi
-    if [[ "$WATCHDOG_WAS_ACTIVE" -eq 1 ]]; then
+    if [[ "$WATCHDOG_WAS_ACTIVE" -eq 1 && "$WATCHDOG_STOPPED" -eq 1 ]]; then
       sudo systemctl start safety-watchdog 2>/dev/null || true
     fi
   fi
@@ -65,8 +67,14 @@ fi
 if sudo systemctl is-active --quiet krypto-bot 2>/dev/null; then
   BOT_WAS_ACTIVE=1
 fi
-sudo systemctl stop safety-watchdog 2>/dev/null || true
-sudo systemctl stop krypto-bot
+if [[ "$WATCHDOG_WAS_ACTIVE" -eq 1 ]]; then
+  sudo systemctl stop safety-watchdog
+  WATCHDOG_STOPPED=1
+fi
+if [[ "$BOT_WAS_ACTIVE" -eq 1 ]]; then
+  sudo systemctl stop krypto-bot
+  BOT_STOPPED=1
+fi
 backup_runtime_files
 
 git fetch origin

@@ -194,7 +194,15 @@ class ExecutionEngine:
             Path(pending_path) if pending_path else None
         )
         self._pending_state_valid = True
-        self._load_pending_orders()
+        if self._pending_orders_file is None:
+            self._pending_state_valid = False
+            self._emergency_paused = True
+            self._pause_reason = (
+                "PENDING-ORDER-PERSISTENZ DEAKTIVIERT: Orders bleiben fail-closed"
+            )
+            logger.error("[red]%s[/red]", self._pause_reason)
+        else:
+            self._load_pending_orders()
 
         # ── Slippage-Event-Fenster ────────────────────────────────────
         self._slippage_events: deque = deque(
@@ -311,7 +319,8 @@ class ExecutionEngine:
     def _persist_pending_orders(self) -> bool:
         path = self._pending_orders_file
         if path is None:
-            return True
+            self._pending_state_valid = False
+            return False
         try:
             if not self._pending_orders:
                 path.unlink(missing_ok=True)
@@ -342,6 +351,22 @@ class ExecutionEngine:
             )
             logger.error("[red]%s[/red]: %s", self._pause_reason, e)
             return False
+
+    def _reserve_order_submission(self, symbol: str, side: str) -> bool:
+        """Persistiert eine Write-ahead-Sperre, bevor der Connector eine Order sieht."""
+        self._pending_orders[(symbol, side)] = "submission-started"
+        if self._persist_pending_orders():
+            return True
+        return False
+
+    def _clear_order_pending(self, symbol: str, side: str) -> bool:
+        key = (symbol, side)
+        old_value = self._pending_orders.pop(key, None)
+        if self._persist_pending_orders():
+            return True
+        if old_value is not None:
+            self._pending_orders[key] = old_value
+        return False
 
     def _mark_order_pending(
         self, symbol: str, side: str, order_id: str, status: str
@@ -552,6 +577,11 @@ class ExecutionEngine:
             "expired",
         }
         if terminal_failure and filled is not None and filled <= tolerance:
+            if not self._clear_order_pending(symbol, side):
+                raise RuntimeError(
+                    "PendingOrderStateUnavailable: terminale Order konnte "
+                    "nicht sicher aus Pending-State entfernt werden"
+                )
             raise RuntimeError(
                 f"OrderTerminalFailure: {symbol} {side} status={status}"
             )
@@ -565,6 +595,11 @@ class ExecutionEngine:
             )
         )
         if confirmed:
+            if not self._clear_order_pending(symbol, side):
+                raise RuntimeError(
+                    "PendingOrderStateUnavailable: bestätigte Order konnte "
+                    "nicht sicher aus Pending-State entfernt werden"
+                )
             return
 
         self._mark_order_pending(symbol, side, order_id, status)
@@ -608,6 +643,11 @@ class ExecutionEngine:
                     control_reason = _entry_control_block_reason()
                     if control_reason:
                         raise RuntimeError(f"EntryControlBlocked: {control_reason}")
+                if not self._reserve_order_submission(symbol, side):
+                    raise RuntimeError(
+                        "PendingOrderStateUnavailable: Write-ahead-Sperre "
+                        "konnte nicht persistiert werden"
+                    )
                 if side == "buy":
                     order = self._connector.create_market_buy_order(symbol, amount)
                 else:
@@ -626,6 +666,16 @@ class ExecutionEngine:
             except Exception as exc:
                 last_exc = exc
                 retryable = _is_retryable(exc)
+                if (symbol, side) in self._pending_orders:
+                    if "OrderConfirmationPending" not in str(exc):
+                        self._mark_order_pending(
+                            symbol,
+                            side,
+                            self._pending_orders.get((symbol, side), "unknown"),
+                            type(exc).__name__,
+                        )
+                    # Nach möglicher Übermittlung ist kein automatischer Create-Retry sicher.
+                    retryable = False
 
                 logger.warning(
                     f"Order-Versuch {attempt + 1}/{max_retries + 1} fehlgeschlagen | "

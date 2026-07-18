@@ -145,7 +145,19 @@ class TradingBot:
                 entry_price = position.entry_price
                 pos_size = position.amount
 
-                self.exchange.create_market_sell_order(symbol, position.amount)
+                order = self.exchange.create_market_sell_order(symbol, position.amount)
+                if not order:
+                    logger.error(
+                        f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
+                        "Position bleibt lokal offen"
+                    )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason="exit_order_failed",
+                        strategy=self.strategy.name,
+                    )
+                    return
                 pnl = self.risk.close_position(symbol, current_price)
 
                 # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
@@ -1832,6 +1844,19 @@ class MultiStrategyBot:
         """
         is_live = settings.TRADING_MODE == "live"
 
+        if not bool(getattr(settings, "SHORT_ENABLED", True)):
+            logger.warning(
+                f"[yellow]SHORT BLOCKIERT[/yellow] {symbol} | "
+                f"Strategie: {signal.strategy_name} | SHORT_ENABLED=false"
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_blocked",
+                reason="short_disabled",
+                strategy=signal.strategy_name,
+            )
+            return
+
         if is_live and not settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT BLOCKIERT (Spot-Modus)[/yellow] {symbol} | "
@@ -1993,7 +2018,7 @@ class MultiStrategyBot:
         """
         if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
             return
-        if not bool(getattr(settings, "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", True)):
+        if not bool(getattr(settings, "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", False)):
             return
         ctrl = runtime_control.get_snapshot()
         if not (ctrl.get("paused") or ctrl.get("risk_off")):

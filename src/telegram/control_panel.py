@@ -333,16 +333,25 @@ class TelegramControlPanel:
 
         chat = msg.get("chat", {})
         chat_id = str(chat.get("id", ""))
+        chat_type = str(chat.get("type", "")).lower()
+        sender_id = str((msg.get("from") or {}).get("id", ""))
         text = (msg.get("text") or "").strip()
 
         if not text:
             return
 
-        if chat_id not in self._allowed_ids:
+        if chat_type in {"group", "supergroup"}:
+            authorized = bool(sender_id) and sender_id in self._allowed_ids
+        else:
+            authorized = chat_id in self._allowed_ids or (
+                bool(sender_id) and sender_id in self._allowed_ids
+            )
+        if not authorized:
             logger.warning(
-                "Telegram-Panel: Chat %s nicht in TELEGRAM_PANEL_ALLOWED_IDS – Befehl ignoriert "
-                "(TELEGRAM_PANEL_ALLOWED_IDS oder TELEGRAM_CHAT_ID anpassen).",
+                "Telegram-Panel: Chat %s / Absender %s nicht autorisiert – "
+                "Befehl ignoriert (Gruppen benötigen eine explizit erlaubte User-ID).",
                 chat_id,
+                sender_id or "unbekannt",
             )
             return
 

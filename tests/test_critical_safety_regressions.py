@@ -460,6 +460,51 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
         self.assertTrue(panel._enabled)
         panel._dispatch_command.assert_called_once_with("123", "/pause")
 
+    def test_telegram_group_requires_allowed_sender_not_only_allowed_chat(self):
+        fields = {
+            "TELEGRAM_BOT_TOKEN": settings.TELEGRAM_BOT_TOKEN,
+            "TELEGRAM_CHAT_ID": settings.TELEGRAM_CHAT_ID,
+            "TELEGRAM_ENABLED": settings.TELEGRAM_ENABLED,
+            "TELEGRAM_PANEL_ENABLED": settings.TELEGRAM_PANEL_ENABLED,
+            "TELEGRAM_PANEL_ALLOWED_IDS": settings.TELEGRAM_PANEL_ALLOWED_IDS,
+        }
+        try:
+            settings.TELEGRAM_BOT_TOKEN = "token"
+            settings.TELEGRAM_CHAT_ID = "-100"
+            settings.TELEGRAM_ENABLED = True
+            settings.TELEGRAM_PANEL_ENABLED = True
+            settings.TELEGRAM_PANEL_ALLOWED_IDS = "-100,123"
+            with patch(
+                "src.telegram.control_panel.TradeRepository", return_value=Mock()
+            ):
+                panel = TelegramControlPanel(notifier=SimpleNamespace())
+            panel._dispatch_command = Mock()
+            base_chat = {"id": -100, "type": "supergroup"}
+
+            panel._handle_update(
+                {
+                    "message": {
+                        "chat": base_chat,
+                        "from": {"id": 999},
+                        "text": "/killswitchoff",
+                    }
+                }
+            )
+            panel._handle_update(
+                {
+                    "message": {
+                        "chat": base_chat,
+                        "from": {"id": 123},
+                        "text": "/killswitchoff",
+                    }
+                }
+            )
+        finally:
+            for name, value in fields.items():
+                setattr(settings, name, value)
+
+        panel._dispatch_command.assert_called_once_with("-100", "/killswitchoff")
+
     def test_telegram_panel_without_any_allowed_chat_is_disabled(self):
         fields = {
             "TELEGRAM_BOT_TOKEN": settings.TELEGRAM_BOT_TOKEN,

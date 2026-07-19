@@ -18,7 +18,7 @@ from src.safety.watchdog import (
     _tail_log,
 )
 from src.strategies.signal import EnhancedSignal, Side
-from src.telegram.control_panel import TelegramControlPanel
+from src.telegram.control_panel import PanelCallbacks, TelegramControlPanel
 from src.utils.risk_manager import Position
 
 
@@ -217,6 +217,23 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
                 settings.TELEGRAM_CHAT_ID,
                 settings.TELEGRAM_PANEL_ALLOWED_IDS,
             ) = old_values
+
+    def test_telegram_safety_commands_persist_control_state_immediately(self):
+        persist = Mock()
+        notifier = Mock()
+        with patch("src.telegram.control_panel.TradeRepository"):
+            panel = TelegramControlPanel(
+                notifier=notifier,
+                callbacks=PanelCallbacks(persist_control_state=persist),
+            )
+        panel._send_text = Mock()
+
+        panel._handle_pause("123")
+        panel._handle_riskoff("123")
+        panel._handle_resume("123")
+        panel._handle_riskon("123")
+
+        self.assertEqual(persist.call_count, 4)
 
     def test_failed_multistrategy_exit_keeps_position_open(self):
         symbol = "BTC/USDT"

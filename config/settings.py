@@ -109,10 +109,10 @@ class Settings:
     )
     # Paper: Balance = Equity; kein Abzug des vollen Notionals beim Open (nur PnL beim Close).
     PAPER_EQUITY_ACCOUNT: bool = _env_bool("PAPER_EQUITY_ACCOUNT", default=True)
-    # Paper: jeden Zyklus Pause/Risk-Off aufheben (gegen Alt-Fork „MASTER AUTOHEAL“ / Panel).
-    # Live-Modus: wird nicht angewendet. Manuelles /pause im Paper: auf false setzen.
+    # Paper: Pause/Risk-Off nur explizit automatisch aufheben.
+    # Default false, damit manuelles /pause und /riskoff als Safety-Sperren erhalten bleiben.
     PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE: bool = _env_bool(
-        "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", default=True
+        "PAPER_CLEAR_CONTROL_LOCKS_EACH_CYCLE", default=False
     )
 
     # auto = Multi-Strategie (Meta-Selector + Legacy-Adapter)
@@ -159,7 +159,7 @@ class Settings:
         os.getenv("TELEGRAM_PANEL_LOG_LINES", 20)
     )
     # Kommagetrennte Liste von Chat-/User-IDs, die das Panel bedienen dürfen.
-    # Leer = kein Whitelisting (nicht empfohlen in produktiven Umgebungen).
+    # Leer = Fallback auf TELEGRAM_CHAT_ID; ohne Chat-ID bleibt das Panel aus.
     TELEGRAM_PANEL_ALLOWED_IDS: str = os.getenv("TELEGRAM_PANEL_ALLOWED_IDS", "")
 
     DATABASE_URL: str = os.getenv("DATABASE_URL", "sqlite:///data/trades.db")
@@ -482,7 +482,7 @@ class Settings:
     SAFETY_WATCHDOG_LOG_TAIL_LINES: int = int(
         os.getenv("SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)
     )
-    # Optional: eigene Log-Datei (leer = SUPERVISOR_BOT_LOGFILE). Bei systemd+journalctl ggf. leer lassen und nur Prozess-Check nutzen.
+    # Optional: eigene Log-Datei; explizit leer deaktiviert Log-Burst-Checks.
     SAFETY_WATCHDOG_LOG_FILE: str = os.getenv("SAFETY_WATCHDOG_LOG_FILE", "").strip()
     SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD: int = int(
         os.getenv("SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)
@@ -497,9 +497,9 @@ class Settings:
     SAFETY_WATCHDOG_RUN_COMPILEALL: bool = _env_bool(
         "SAFETY_WATCHDOG_RUN_COMPILEALL", default=True
     )
-    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (festgefahren)
+    # Paper: risk_off/paused in runtime_recovery.json nur explizit zurücksetzen.
     SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY: bool = _env_bool(
-        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=True
+        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=False
     )
     # Nur wenn ruff installiert und explizit true — vorsichtig
     SAFETY_WATCHDOG_RUFF_AUTOFIX: bool = _env_bool(

@@ -1,5 +1,6 @@
 import json
 import os
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
@@ -145,7 +146,19 @@ class TradingBot:
                 entry_price = position.entry_price
                 pos_size = position.amount
 
-                self.exchange.create_market_sell_order(symbol, position.amount)
+                order = self.exchange.create_market_sell_order(symbol, position.amount)
+                if not order:
+                    logger.error(
+                        f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
+                        "Position bleibt lokal offen"
+                    )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason="exit_order_failed",
+                        strategy=self.strategy.name,
+                    )
+                    return
                 pnl = self.risk.close_position(symbol, current_price)
 
                 # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
@@ -718,6 +731,7 @@ class MultiStrategyBot:
         self._active_strategy_runtime: str = "Multi (Meta-Selector)"
         self._last_selector_snapshot: Dict = {}
         self._last_brain_snapshot: Dict = {}
+        self._recovery_state_lock = threading.Lock()
 
         # Performance-Tracking und adaptives Scoring
         self.perf_tracker = PerformanceTracker()
@@ -740,6 +754,7 @@ class MultiStrategyBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                persist_control_state=self._persist_recovery_state,
             ),
         )
 
@@ -811,22 +826,28 @@ class MultiStrategyBot:
         if not settings.STATE_RECOVERY_ENABLED:
             return
         try:
-            path = self._recovery_state_path()
-            path.parent.mkdir(parents=True, exist_ok=True)
-            ctrl = runtime_control.get_snapshot()
-            snap = runtime_state.snapshot()
-            payload = {
-                "mode": settings.TRADING_MODE,
-                "paused": bool(ctrl.get("paused")),
-                "risk_off": bool(ctrl.get("risk_off")),
-                "preferred_strategy": ctrl.get("preferred_strategy") or "",
-                "mode_request": ctrl.get("mode_request") or "",
-                "last_signal": snap.get("last_signal") or {},
-                "last_decision": snap.get("last_decision") or {},
-                "brain": snap.get("brain") or {},
-                "updated_at": snap.get("updated_at"),
-            }
-            path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+            with self._recovery_state_lock:
+                path = self._recovery_state_path()
+                path.parent.mkdir(parents=True, exist_ok=True)
+                ctrl = runtime_control.get_snapshot()
+                snap = runtime_state.snapshot()
+                payload = {
+                    "mode": settings.TRADING_MODE,
+                    "paused": bool(ctrl.get("paused")),
+                    "risk_off": bool(ctrl.get("risk_off")),
+                    "preferred_strategy": ctrl.get("preferred_strategy") or "",
+                    "mode_request": ctrl.get("mode_request") or "",
+                    "last_signal": snap.get("last_signal") or {},
+                    "last_decision": snap.get("last_decision") or {},
+                    "brain": snap.get("brain") or {},
+                    "updated_at": snap.get("updated_at"),
+                }
+                tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+                tmp.write_text(
+                    json.dumps(payload, ensure_ascii=True, indent=2),
+                    encoding="utf-8",
+                )
+                os.replace(tmp, path)
         except Exception as e:
             logger.warning(f"Recovery-State konnte nicht gespeichert werden: {e}")
 
@@ -1226,8 +1247,27 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"Position bleibt lokal offen"
                     )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason=exit_result.reason,
+                        strategy=position.strategy_name,
+                    )
+                    self._log_decision_cycle(
+                        symbol=symbol,
+                        regime="OPEN_POSITION",
+                        ranking=[],
+                        chosen_strategy=position.strategy_name,
+                        signal_score=0.0,
+                        risk_decision="exit_failed",
+                        allow_trade=False,
+                        reject_reason=exit_result.reason,
+                        last_decision_reason=exit_result.reason,
+                        market_context=market_ctx,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -1793,6 +1833,19 @@ class MultiStrategyBot:
         """
         is_live = settings.TRADING_MODE == "live"
 
+        if not bool(getattr(settings, "SHORT_ENABLED", True)):
+            logger.warning(
+                f"[yellow]SHORT BLOCKIERT[/yellow] {symbol} | "
+                f"Strategie: {signal.strategy_name} | SHORT_ENABLED=false"
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_blocked",
+                reason="short_disabled",
+                strategy=signal.strategy_name,
+            )
+            return
+
         if is_live and not settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT BLOCKIERT (Spot-Modus)[/yellow] {symbol} | "
@@ -1802,11 +1855,17 @@ class MultiStrategyBot:
             return
 
         if is_live and settings.FUTURES_MODE:
-            logger.warning(
-                f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+            logger.error(
+                f"[red]SHORT BLOCKIERT (Futures-Live nicht implementiert)[/red] "
+                f"{symbol} | Strategie: {signal.strategy_name}"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="short_blocked",
+                reason="live_futures_short_not_implemented",
+                strategy=signal.strategy_name,
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(

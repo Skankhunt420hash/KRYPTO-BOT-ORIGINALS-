@@ -126,6 +126,24 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
 
         self.assertEqual(_count_error_lines(lines), 2)
 
+    def test_deploy_sync_preserves_runtime_state_and_stops_watchdog_first(self):
+        script = (
+            Path(__file__).resolve().parents[1] / "deploy" / "sync-from-github.sh"
+        ).read_text(encoding="utf-8")
+
+        self.assertIn(
+            "RUNTIME_FILES=(data/daily_summary.json data/runtime_recovery.json)",
+            script,
+        )
+        self.assertIn('trap cleanup EXIT', script)
+        self.assertIn('cp "$BACKUP_DIR/$f" "$f"', script)
+        self.assertLess(
+            script.index("sudo systemctl stop safety-watchdog"),
+            script.index("sudo systemctl stop krypto-bot"),
+        )
+        self.assertIn("sudo systemctl start krypto-bot 2>/dev/null || true", script)
+        self.assertIn("sudo systemctl start safety-watchdog 2>/dev/null || true", script)
+
     def test_short_enabled_blocks_native_short_signals(self):
         old_short_enabled = settings.SHORT_ENABLED
         try:

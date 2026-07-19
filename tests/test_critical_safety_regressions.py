@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import pandas as pd
 
@@ -13,6 +13,7 @@ from src.engine.risk_engine import RiskEngine
 from src.engine.runtime_control import runtime_control
 from src.safety.watchdog import _clear_stuck_recovery, _tail_log
 from src.strategies.signal import EnhancedSignal, Side
+from src.telegram.control_panel import TelegramControlPanel
 from src.utils.risk_manager import Position
 
 
@@ -106,6 +107,67 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
             self.assertIn("SHORT DISABLED", reason)
         finally:
             settings.SHORT_ENABLED = old_short_enabled
+
+    def test_empty_telegram_allowlist_falls_back_to_main_chat(self):
+        old_values = (
+            settings.TELEGRAM_ENABLED,
+            settings.TELEGRAM_PANEL_ENABLED,
+            settings.TELEGRAM_BOT_TOKEN,
+            settings.TELEGRAM_CHAT_ID,
+            settings.TELEGRAM_PANEL_ALLOWED_IDS,
+        )
+        try:
+            settings.TELEGRAM_ENABLED = True
+            settings.TELEGRAM_PANEL_ENABLED = True
+            settings.TELEGRAM_BOT_TOKEN = "token"
+            settings.TELEGRAM_CHAT_ID = "123"
+            settings.TELEGRAM_PANEL_ALLOWED_IDS = ""
+            with patch("src.telegram.control_panel.TradeRepository"):
+                panel = TelegramControlPanel()
+            panel._dispatch_command = Mock()
+
+            panel._handle_update({"message": {"chat": {"id": 999}, "text": "/riskon"}})
+            panel._handle_update({"message": {"chat": {"id": 123}, "text": "/status"}})
+
+            self.assertTrue(panel.enabled)
+            self.assertEqual(panel._allowed_ids, {"123"})
+            panel._dispatch_command.assert_called_once_with("123", "/status")
+        finally:
+            (
+                settings.TELEGRAM_ENABLED,
+                settings.TELEGRAM_PANEL_ENABLED,
+                settings.TELEGRAM_BOT_TOKEN,
+                settings.TELEGRAM_CHAT_ID,
+                settings.TELEGRAM_PANEL_ALLOWED_IDS,
+            ) = old_values
+
+    def test_telegram_panel_without_any_allowed_chat_is_disabled(self):
+        old_values = (
+            settings.TELEGRAM_ENABLED,
+            settings.TELEGRAM_PANEL_ENABLED,
+            settings.TELEGRAM_BOT_TOKEN,
+            settings.TELEGRAM_CHAT_ID,
+            settings.TELEGRAM_PANEL_ALLOWED_IDS,
+        )
+        try:
+            settings.TELEGRAM_ENABLED = True
+            settings.TELEGRAM_PANEL_ENABLED = True
+            settings.TELEGRAM_BOT_TOKEN = "token"
+            settings.TELEGRAM_CHAT_ID = ""
+            settings.TELEGRAM_PANEL_ALLOWED_IDS = ""
+            with patch("src.telegram.control_panel.TradeRepository"):
+                panel = TelegramControlPanel()
+
+            self.assertFalse(panel.enabled)
+            self.assertEqual(panel._allowed_ids, set())
+        finally:
+            (
+                settings.TELEGRAM_ENABLED,
+                settings.TELEGRAM_PANEL_ENABLED,
+                settings.TELEGRAM_BOT_TOKEN,
+                settings.TELEGRAM_CHAT_ID,
+                settings.TELEGRAM_PANEL_ALLOWED_IDS,
+            ) = old_values
 
     def test_failed_multistrategy_exit_keeps_position_open(self):
         symbol = "BTC/USDT"

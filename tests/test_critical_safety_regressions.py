@@ -11,7 +11,12 @@ from config.settings import settings
 from src.bot import MultiStrategyBot
 from src.engine.risk_engine import RiskEngine
 from src.engine.runtime_control import runtime_control
-from src.safety.watchdog import _clear_stuck_recovery, _tail_log
+from src.safety.watchdog import (
+    _clear_stuck_recovery,
+    _count_error_lines,
+    _read_new_log_lines,
+    _tail_log,
+)
 from src.strategies.signal import EnhancedSignal, Side
 from src.telegram.control_panel import TelegramControlPanel
 from src.utils.risk_manager import Position
@@ -94,6 +99,32 @@ class CriticalSafetyRegressionTests(unittest.TestCase):
                 _tail_log(path, 5),
                 ["line-995", "line-996", "line-997", "line-998", "line-999"],
             )
+
+    def test_watchdog_does_not_recount_static_log_errors(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "bot.log"
+            path.write_text("ERROR one\nERROR two\n", encoding="utf-8")
+
+            lines, offset = _read_new_log_lines(path, 0, 20)
+            self.assertEqual(_count_error_lines(lines), 2)
+
+            lines, offset = _read_new_log_lines(path, offset, 20)
+            self.assertEqual(lines, [])
+
+            with path.open("a", encoding="utf-8") as fh:
+                fh.write("ERROR three\n")
+            lines, offset = _read_new_log_lines(path, offset, 20)
+            self.assertEqual(lines, ["ERROR three"])
+
+    def test_watchdog_error_matcher_ignores_status_words(self):
+        lines = [
+            "Status: CB=open Errors=3 KillSwitch=False",
+            "decision=REGIME_ERROR reject_reason=regime_detection_failed",
+            "[ERROR] real failure",
+            "Traceback (most recent call last):",
+        ]
+
+        self.assertEqual(_count_error_lines(lines), 2)
 
     def test_short_enabled_blocks_native_short_signals(self):
         old_short_enabled = settings.SHORT_ENABLED

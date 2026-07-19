@@ -87,6 +87,36 @@ def _tail_log(path: Path, max_lines: int) -> List[str]:
         return []
 
 
+def _read_new_log_lines(path: Path, offset: int, max_lines: int) -> Tuple[List[str], int]:
+    """Liest nur seit dem letzten Poll angehängte Logzeilen."""
+    if max_lines <= 0 or not path.is_file():
+        return [], 0
+    try:
+        size = path.stat().st_size
+        if size <= 0:
+            return [], 0
+        if offset < 0 or offset > size:
+            offset = 0
+
+        max_bytes = max(64 * 1024, min(2 * 1024 * 1024, max_lines * 4096))
+        start = offset
+        if size - start > max_bytes:
+            start = size - max_bytes
+
+        with path.open("rb") as fh:
+            fh.seek(start)
+            data = fh.read(size - start)
+
+        # Nach einem Sprung auf das Leselimit keine angeschnittene erste Zeile zählen.
+        if start > offset:
+            _, _, data = data.partition(b"\n")
+        lines = data.decode("utf-8", errors="replace").splitlines()
+        return (lines[-max_lines:] if len(lines) > max_lines else lines), size
+    except OSError as e:
+        logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)
+        return [], offset
+
+
 def _count_error_lines(lines: List[str]) -> int:
     return sum(1 for ln in lines if _ERROR_RE.search(ln))
 
@@ -203,6 +233,7 @@ def run_forever() -> None:
         log_path = root / log_path
 
     last_restart_mono = 0.0
+    last_log_offset = 0
     logger.info(
         "Safety-Watchdog start | poll=%ss | log=%s | restart_cmd=%s",
         poll,
@@ -240,14 +271,20 @@ def run_forever() -> None:
 
             # 5) Log-Burst
             if log_path is not None:
-                lines = _tail_log(log_path, tail_n)
+                lines, last_log_offset = _read_new_log_lines(
+                    log_path, last_log_offset, tail_n
+                )
                 n_err = _count_error_lines(lines)
                 if n_err >= err_thr:
-                    logger.error("Viele Fehlerzeilen im Log (%d/%d): Neustart erwägen", n_err, tail_n)
+                    logger.error(
+                        "Viele neue Fehlerzeilen im Log (%d/%d): Neustart erwägen",
+                        n_err,
+                        tail_n,
+                    )
                     if tg.enabled:
                         tg.notify_error(
                             "SAFETY_WATCHDOG_LOG",
-                            f"ERROR-Zeilen im Tail: {n_err} (Schwelle {err_thr})",
+                            f"Neue ERROR-Zeilen: {n_err} (Schwelle {err_thr})",
                         )
                     last_restart_mono = _restart_bot(f"log_error_burst n={n_err}", tg, last_restart_mono)
 

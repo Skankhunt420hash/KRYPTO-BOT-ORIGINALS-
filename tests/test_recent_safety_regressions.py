@@ -4,7 +4,7 @@ import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from config.settings import settings
 from src.bot import MultiStrategyBot
@@ -17,6 +17,7 @@ from src.safety.watchdog import (
     _resolve_log_path,
     _tail_log,
 )
+from src.telegram.control_panel import PanelCallbacks, TelegramControlPanel
 
 
 class RecentSafetyRegressionTests(unittest.TestCase):
@@ -117,6 +118,94 @@ class RecentSafetyRegressionTests(unittest.TestCase):
             patch.object(settings, "SUPERVISOR_BOT_LOGFILE", "logs/bot.log"),
         ):
             self.assertEqual(_resolve_log_path(root), root / "logs/bot.log")
+
+    def test_telegram_panel_without_any_allowed_chat_is_disabled(self):
+        with (
+            patch.object(settings, "TELEGRAM_BOT_TOKEN", "token"),
+            patch.object(settings, "TELEGRAM_CHAT_ID", ""),
+            patch.object(settings, "TELEGRAM_ENABLED", True),
+            patch.object(settings, "TELEGRAM_PANEL_ENABLED", True),
+            patch.object(settings, "TELEGRAM_PANEL_ALLOWED_IDS", ""),
+            patch("src.telegram.control_panel.TradeRepository"),
+        ):
+            panel = TelegramControlPanel(notifier=Mock())
+
+        self.assertFalse(panel.enabled)
+
+    def test_telegram_private_chat_falls_back_to_notification_chat(self):
+        with (
+            patch.object(settings, "TELEGRAM_BOT_TOKEN", "token"),
+            patch.object(settings, "TELEGRAM_CHAT_ID", "123"),
+            patch.object(settings, "TELEGRAM_ENABLED", True),
+            patch.object(settings, "TELEGRAM_PANEL_ENABLED", True),
+            patch.object(settings, "TELEGRAM_PANEL_ALLOWED_IDS", ""),
+            patch("src.telegram.control_panel.TradeRepository"),
+        ):
+            panel = TelegramControlPanel(notifier=Mock())
+        panel._dispatch_command = Mock()
+
+        panel._handle_update(
+            {
+                "message": {
+                    "chat": {"id": 123, "type": "private"},
+                    "from": {"id": 123},
+                    "text": "/pause",
+                }
+            }
+        )
+
+        self.assertTrue(panel.enabled)
+        panel._dispatch_command.assert_called_once_with("123", "/pause")
+
+    def test_telegram_group_requires_explicitly_allowed_sender(self):
+        with (
+            patch.object(settings, "TELEGRAM_BOT_TOKEN", "token"),
+            patch.object(settings, "TELEGRAM_CHAT_ID", "-100"),
+            patch.object(settings, "TELEGRAM_ENABLED", True),
+            patch.object(settings, "TELEGRAM_PANEL_ENABLED", True),
+            patch.object(settings, "TELEGRAM_PANEL_ALLOWED_IDS", "-100,123"),
+            patch("src.telegram.control_panel.TradeRepository"),
+        ):
+            panel = TelegramControlPanel(notifier=Mock())
+        panel._dispatch_command = Mock()
+        group = {"id": -100, "type": "supergroup"}
+
+        panel._handle_update(
+            {
+                "message": {
+                    "chat": group,
+                    "from": {"id": 999},
+                    "text": "/killswitch",
+                }
+            }
+        )
+        panel._handle_update(
+            {
+                "message": {
+                    "chat": group,
+                    "from": {"id": 123},
+                    "text": "/killswitch",
+                }
+            }
+        )
+
+        panel._dispatch_command.assert_called_once_with("-100", "/killswitch")
+
+    def test_telegram_safety_commands_persist_control_state_immediately(self):
+        persist = Mock()
+        with patch("src.telegram.control_panel.TradeRepository"):
+            panel = TelegramControlPanel(
+                notifier=Mock(),
+                callbacks=PanelCallbacks(persist_control_state=persist),
+            )
+        panel._send_text = Mock()
+
+        panel._handle_pause("123")
+        panel._handle_riskoff("123")
+        panel._handle_resume("123")
+        panel._handle_riskon("123")
+
+        self.assertEqual(persist.call_count, 4)
 
     def test_deploy_preserves_runtime_files_and_stops_watchdog_first(self):
         script = Path(__file__).parents[1] / "deploy" / "sync-from-github.sh"

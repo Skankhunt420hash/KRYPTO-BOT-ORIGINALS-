@@ -64,6 +64,7 @@ class PanelCallbacks:
     request_bot_start: Optional[Callable[[], Tuple[bool, str]]] = None
     request_bot_restart: Optional[Callable[[], Tuple[bool, str]]] = None
     get_bot_status: Optional[Callable[[], Dict]] = None
+    persist_control_state: Optional[Callable[[], None]] = None
 
 
 class TelegramControlPanel:
@@ -96,22 +97,25 @@ class TelegramControlPanel:
     ) -> None:
         self._token = settings.TELEGRAM_BOT_TOKEN
         self._chat_id = settings.TELEGRAM_CHAT_ID
-        self._enabled = bool(
-            settings.TELEGRAM_ENABLED
-            and settings.TELEGRAM_PANEL_ENABLED
-            and bool(self._token)
-        )
         self._poll_interval = int(
             getattr(settings, "TELEGRAM_PANEL_POLL_INTERVAL_SEC", 10)
         )
         self._log_lines = int(
             getattr(settings, "TELEGRAM_PANEL_LOG_LINES", 20)
         )
-        # Optionales Whitelisting: kommaseparierte User-/Chat-IDs
+        # Fail-closed: explizite Allowlist, sonst nur der Benachrichtigungs-Chat.
         raw_ids = getattr(settings, "TELEGRAM_PANEL_ALLOWED_IDS", "")
         self._allowed_ids = {
             part.strip() for part in raw_ids.split(",") if part.strip()
         }
+        if not self._allowed_ids and self._chat_id:
+            self._allowed_ids = {str(self._chat_id)}
+        self._enabled = bool(
+            settings.TELEGRAM_ENABLED
+            and settings.TELEGRAM_PANEL_ENABLED
+            and bool(self._token)
+            and bool(self._allowed_ids)
+        )
 
         self._notifier = notifier or TelegramNotifier()
         self._callbacks = callbacks or PanelCallbacks()
@@ -137,17 +141,26 @@ class TelegramControlPanel:
                 "Telegram-Control-Panel aktiviert "
                 f"(Poll-Intervall={self._poll_interval}s, "
                 f"Log-Lines={self._log_lines}, "
-                f"Whitelist={'aktiv' if self._allowed_ids else 'inaktiv'})"
+                "Whitelist=aktiv)"
             )
         else:
             if settings.TELEGRAM_ENABLED and settings.TELEGRAM_PANEL_ENABLED and not self._token:
                 logger.warning(
                     "Telegram-Control-Panel deaktiviert: TELEGRAM_BOT_TOKEN fehlt."
                 )
+            elif (
+                settings.TELEGRAM_ENABLED
+                and settings.TELEGRAM_PANEL_ENABLED
+                and not self._allowed_ids
+            ):
+                logger.warning(
+                    "Telegram-Control-Panel deaktiviert: keine erlaubte Chat-ID "
+                    "(TELEGRAM_PANEL_ALLOWED_IDS oder TELEGRAM_CHAT_ID) gesetzt."
+                )
             logger.info(
                 "Telegram-Control-Panel deaktiviert "
                 "(ENABLE_TELEGRAM/TELEGRAM_ENABLED=false, "
-                "TELEGRAM_PANEL_ENABLED=false oder kein Bot-Token gesetzt)"
+                "TELEGRAM_PANEL_ENABLED=false, kein Bot-Token oder keine Allowlist)"
             )
 
     # ------------------------------------------------------------------
@@ -321,16 +334,25 @@ class TelegramControlPanel:
 
         chat = msg.get("chat", {})
         chat_id = str(chat.get("id", ""))
+        chat_type = str(chat.get("type", "")).lower()
+        sender_id = str((msg.get("from") or {}).get("id", ""))
         text = (msg.get("text") or "").strip()
 
         if not text:
             return
 
-        if self._allowed_ids and chat_id not in self._allowed_ids:
+        if chat_type in {"group", "supergroup"}:
+            authorized = bool(sender_id) and sender_id in self._allowed_ids
+        else:
+            authorized = chat_id in self._allowed_ids or (
+                bool(sender_id) and sender_id in self._allowed_ids
+            )
+        if not authorized:
             logger.warning(
-                "Telegram-Panel: Chat %s nicht in TELEGRAM_PANEL_ALLOWED_IDS – Befehl ignoriert "
-                "(Whitelist anpassen oder leer lassen).",
+                "Telegram-Panel: Chat %s / Absender %s nicht autorisiert – "
+                "Befehl ignoriert (Gruppen benötigen eine explizit erlaubte User-ID).",
                 chat_id,
+                sender_id or "unbekannt",
             )
             return
 
@@ -996,6 +1018,7 @@ class TelegramControlPanel:
     def _handle_pause(self, chat_id: str) -> None:
         runtime_control.pause_entries()
         runtime_state.update_engine(paused=True)
+        self._persist_control_state()
         runtime_state.append_log("TELEGRAM /pause -> entries pausiert")
         logger.warning("Telegram-Aktion: /pause -> neue Entries pausiert")
         self._notifier.notify_bot_paused("telegram:/pause")
@@ -1007,6 +1030,7 @@ class TelegramControlPanel:
     def _handle_resume(self, chat_id: str) -> None:
         runtime_control.resume_entries()
         runtime_state.update_engine(paused=False)
+        self._persist_control_state()
         runtime_state.append_log("TELEGRAM /resume -> entries aktiviert")
         logger.info("Telegram-Aktion: /resume -> Entries wieder aktiv")
         self._notifier.notify_bot_resumed("telegram:/resume")
@@ -1015,6 +1039,7 @@ class TelegramControlPanel:
     def _handle_riskoff(self, chat_id: str) -> None:
         runtime_control.enable_risk_off()
         runtime_state.update_engine(risk_off=True)
+        self._persist_control_state()
         runtime_state.append_log("TELEGRAM /riskoff -> risk_off aktiv")
         logger.warning("Telegram-Aktion: /riskoff -> Risk-Off aktiviert")
         self._notifier.notify_risk_off(True, "telegram:/riskoff")
@@ -1023,6 +1048,7 @@ class TelegramControlPanel:
     def _handle_riskon(self, chat_id: str) -> None:
         runtime_control.disable_risk_off()
         runtime_state.update_engine(risk_off=False)
+        self._persist_control_state()
         runtime_state.append_log("TELEGRAM /riskon -> risk_off deaktiviert")
         logger.info("Telegram-Aktion: /riskon -> Risk-Off deaktiviert")
         self._notifier.notify_risk_off(False, "telegram:/riskon")
@@ -1039,6 +1065,7 @@ class TelegramControlPanel:
             runtime_control.pause_entries()
             runtime_control.enable_risk_off()
             runtime_state.update_engine(paused=True, risk_off=True)
+            self._persist_control_state()
             runtime_state.append_log("TELEGRAM /killswitch -> kill switch aktiviert")
             logger.error("Telegram-Aktion: /killswitch -> KILL SWITCH AKTIV")
             self._notifier.notify_bot_paused("telegram:/killswitch")
@@ -1067,6 +1094,15 @@ class TelegramControlPanel:
         except Exception as e:
             logger.error(f"Kill-Switch Deaktivierung fehlgeschlagen: {e}")
             self._send_text(chat_id, "⚠️ Kill-Switch konnte nicht deaktiviert werden.")
+
+    def _persist_control_state(self) -> None:
+        callback = self._callbacks.persist_control_state
+        if callback is None:
+            return
+        try:
+            callback()
+        except Exception as e:
+            logger.error("Control-State konnte nicht sofort persistiert werden: %s", e)
 
     def _handle_setmode(self, chat_id: str, text: str) -> None:
         parts = text.split()

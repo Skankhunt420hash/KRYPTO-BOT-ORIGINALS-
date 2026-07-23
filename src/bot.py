@@ -838,18 +838,24 @@ class MultiStrategyBot:
             return
         try:
             raw = json.loads(path.read_text(encoding="utf-8"))
+            # Der separate Runtime-Control-State ist im Controller-Betrieb die
+            # aktuellere, prozessübergreifende Quelle. Alte Recovery-Snapshots
+            # dürfen ihn beim Bot-Start nicht überschreiben.
+            has_runtime_control_state = runtime_control.has_persisted_state()
             if bool(getattr(settings, "STATE_RECOVERY_RESTORE_PAUSED", True)):
-                if raw.get("paused"):
-                    runtime_control.pause_entries()
-                else:
-                    runtime_control.resume_entries()
+                if not has_runtime_control_state:
+                    if raw.get("paused"):
+                        runtime_control.pause_entries()
+                    else:
+                        runtime_control.resume_entries()
             else:
                 runtime_control.resume_entries()
             if bool(getattr(settings, "STATE_RECOVERY_RESTORE_RISK_OFF", True)):
-                if raw.get("risk_off"):
-                    runtime_control.enable_risk_off()
-                else:
-                    runtime_control.disable_risk_off()
+                if not has_runtime_control_state:
+                    if raw.get("risk_off"):
+                        runtime_control.enable_risk_off()
+                    else:
+                        runtime_control.disable_risk_off()
             else:
                 runtime_control.disable_risk_off()
             preferred = str(raw.get("preferred_strategy") or "").strip()

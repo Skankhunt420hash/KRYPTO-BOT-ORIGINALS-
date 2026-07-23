@@ -22,6 +22,7 @@ env/
 logs/*.log
 data/*.db
 data/*.sqlite
+data/runtime_control.json
 
 # IDE
 .idea/

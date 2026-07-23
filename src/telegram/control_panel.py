@@ -994,7 +994,13 @@ class TelegramControlPanel:
         )
 
     def _handle_pause(self, chat_id: str) -> None:
-        runtime_control.pause_entries()
+        if not runtime_control.pause_entries():
+            self._send_text(
+                chat_id,
+                "⚠️ Pause konnte nicht prozessübergreifend gespeichert werden. "
+                "Der separate Bot-Prozess ist möglicherweise nicht gesperrt.",
+            )
+            return
         runtime_state.update_engine(paused=True)
         runtime_state.append_log("TELEGRAM /pause -> entries pausiert")
         logger.warning("Telegram-Aktion: /pause -> neue Entries pausiert")
@@ -1005,7 +1011,13 @@ class TelegramControlPanel:
         )
 
     def _handle_resume(self, chat_id: str) -> None:
-        runtime_control.resume_entries()
+        if not runtime_control.resume_entries():
+            self._send_text(
+                chat_id,
+                "⚠️ Resume konnte nicht prozessübergreifend gespeichert werden. "
+                "Der separate Bot-Prozess bleibt möglicherweise pausiert.",
+            )
+            return
         runtime_state.update_engine(paused=False)
         runtime_state.append_log("TELEGRAM /resume -> entries aktiviert")
         logger.info("Telegram-Aktion: /resume -> Entries wieder aktiv")
@@ -1013,7 +1025,13 @@ class TelegramControlPanel:
         self._send_text(chat_id, "▶️ Entry-Pause aufgehoben. Neue Entries sind wieder erlaubt.")
 
     def _handle_riskoff(self, chat_id: str) -> None:
-        runtime_control.enable_risk_off()
+        if not runtime_control.enable_risk_off():
+            self._send_text(
+                chat_id,
+                "⚠️ Risk-Off konnte nicht prozessübergreifend gespeichert werden. "
+                "Der separate Bot-Prozess ist möglicherweise nicht gesperrt.",
+            )
+            return
         runtime_state.update_engine(risk_off=True)
         runtime_state.append_log("TELEGRAM /riskoff -> risk_off aktiv")
         logger.warning("Telegram-Aktion: /riskoff -> Risk-Off aktiviert")
@@ -1021,7 +1039,13 @@ class TelegramControlPanel:
         self._send_text(chat_id, "🛡️ Risk-Off aktiviert. Neue Entries sind gesperrt.")
 
     def _handle_riskon(self, chat_id: str) -> None:
-        runtime_control.disable_risk_off()
+        if not runtime_control.disable_risk_off():
+            self._send_text(
+                chat_id,
+                "⚠️ Risk-On konnte nicht prozessübergreifend gespeichert werden. "
+                "Der separate Bot-Prozess bleibt möglicherweise im Risk-Off.",
+            )
+            return
         runtime_state.update_engine(risk_off=False)
         runtime_state.append_log("TELEGRAM /riskon -> risk_off deaktiviert")
         logger.info("Telegram-Aktion: /riskon -> Risk-Off deaktiviert")

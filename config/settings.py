@@ -177,6 +177,13 @@ class Settings:
     STATE_RECOVERY_FILE: str = os.getenv(
         "STATE_RECOVERY_FILE", "data/runtime_recovery.json"
     )
+    # Prozessübergreifender Control-State für controller.py + Bot-Subprozess.
+    RUNTIME_CONTROL_PERSIST_ENABLED: bool = _env_bool(
+        "RUNTIME_CONTROL_PERSIST_ENABLED", default=True
+    )
+    RUNTIME_CONTROL_FILE: str = os.getenv(
+        "RUNTIME_CONTROL_FILE", "data/runtime_control.json"
+    )
     # Beim Neustart aus Recovery-Datei übernehmen (false = Entriegelung nach
     # externem Risk-Off / manuell „festgefahren“, ohne Datei löschen zu müssen)
     STATE_RECOVERY_RESTORE_PAUSED: bool = _env_bool(

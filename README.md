@@ -281,6 +281,7 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 | `APP_INSTANCE_LOCKFILE`   | `data/app.lock` | Lockfile-Pfad für Single-Instance-Schutz |
 | `STATE_RECOVERY_ENABLED`  | `true`          | Persistiert Runtime-Control und aktiviert Restart-Recovery |
 | `STATE_RECOVERY_FILE`     | `data/runtime_recovery.json` | JSON-Datei für persistierten Recovery-Zustand |
+| `RUNTIME_CONTROL_FILE`    | `data/runtime_control.json` | Atomarer, prozessübergreifender Control-State für Controller und Bot |
 | `RECOVERY_MAX_OPEN_TRADES_RESTORE` | `100` | Maximale Anzahl offener DB-Trades, die beim Restart rekonstruiert werden |
 | `SUPERVISOR_BOT_ARGS`     | `--multi --interval 60` | Startargumente für den Bot-Prozess aus `controller.py` |
 | `SUPERVISOR_PIDFILE`      | `data/bot_process.pid` | PID-Datei des vom Controller gestarteten Bot-Prozesses |

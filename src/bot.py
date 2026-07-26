@@ -1793,6 +1793,13 @@ class MultiStrategyBot:
         """
         is_live = settings.TRADING_MODE == "live"
 
+        if not bool(getattr(settings, "SHORT_ENABLED", True)):
+            logger.warning(
+                f"[yellow]SHORT BLOCKIERT (SHORT_ENABLED=false)[/yellow] {symbol} | "
+                f"Strategie: {signal.strategy_name}"
+            )
+            return
+
         if is_live and not settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT BLOCKIERT (Spot-Modus)[/yellow] {symbol} | "
@@ -1802,11 +1809,13 @@ class MultiStrategyBot:
             return
 
         if is_live and settings.FUTURES_MODE:
+            # Must return: execute_entry would place a real live sell.
+            # Spot-style balance checks previously masked this fall-through.
             logger.warning(
-                f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+                f"[yellow]SHORT BLOCKIERT (Futures-Live nicht implementiert)[/yellow] "
+                f"{symbol} | Strategie: {signal.strategy_name}"
             )
-            # Fällt durch in Paper-Simulation
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(

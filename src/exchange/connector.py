@@ -235,11 +235,19 @@ class ExchangeConnector:
     # Order API (orderfähig, ohne Mehrfach-Retry)
     # ------------------------------------------------------------------
 
-    def create_market_buy_order(self, symbol: str, amount: float) -> Dict[str, Any]:
-        return self._create_market_order(symbol=symbol, side="buy", amount=amount)
+    def create_market_buy_order(
+        self, symbol: str, amount: float, *, is_exit: bool = False
+    ) -> Dict[str, Any]:
+        return self._create_market_order(
+            symbol=symbol, side="buy", amount=amount, is_exit=is_exit
+        )
 
-    def create_market_sell_order(self, symbol: str, amount: float) -> Dict[str, Any]:
-        return self._create_market_order(symbol=symbol, side="sell", amount=amount)
+    def create_market_sell_order(
+        self, symbol: str, amount: float, *, is_exit: bool = False
+    ) -> Dict[str, Any]:
+        return self._create_market_order(
+            symbol=symbol, side="sell", amount=amount, is_exit=is_exit
+        )
 
     def cancel_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
         if not order_id:
@@ -264,7 +272,9 @@ class ExchangeConnector:
     # Interne Helpers
     # ------------------------------------------------------------------
 
-    def _create_market_order(self, *, symbol: str, side: str, amount: float) -> Dict[str, Any]:
+    def _create_market_order(
+        self, *, symbol: str, side: str, amount: float, is_exit: bool = False
+    ) -> Dict[str, Any]:
         if side not in ("buy", "sell"):
             logger.error("Ungültige Order-Seite: %s", side)
             return {}
@@ -299,7 +309,14 @@ class ExchangeConnector:
             return {}
         market_price = self.fetch_market_price(symbol)
         notional = normalized_amount * market_price if market_price > 0 else 0.0
-        if settings.TRADING_MODE == "live" and getattr(settings, "LIVE_TEST_MODE", False):
+        # Entry-only: Mini-Live-Notional-Cap darf risikoreduzierende Exits nie blockieren.
+        # Sonst können Positionen, die nach Entry über LIVE_MAX_POSITION_SIZE steigen,
+        # SL/TP-Verkäufe nicht mehr ausführen.
+        if (
+            not is_exit
+            and settings.TRADING_MODE == "live"
+            and getattr(settings, "LIVE_TEST_MODE", False)
+        ):
             live_cap = float(getattr(settings, "LIVE_MAX_POSITION_SIZE", 0.0) or 0.0)
             if live_cap <= 0:
                 logger.error("Order blockiert: LIVE_TEST_MODE aktiv, aber LIVE_MAX_POSITION_SIZE ungültig.")

@@ -145,7 +145,9 @@ class TradingBot:
                 entry_price = position.entry_price
                 pos_size = position.amount
 
-                self.exchange.create_market_sell_order(symbol, position.amount)
+                self.exchange.create_market_sell_order(
+                    symbol, position.amount, is_exit=True
+                )
                 pnl = self.risk.close_position(symbol, current_price)
 
                 # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
@@ -353,7 +355,9 @@ class TradingBot:
             entry_price = position.entry_price
             pos_size = position.amount
 
-            order = self.exchange.create_market_sell_order(symbol, position.amount)
+            order = self.exchange.create_market_sell_order(
+                symbol, position.amount, is_exit=True
+            )
             if order:
                 pnl = self.risk.close_position(symbol, current_price)
                 logger.info(

@@ -376,11 +376,19 @@ class RiskEngine(RiskManager):
             )
 
         # 5) Daily Loss Limit (0 = aus)
+        # Basis = Live-Konto-Equity (nicht PAPER_TRADING_BALANCE). Heutige
+        # realisierte Verluste wieder aufaddieren, damit das Limit nicht mit
+        # jedem Verlust schrumpft und Mini-Live nicht gegen 10k-Paper-Kapital rechnet.
         daily_limit_pct = float(settings.DAILY_LOSS_LIMIT_PCT)
         if settings.LIVE_TEST_MODE:
             daily_limit_pct = float(getattr(settings, "LIVE_TEST_DAILY_LOSS_LIMIT_PCT", daily_limit_pct))
         if daily_limit_pct > 0:
-            daily_limit = self._initial_balance * (daily_limit_pct / 100)
+            equity = float(account_equity_usdt or 0.0)
+            if equity > 0:
+                loss_base = equity + abs(float(self._daily_loss or 0.0))
+            else:
+                loss_base = float(self._initial_balance or 0.0)
+            daily_limit = loss_base * (daily_limit_pct / 100)
             if abs(self._daily_loss) >= daily_limit:
                 return _deny(
                     f"LIVE HARD GATE: DAILY LOSS LIMIT "

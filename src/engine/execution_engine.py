@@ -114,6 +114,22 @@ class ExecutionResult:
         )
 
 
+def accounting_exit_price(result: "ExecutionResult", fallback_price: float) -> float:
+    """
+    Preis für PnL / Daily-Loss / DB nach Exit.
+
+    Bei erfolgreicher Order mit positivem Fill-Preis den Exchange-Fill nutzen;
+    sonst (Fehler / fehlender Fill) den Candle-Fallback.
+    """
+    try:
+        fill = float(getattr(result, "fill_price", 0.0) or 0.0)
+    except (TypeError, ValueError):
+        fill = 0.0
+    if bool(getattr(result, "success", False)) and fill > 0:
+        return fill
+    return float(fallback_price)
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Execution Engine
 # ─────────────────────────────────────────────────────────────────────────────

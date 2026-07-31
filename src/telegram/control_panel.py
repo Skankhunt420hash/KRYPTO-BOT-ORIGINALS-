@@ -1082,21 +1082,35 @@ class TelegramControlPanel:
             )
             return
 
-        prev_mode = settings.TRADING_MODE
-        settings.TRADING_MODE = "paper"
+        prev_mode = str(settings.TRADING_MODE or "").strip().lower() or "unknown"
+        # WICHTIG: settings.TRADING_MODE hier NICHT auf "paper" setzen.
+        # ExchangeConnector.is_paper und ExecutionEngine.is_paper werden nur beim
+        # Init gesetzt. Würde man TRADING_MODE sofort umschalten, bleibt is_paper
+        # False, während _live_orders_enabled bereits False liefert → weder
+        # Paper-Simulation noch echte Live-Exits. Offene Live-Positionen können
+        # lokal geleert werden und bleiben untracked an der Börse.
+        # Stattdessen: Paper nur anfordern + Risk-Off (keine neuen Entries),
+        # Order-Routing bleibt bis zum Neustart live-fähig für Exits.
         runtime_control.request_mode("paper")
         runtime_control.enable_risk_off()  # defensive Übergangsmaßnahme
-        runtime_state.update_engine(mode="paper", risk_off=True)
-        runtime_state.append_log(f"TELEGRAM /setmode paper (vorher={prev_mode})")
+        runtime_state.update_engine(risk_off=True)
+        runtime_state.append_log(
+            f"TELEGRAM /setmode paper requested (order_routing={prev_mode}, "
+            f"effective_after_restart)"
+        )
         logger.warning(
-            f"Telegram-Aktion: /setmode paper (vorher={prev_mode}) -> Risk-Off gesetzt"
+            "Telegram-Aktion: /setmode paper angefordert "
+            "(order_routing bleibt %s bis Neustart) -> Risk-Off gesetzt",
+            prev_mode,
         )
         self._notifier.notify_risk_off(True, "setmode->paper")
         self._send_text(
             chat_id,
-            "✅ Modus-Anforderung auf PAPER gesetzt. "
-            "Risk-Off wurde vorsorglich aktiviert. "
-            "Hinweis: laufende Komponenten können einen Neustart benötigen."
+            "✅ Paper-Modus angefordert (wirksam nach Neustart mit "
+            "TRADING_MODE=paper).\n"
+            "Risk-Off aktiv – keine neuen Entries.\n"
+            f"Order-Routing bleibt vorerst <code>{prev_mode}</code>, "
+            "damit offene Live-Positionen weiter geschlossen werden können."
         )
 
     def _handle_setstrategy(self, chat_id: str, text: str) -> None:

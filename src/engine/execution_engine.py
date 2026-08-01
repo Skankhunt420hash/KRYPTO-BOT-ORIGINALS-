@@ -186,7 +186,7 @@ class ExecutionEngine:
         True wenn neue Trades erlaubt sind.
         Prüft: Emergency Pause, Circuit Breaker, Kill-Switch-Datei.
         """
-        # 1. Kill-Switch-Datei
+        # 1. Kill-Switch-Datei (dateigesteuert, kein dauerhafter Latch)
         if _kill_switch_active():
             if not self._emergency_paused:
                 self._trigger_pause(
@@ -194,7 +194,19 @@ class ExecutionEngine:
                 )
             return False
 
-        # 2. Emergency Pause
+        # Kill-Switch entfernt (/killswitchoff): nur diesen Latch lösen.
+        # Sonst bleiben Exits/Entries nach Datei-Löschung dauerhaft tot,
+        # weil run_cycle bei not is_healthy komplett abbricht und
+        # engine.reset() aus Telegram/Controller nie erreichbar ist.
+        if self._emergency_paused and self._pause_reason.startswith("KILL SWITCH"):
+            logger.warning(
+                "[yellow]Kill-Switch Datei entfernt – "
+                "Emergency Pause (Kill-Switch) aufgehoben[/yellow]"
+            )
+            self._emergency_paused = False
+            self._pause_reason = ""
+
+        # 2. Emergency Pause (Exec-Errors / Rejections / Slippage)
         if self._emergency_paused:
             return False
 

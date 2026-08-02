@@ -6,8 +6,8 @@ ein DB-Fehler crasht niemals den Main-Loop.
 """
 
 import json
-from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Dict, List, Optional, Tuple
 
 from src.storage.database import init_db, get_connection
 from src.utils.logger import setup_logger
@@ -21,6 +21,10 @@ _IS_PAPER = settings.TRADING_MODE == "paper"
 def _utcnow() -> str:
     """ISO-8601 UTC-Zeitstempel für DB-Felder."""
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+
+
+def _utc_today() -> date:
+    return datetime.now(timezone.utc).date()
 
 
 class TradeRepository:
@@ -386,6 +390,70 @@ class TradeRepository:
         except Exception as e:
             logger.error(f"[red]DB-Fehler get_open_trades:[/red] {e}")
             return []
+
+    def get_session_risk_counters(
+        self, day: Optional[date] = None
+    ) -> Tuple[float, int, str]:
+        """
+        Rekonstruiert Daily-Loss und Losing-Streak aus geschlossenen DB-Trades.
+
+        Returns:
+            (daily_loss, losing_streak, day_iso)
+            - daily_loss: Summe negativer pnl_abs des UTC-Tages (≤ 0)
+            - losing_streak: aufeinanderfolgende Verluste ab dem neuesten Close
+            - day_iso: UTC-Tag (YYYY-MM-DD), auf den daily_loss bezogen ist
+        """
+        if not self.available:
+            return 0.0, 0, (day or _utc_today()).isoformat()
+
+        target_day = day or _utc_today()
+        day_start = f"{target_day.isoformat()}T00:00:00"
+        day_end = f"{(target_day + timedelta(days=1)).isoformat()}T00:00:00"
+
+        try:
+            conn = get_connection()
+            if conn is None:
+                return 0.0, 0, target_day.isoformat()
+            try:
+                loss_row = conn.execute(
+                    """
+                    SELECT COALESCE(SUM(pnl_abs), 0.0) AS loss_sum
+                    FROM trades
+                    WHERE status = 'closed'
+                      AND paper_mode = ?
+                      AND pnl_abs < 0
+                      AND timestamp_close >= ?
+                      AND timestamp_close < ?
+                    """,
+                    (int(_IS_PAPER), day_start, day_end),
+                ).fetchone()
+                daily_loss = float((loss_row["loss_sum"] if loss_row else 0.0) or 0.0)
+                if daily_loss > 0:
+                    daily_loss = -abs(daily_loss)
+
+                streak_rows = conn.execute(
+                    """
+                    SELECT pnl_abs
+                    FROM trades
+                    WHERE status = 'closed' AND paper_mode = ?
+                    ORDER BY timestamp_close DESC, id DESC
+                    LIMIT 100
+                    """,
+                    (int(_IS_PAPER),),
+                ).fetchall()
+                losing_streak = 0
+                for row in streak_rows:
+                    pnl = float(row["pnl_abs"] or 0.0)
+                    if pnl < 0:
+                        losing_streak += 1
+                    else:
+                        break
+                return daily_loss, losing_streak, target_day.isoformat()
+            finally:
+                conn.close()
+        except Exception as e:
+            logger.error(f"[red]DB-Fehler get_session_risk_counters:[/red] {e}")
+            return 0.0, 0, target_day.isoformat()
 
     # ------------------------------------------------------------------
     # Statistik-Abfrage (für CLI --status)

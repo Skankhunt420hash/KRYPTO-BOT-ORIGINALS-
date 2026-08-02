@@ -33,7 +33,7 @@ class RiskEngine(RiskManager):
         self._recent_signals: Dict[str, datetime] = {}
 
         self._daily_loss: float = 0.0
-        self._daily_loss_date: date = date.today()
+        self._daily_loss_date: date = datetime.now(timezone.utc).date()
         self._last_gate_reason: str = "init"
         self._last_gate_at: str = datetime.now(timezone.utc).isoformat()
         self._daily_loss_risk_off_latched: bool = False
@@ -89,13 +89,44 @@ class RiskEngine(RiskManager):
     # Hilfsmethoden
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _utc_today() -> date:
+        return datetime.now(timezone.utc).date()
+
     def _reset_daily_loss_if_new_day(self):
-        today = date.today()
+        # UTC, konsistent zu TradeRepository-Timestamps (_utcnow).
+        today = self._utc_today()
         if self._daily_loss_date != today:
             self._daily_loss = 0.0
             self._daily_loss_date = today
             self._daily_loss_risk_off_latched = False
-            logger.info("Daily Loss Counter zurückgesetzt (neuer Tag).")
+            logger.info("Daily Loss Counter zurückgesetzt (neuer UTC-Tag).")
+
+    def restore_session_risk_counters(
+        self,
+        daily_loss: float,
+        losing_streak: int,
+        day: Optional[date] = None,
+    ) -> None:
+        """
+        Stellt Daily-Loss / Losing-Streak nach Prozessneustart wieder her.
+        daily_loss wird intern negativ gehalten (Summe der Verlust-PnLs).
+        """
+        target_day = day or self._utc_today()
+        loss = float(daily_loss or 0.0)
+        if loss > 0:
+            loss = -abs(loss)
+        self._daily_loss = loss
+        self._daily_loss_date = target_day
+        self._global_losing_streak = max(0, int(losing_streak or 0))
+        self._daily_loss_risk_off_latched = False
+        logger.info(
+            "Risk-Counter aus Persistenz geladen | day=%s daily_loss=%.4f USDT "
+            "losing_streak=%d",
+            target_day.isoformat(),
+            abs(self._daily_loss),
+            self._global_losing_streak,
+        )
 
     def _reject(self, reason: str) -> Tuple[bool, str]:
         self._last_gate_reason = reason

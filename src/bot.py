@@ -825,6 +825,16 @@ class MultiStrategyBot:
                 "last_decision": snap.get("last_decision") or {},
                 "brain": snap.get("brain") or {},
                 "updated_at": snap.get("updated_at"),
+                # Sekundär-Backup der Risk-Counter (primär: DB via TradeRepository)
+                "daily_loss": float(getattr(self.risk, "_daily_loss", 0.0) or 0.0),
+                "daily_loss_date": (
+                    getattr(self.risk, "_daily_loss_date", None).isoformat()
+                    if getattr(self.risk, "_daily_loss_date", None) is not None
+                    else ""
+                ),
+                "global_losing_streak": int(
+                    getattr(self.risk, "_global_losing_streak", 0) or 0
+                ),
             }
             path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
         except Exception as e:
@@ -938,8 +948,60 @@ class MultiStrategyBot:
             issues.append(f"ticker_check_failed:{type(e).__name__}")
         return issues
 
+    def _restore_session_risk_counters(self) -> None:
+        """
+        Stellt Daily-Loss / Losing-Streak nach Neustart wieder her.
+
+        Primärquelle: geschlossene DB-Trades (überlebt Deploy git-restore der
+        Recovery-JSON). Fallback: runtime_recovery.json wenn DB nicht verfügbar.
+        """
+        from datetime import date as _date
+
+        if getattr(self.repo, "available", False):
+            try:
+                db_loss, db_streak, day_iso = self.repo.get_session_risk_counters()
+                day = _date.fromisoformat(day_iso) if day_iso else None
+                self.risk.restore_session_risk_counters(
+                    daily_loss=float(db_loss or 0.0),
+                    losing_streak=int(db_streak or 0),
+                    day=day,
+                )
+                runtime_state.append_log(
+                    f"RECOVERY risk_counters_db daily_loss={abs(float(db_loss or 0.0)):.4f} "
+                    f"streak={int(db_streak or 0)} day={day_iso}"
+                )
+                return
+            except Exception as e:
+                logger.warning(f"Risk-Counter aus DB nicht ladbar: {e}")
+
+        path = self._recovery_state_path()
+        if not (settings.STATE_RECOVERY_ENABLED and path.exists()):
+            return
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            file_day = str(raw.get("daily_loss_date") or "").strip()
+            today_iso = self.risk._utc_today().isoformat()
+            if file_day != today_iso:
+                return
+            file_loss = float(raw.get("daily_loss") or 0.0)
+            file_streak = int(raw.get("global_losing_streak") or 0)
+            if abs(file_loss) <= 0 and file_streak <= 0:
+                return
+            self.risk.restore_session_risk_counters(
+                daily_loss=file_loss,
+                losing_streak=file_streak,
+                day=_date.fromisoformat(file_day),
+            )
+            runtime_state.append_log(
+                f"RECOVERY risk_counters_file daily_loss={abs(file_loss):.4f} "
+                f"streak={file_streak} day={file_day}"
+            )
+        except Exception as e:
+            logger.warning(f"Risk-Counter aus Recovery-Datei nicht ladbar: {e}")
+
     def _recover_after_restart(self) -> None:
         self._restore_control_state_from_file()
+        self._restore_session_risk_counters()
         restored_positions = self._recover_open_positions_from_db()
         open_orders_count = 0
         exchange_order_symbols: Set[str] = set()

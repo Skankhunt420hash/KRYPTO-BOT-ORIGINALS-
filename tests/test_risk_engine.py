@@ -1,7 +1,7 @@
 import unittest
 from unittest.mock import patch
 
-from config import settings as settings_module
+from config.settings import settings
 from src.engine.risk_engine import RiskEngine
 from src.strategies.signal import EnhancedSignal, Side
 
@@ -32,7 +32,7 @@ class RiskEngineTests(unittest.TestCase):
         engine._initial_balance = 10_000.0
 
         # Default DAILY_LOSS_LIMIT_PCT=0 deaktiviert das Gate bewusst.
-        with patch.object(settings_module.settings, "DAILY_LOSS_LIMIT_PCT", 5.0):
+        with patch.object(settings, "DAILY_LOSS_LIMIT_PCT", 5.0):
             allowed, reason = engine.check_signal(sig)
         self.assertFalse(allowed)
         self.assertIn("DAILY LOSS LIMIT", reason)

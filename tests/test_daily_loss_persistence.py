@@ -8,7 +8,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import patch
 
-from config import settings as settings_module
+from config.settings import settings
 from src.engine.risk_engine import RiskEngine
 from src.strategies.signal import EnhancedSignal, Side
 from src.storage import database as database_module
@@ -45,7 +45,7 @@ class DailyLossPersistenceTests(unittest.TestCase):
         earlier = f"{today.isoformat()}T08:00:00"
         yesterday = f"{(today - timedelta(days=1)).isoformat()}T20:00:00"
 
-        with patch.object(settings_module.settings, "DATABASE_URL", url), patch.object(
+        with patch.object(settings, "DATABASE_URL", url), patch.object(
             trade_repository_module, "_IS_PAPER", True
         ):
             self.assertTrue(database_module.init_db())
@@ -92,14 +92,12 @@ class DailyLossPersistenceTests(unittest.TestCase):
         engine = RiskEngine(initial_balance=10_000.0)
         sig = self._make_signal()
 
-        with patch.object(settings_module.settings, "DAILY_LOSS_LIMIT_PCT", 2.0):
+        with patch.object(settings, "DAILY_LOSS_LIMIT_PCT", 2.0):
             engine.restore_session_risk_counters(
                 daily_loss=-250.0,
                 losing_streak=3,
-                day=date.today(),
+                day=engine._utc_today(),
             )
-            # UTC-Tag angleichen falls Lokaldatum abweicht
-            engine._daily_loss_date = engine._utc_today()
 
             allowed, reason = engine.check_signal(sig)
             self.assertFalse(allowed)

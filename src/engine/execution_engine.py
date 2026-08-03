@@ -23,12 +23,12 @@ TradingBot (Legacy): bleibt komplett unverändert.
 import os
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
-from src.strategies.signal import EnhancedSignal
+from src.strategies.signal import EnhancedSignal, Side
 from src.utils.logger import setup_logger
 
 logger = setup_logger("execution")
@@ -87,6 +87,7 @@ class ExecutionResult:
     retries_used: int
     fingerprint: str
     reason: str              # leer bei Erfolg, Blockier-Grund bei Fehler
+    fill_amount: float = 0.0  # tatsächlich gefüllte Menge (0.0 wenn fehlgeschlagen)
 
     @classmethod
     def rejected(
@@ -101,6 +102,7 @@ class ExecutionResult:
             fill_price=0.0, intended_price=0.0,
             deviation_pct=deviation_pct,
             retries_used=0, fingerprint=fingerprint, reason=reason,
+            fill_amount=0.0,
         )
 
     @classmethod
@@ -111,6 +113,7 @@ class ExecutionResult:
             fill_price=0.0, intended_price=0.0,
             deviation_pct=0.0,
             retries_used=0, fingerprint=fingerprint, reason=reason,
+            fill_amount=0.0,
         )
 
 
@@ -294,6 +297,7 @@ class ExecutionEngine:
         try:
             order, retries = self._execute_with_retry(symbol, order_side, amount)
             fill_price = _extract_fill_price(order, intended_price)
+            fill_amount = _extract_fill_amount(order, amount)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
                 if intended_price > 0 and fill_price > 0
@@ -307,7 +311,7 @@ class ExecutionEngine:
             if retries > 0:
                 msg = (
                     f"Order nach {retries} Retry(s) erfolgreich: "
-                    f"{symbol} {order_side.upper()} {amount:.6f}"
+                    f"{symbol} {order_side.upper()} {fill_amount:.6f}"
                 )
                 logger.info(f"[green]RETRY ERFOLGREICH[/green] {msg}")
                 if self._tg:
@@ -319,6 +323,7 @@ class ExecutionEngine:
             logger.info(
                 f"[green]EXECUTION OK[/green] {symbol} {order_side.upper()} | "
                 f"Intended={intended_price:.4f} Fill={fill_price:.4f} "
+                f"Amount={fill_amount:.6f} (req={amount:.6f}) "
                 f"Dev={actual_dev:.3f}% | Retries={retries} | "
                 f"Status={order.get('status', '?')}"
             )
@@ -332,6 +337,7 @@ class ExecutionEngine:
                 retries_used=retries,
                 fingerprint=fp,
                 reason="",
+                fill_amount=fill_amount,
             )
 
         except Exception as e:
@@ -605,3 +611,100 @@ def _extract_fill_price(order: Dict[str, Any], fallback: float) -> float:
         if val and float(val) > 0:
             return float(val)
     return fallback
+
+
+def _extract_fill_amount(order: Dict[str, Any], fallback: float) -> float:
+    """
+    Extrahiert die tatsächlich gefüllte Menge.
+    Reihenfolge: filled > amount > fallback.
+
+    Wichtig nach amount_to_precision / Partial-Fills: lokale Position und spätere
+    Exit-Orders müssen die Exchange-Menge nutzen, nicht die vor-normalisierte Anfrage.
+    """
+    if not order:
+        return float(fallback) if fallback and float(fallback) > 0 else 0.0
+    for key in ("filled", "amount"):
+        val = order.get(key)
+        if val is None:
+            continue
+        try:
+            amount = float(val)
+        except (TypeError, ValueError):
+            continue
+        if amount > 0:
+            return amount
+    try:
+        fb = float(fallback)
+    except (TypeError, ValueError):
+        return 0.0
+    return fb if fb > 0 else 0.0
+
+
+def apply_fill_to_signal(signal: EnhancedSignal, fill_price: float) -> EnhancedSignal:
+    """
+    Verschiebt Entry/SL/TP auf den tatsächlichen Fill-Preis und erhält die
+    absoluten Abstände (Risiko-/Reward-Geometrie bleibt gleich).
+    """
+    try:
+        price = float(fill_price)
+    except (TypeError, ValueError):
+        return signal
+    if price <= 0 or signal.entry <= 0:
+        return signal
+    if abs(price - signal.entry) < 1e-12:
+        return signal
+
+    if signal.side == Side.LONG:
+        sl = price - (signal.entry - signal.stop_loss)
+        tp = price + (signal.take_profit - signal.entry)
+    elif signal.side == Side.SHORT:
+        sl = price + (signal.stop_loss - signal.entry)
+        tp = price - (signal.entry - signal.take_profit)
+    else:
+        return signal
+
+    risk = abs(price - sl)
+    reward = abs(tp - price)
+    rr = (reward / risk) if risk > 0 else float(signal.rr)
+    return replace(
+        signal,
+        entry=price,
+        stop_loss=sl,
+        take_profit=tp,
+        rr=round(rr, 4),
+    )
+
+
+def resolve_order_fill(
+    order: Dict[str, Any],
+    *,
+    price_fallback: float,
+    amount_fallback: float,
+) -> Tuple[float, float]:
+    """Liefert (fill_price, fill_amount) aus einem Exchange-/Paper-Order-Dict."""
+    return (
+        _extract_fill_price(order, price_fallback),
+        _extract_fill_amount(order, amount_fallback),
+    )
+
+
+def resolve_entry_fill(
+    signal: EnhancedSignal,
+    exec_result: "ExecutionResult",
+    requested_amount: float,
+) -> Tuple[EnhancedSignal, float, float]:
+    """
+    Liefert (signal_mit_Fill, fill_amount, fill_price) für lokale Position/DB.
+    Fallback auf Signal-Entry bzw. angeforderte Menge wenn Fill fehlt.
+    """
+    fill_price = (
+        float(exec_result.fill_price)
+        if exec_result.fill_price and float(exec_result.fill_price) > 0
+        else float(signal.entry)
+    )
+    fill_amount = (
+        float(exec_result.fill_amount)
+        if exec_result.fill_amount and float(exec_result.fill_amount) > 0
+        else float(requested_amount)
+    )
+    return apply_fill_to_signal(signal, fill_price), fill_amount, fill_price

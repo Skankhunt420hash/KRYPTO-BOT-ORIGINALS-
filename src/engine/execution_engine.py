@@ -23,7 +23,7 @@ TradingBot (Legacy): bleibt komplett unverändert.
 import os
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -645,8 +645,6 @@ def apply_fill_to_signal(signal: EnhancedSignal, fill_price: float) -> EnhancedS
     Verschiebt Entry/SL/TP auf den tatsächlichen Fill-Preis und erhält die
     absoluten Abstände (Risiko-/Reward-Geometrie bleibt gleich).
     """
-    from dataclasses import replace
-
     try:
         price = float(fill_price)
     except (TypeError, ValueError):

@@ -1,11 +1,21 @@
 import unittest
+from unittest.mock import patch
 
 from src.engine.risk_engine import RiskEngine
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal, Side
 
 
 class RiskEngineTests(unittest.TestCase):
     """Basis-Tests für zentrale Risk-Checks."""
+
+    def setUp(self):
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
+
+    def tearDown(self):
+        runtime_control.resume_entries()
+        runtime_control.disable_risk_off()
 
     def _make_dummy_signal(self) -> EnhancedSignal:
         return EnhancedSignal(
@@ -29,7 +39,10 @@ class RiskEngineTests(unittest.TestCase):
         engine._daily_loss = -600.0  # intern: negativer Wert
         engine._initial_balance = 10_000.0
 
-        allowed, reason = engine.check_signal(sig)
+        # Default DAILY_LOSS_LIMIT_PCT=0 deaktiviert das Gate bewusst.
+        with patch("src.engine.risk_engine.settings.DAILY_LOSS_LIMIT_PCT", 5.0):
+            allowed, reason = engine.check_signal(sig)
+
         self.assertFalse(allowed)
         self.assertIn("DAILY LOSS LIMIT", reason)
 

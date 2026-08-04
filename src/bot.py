@@ -4,7 +4,11 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from config.settings import settings
-from src.exchange.connector import ExchangeConnector
+from src.exchange.connector import (
+    ExchangeConnector,
+    is_open_exchange_position,
+    normalize_trading_symbol,
+)
 from src.exchange.universe import resolve_trading_pairs, format_pairs_for_log
 from src.engine.portfolio_risk import PortfolioRiskEngine, build_config_from_settings
 from src.strategies import get_strategy, get_all_enhanced_strategies, Signal
@@ -950,19 +954,28 @@ class MultiStrategyBot:
                 open_orders = self.exchange.fetch_open_orders() or []
                 open_orders_count = len(open_orders)
                 exchange_order_symbols = {
-                    str(o.get("symbol") or "").strip() for o in open_orders if o.get("symbol")
+                    normalize_trading_symbol(o.get("symbol"))
+                    for o in open_orders
+                    if normalize_trading_symbol(o.get("symbol"))
                 }
             except Exception as e:
                 logger.warning(f"Recovery: Open-Orders konnten nicht geladen werden: {e}")
             try:
                 open_positions = self.exchange.fetch_open_positions() or []
+                # Doppelte Absicherung: auch wenn ein Caller ungefilterte Rows liefert.
                 exchange_pos_symbols = {
-                    str(p.get("symbol") or "").strip() for p in open_positions if p.get("symbol")
+                    normalize_trading_symbol(p.get("symbol"))
+                    for p in open_positions
+                    if is_open_exchange_position(p)
+                    and normalize_trading_symbol(p.get("symbol"))
                 }
             except Exception as e:
                 logger.warning(f"Recovery: Open-Positions konnten nicht geladen werden: {e}")
 
-        db_symbols = set(self.risk.open_positions.keys())
+        db_symbols = {
+            normalize_trading_symbol(sym) for sym in self.risk.open_positions.keys()
+            if normalize_trading_symbol(sym)
+        }
         orphan_order_symbols = exchange_order_symbols - db_symbols
         orphan_position_symbols = exchange_pos_symbols - db_symbols
         self._recovery_blocked_symbols.update(orphan_order_symbols)

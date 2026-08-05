@@ -2,7 +2,8 @@
 
 import time
 import unittest
-from unittest.mock import MagicMock, patch
+from collections import deque
+from unittest.mock import MagicMock
 
 from config.settings import settings
 from src.engine.execution_engine import ExecutionEngine
@@ -58,7 +59,7 @@ class SlippagePauseWindowTests(unittest.TestCase):
 
         # Events in die Vergangenheit schieben → Fenster leer → Pause löst sich
         aged = time.monotonic() - 120.0
-        engine._slippage_events = __import__("collections").deque([aged, aged, aged])
+        engine._slippage_events = deque([aged, aged, aged])
         self.assertTrue(engine.is_healthy)
         self.assertFalse(engine._emergency_paused)
         self.assertEqual(engine._pause_reason, "")

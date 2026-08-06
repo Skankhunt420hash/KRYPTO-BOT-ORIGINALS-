@@ -145,7 +145,9 @@ class TradingBot:
                 entry_price = position.entry_price
                 pos_size = position.amount
 
-                self.exchange.create_market_sell_order(symbol, position.amount)
+                self.exchange.create_market_sell_order(
+                    symbol, position.amount, is_exit=True
+                )
                 pnl = self.risk.close_position(symbol, current_price)
 
                 # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
@@ -353,7 +355,9 @@ class TradingBot:
             entry_price = position.entry_price
             pos_size = position.amount
 
-            order = self.exchange.create_market_sell_order(symbol, position.amount)
+            order = self.exchange.create_market_sell_order(
+                symbol, position.amount, is_exit=True
+            )
             if order:
                 pnl = self.risk.close_position(symbol, current_price)
                 logger.info(
@@ -1292,6 +1296,33 @@ class MultiStrategyBot:
             )
             return
 
+        # Nur Exit-Management für Symbole außerhalb des konfigurierten Universums
+        # (z.B. nach TRADING_PAIRS-Änderung oder TRADING_UNIVERSE_MAX_SYMBOLS-Truncation).
+        if symbol not in self.pairs:
+            logger.warning(
+                f"[yellow]OUTSIDE PAIRS[/yellow] {symbol} | "
+                "kein Entry – Symbol nicht in TRADING_PAIRS/Universum"
+            )
+            self._record_last_decision(
+                symbol=symbol,
+                decision="skip",
+                reason="outside_configured_pairs",
+                strategy=self._active_strategy_runtime,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime="OUTSIDE_PAIRS",
+                ranking=[],
+                chosen_strategy="",
+                signal_score=0.0,
+                risk_decision="outside_configured_pairs",
+                allow_trade=False,
+                reject_reason="outside_configured_pairs",
+                last_decision_reason="outside_configured_pairs",
+                market_context=market_ctx,
+            )
+            return
+
         # 2. Regime erkennen
         try:
             regime = self.regime_engine.detect(df)
@@ -1944,6 +1975,36 @@ class MultiStrategyBot:
         runtime_control.disable_risk_off()
         runtime_state.update_engine(paused=False, risk_off=False)
 
+    def _symbols_for_cycle(self) -> List[str]:
+        """
+        Symbole für diesen Zyklus: konfigurierte Pairs plus offene Positionen,
+        die nicht mehr in TRADING_PAIRS / Universum liegen.
+
+        Sonst würden nach Universe-Truncation oder Pair-Änderungen wiederhergestellte
+        Positionen nie auf SL/TP geprüft (unmanaged live exposure).
+        """
+        seen: Set[str] = set()
+        out: List[str] = []
+        for symbol in self.pairs:
+            sym = str(symbol or "").strip()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append(sym)
+        for symbol in list(self.risk.open_positions.keys()):
+            sym = str(symbol or "").strip()
+            if not sym or sym in seen:
+                continue
+            seen.add(sym)
+            out.append(sym)
+            logger.warning(
+                "[yellow]EXIT-ONLY SYMBOL[/yellow] %s | "
+                "offene Position außerhalb TRADING_PAIRS/Universum – "
+                "SL/TP werden weiter geprüft, neue Entries bleiben gesperrt",
+                sym,
+            )
+        return out
+
     def run_cycle(self):
         """Führt einen vollständigen Analyse-Zyklus für alle konfigurierten Paare durch."""
         logger.info("[dim]── Multi-Strategy Zyklus gestartet ──[/dim]")
@@ -1994,7 +2055,7 @@ class MultiStrategyBot:
         except Exception as e:
             logger.warning(f"Scorer-Refresh fehlgeschlagen (nicht kritisch): {e}")
 
-        for symbol in self.pairs:
+        for symbol in self._symbols_for_cycle():
             try:
                 self._process_pair(symbol)
             except Exception as e:

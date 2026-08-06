@@ -235,11 +235,19 @@ class ExchangeConnector:
     # Order API (orderfähig, ohne Mehrfach-Retry)
     # ------------------------------------------------------------------
 
-    def create_market_buy_order(self, symbol: str, amount: float) -> Dict[str, Any]:
-        return self._create_market_order(symbol=symbol, side="buy", amount=amount)
+    def create_market_buy_order(
+        self, symbol: str, amount: float, *, is_exit: bool = False
+    ) -> Dict[str, Any]:
+        return self._create_market_order(
+            symbol=symbol, side="buy", amount=amount, is_exit=is_exit
+        )
 
-    def create_market_sell_order(self, symbol: str, amount: float) -> Dict[str, Any]:
-        return self._create_market_order(symbol=symbol, side="sell", amount=amount)
+    def create_market_sell_order(
+        self, symbol: str, amount: float, *, is_exit: bool = False
+    ) -> Dict[str, Any]:
+        return self._create_market_order(
+            symbol=symbol, side="sell", amount=amount, is_exit=is_exit
+        )
 
     def cancel_order(self, order_id: str, symbol: str) -> Dict[str, Any]:
         if not order_id:
@@ -264,7 +272,9 @@ class ExchangeConnector:
     # Interne Helpers
     # ------------------------------------------------------------------
 
-    def _create_market_order(self, *, symbol: str, side: str, amount: float) -> Dict[str, Any]:
+    def _create_market_order(
+        self, *, symbol: str, side: str, amount: float, is_exit: bool = False
+    ) -> Dict[str, Any]:
         if side not in ("buy", "sell"):
             logger.error("Ungültige Order-Seite: %s", side)
             return {}
@@ -332,9 +342,13 @@ class ExchangeConnector:
             return {}
 
         try:
-            params = {}
+            params: Dict[str, Any] = {}
             if self.exchange_id.lower() == "binance":
                 params["newClientOrderId"] = f"kb-{int(time.time()*1000)}"
+            # Futures exits must never flip exposure when local size > exchange size
+            # (precision drift, partial close, liquidation residue, phantom DB restore).
+            if is_exit and bool(getattr(settings, "FUTURES_MODE", False)):
+                params["reduceOnly"] = True
             order = self._exchange.create_market_order(
                 symbol=symbol,
                 side=side,

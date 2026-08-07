@@ -22,16 +22,24 @@ class RiskEngineTests(unittest.TestCase):
         )
 
     def test_daily_loss_limit_blocks_signal(self):
+        from config.settings import settings
+
         engine = RiskEngine(initial_balance=10_000.0)
         sig = self._make_dummy_signal()
 
-        # Simuliere Tagesverlust, der das Limit überschreitet
-        engine._daily_loss = -600.0  # intern: negativer Wert
-        engine._initial_balance = 10_000.0
+        # DAILY_LOSS_LIMIT_PCT=0 deaktiviert das Gate absichtlich.
+        prev = settings.DAILY_LOSS_LIMIT_PCT
+        settings.DAILY_LOSS_LIMIT_PCT = 5.0
+        try:
+            # Simuliere Tagesverlust, der das Limit überschreitet
+            engine._daily_loss = -600.0  # intern: negativer Wert
+            engine._initial_balance = 10_000.0
 
-        allowed, reason = engine.check_signal(sig)
-        self.assertFalse(allowed)
-        self.assertIn("DAILY LOSS LIMIT", reason)
+            allowed, reason = engine.check_signal(sig)
+            self.assertFalse(allowed)
+            self.assertIn("DAILY LOSS LIMIT", reason)
+        finally:
+            settings.DAILY_LOSS_LIMIT_PCT = prev
 
     def test_duplicate_signal_blocked(self):
         engine = RiskEngine(initial_balance=10_000.0)

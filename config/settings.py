@@ -404,12 +404,15 @@ class Settings:
     # Anzahl aufeinanderfolgender Rejections bevor Emergency Pause ausgelöst wird
     MAX_CONSECUTIVE_REJECTIONS: int = int(os.getenv("MAX_CONSECUTIVE_REJECTIONS", 10))
 
-    # Bei Execution-Fehlern Bot automatisch pausieren (Emergency Pause)
+    # Bei Execution-Fehlern Bot automatisch pausieren (Emergency Pause).
+    # Transiente Pausen (Exec-Error/Rejection) lösen sich nach
+    # CIRCUIT_BREAKER_COOLDOWN_SEC wieder — sonst bleiben Exits dauerhaft tot.
     EMERGENCY_PAUSE_ON_EXEC_ERRORS: bool = (
         os.getenv("EMERGENCY_PAUSE_ON_EXEC_ERRORS", "true").lower() == "true"
     )
 
-    # Cooldown-Zeit des Circuit Breakers in Sekunden
+    # Cooldown-Zeit des Circuit Breakers in Sekunden.
+    # Zusätzlich Auto-Clear für Exec-Error-/Rejection-Emergency-Pausen.
     CIRCUIT_BREAKER_COOLDOWN_SEC: int = int(os.getenv("CIRCUIT_BREAKER_COOLDOWN_SEC", 300))
 
     # Pfad zur Kill-Switch-Datei: Bot pausiert wenn diese Datei existiert

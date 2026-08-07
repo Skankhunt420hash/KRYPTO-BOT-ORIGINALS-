@@ -163,8 +163,15 @@ class TradingApplication:
             self.release_lock()
 
     def run_once(self, *, autostart_services: bool = False) -> None:
-        bot = self.create_bot(autostart_services=autostart_services)
-        bot.run_cycle()
+        # Gleicher Single-Instance-Schutz wie run_forever: sonst kann
+        # `python main.py --once` parallel zum Daemon echte Live-Orders platzieren.
+        if not self.acquire_lock():
+            raise RuntimeError("single_instance_lock_failed")
+        try:
+            bot = self.create_bot(autostart_services=autostart_services)
+            bot.run_cycle()
+        finally:
+            self.release_lock()
 
     def stop(self) -> None:
         if self._bot is None:

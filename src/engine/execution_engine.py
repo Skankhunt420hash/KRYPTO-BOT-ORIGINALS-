@@ -158,6 +158,7 @@ class ExecutionEngine:
         # ── Emergency Pause ───────────────────────────────────────────
         self._emergency_paused: bool = False
         self._pause_reason: str = ""
+        self._pause_started_at: float = 0.0
 
         # ── Fingerprint-Cache (Duplicate-Schutz) ──────────────────────
         # fingerprint → unix-timestamp der letzten Ausführung
@@ -194,9 +195,14 @@ class ExecutionEngine:
                 )
             return False
 
-        # 2. Emergency Pause
+        # 2. Emergency Pause (Exec-Error/Rejection nach Cooldown automatisch lösen,
+        #    sonst bleiben Exits über run_cycle dauerhaft tot bis Prozess-Neustart.
+        #    Kill-Switch und Slippage haben eigene Clear-Pfade.)
         if self._emergency_paused:
-            return False
+            if self._maybe_auto_clear_transient_emergency_pause():
+                pass  # Pause aufgehoben → weiter mit CB-/Health-Checks
+            else:
+                return False
 
         # 3. Circuit Breaker: Cooldown abgelaufen?
         if self._circuit_state == CircuitState.OPEN:
@@ -235,6 +241,7 @@ class ExecutionEngine:
         self._consecutive_rejections = 0
         self._emergency_paused = False
         self._pause_reason = ""
+        self._pause_started_at = 0.0
         self._slippage_events.clear()
         logger.info("[green]ExecutionEngine: manueller Reset durchgeführt[/green]")
 
@@ -544,6 +551,7 @@ class ExecutionEngine:
         if not self._emergency_paused:
             self._emergency_paused = True
             self._pause_reason = reason
+            self._pause_started_at = time.monotonic()
             logger.error(f"[red]EMERGENCY PAUSE AKTIV: {reason}[/red]")
             if self._tg:
                 if hasattr(self._tg, "notify_bot_paused"):
@@ -554,6 +562,45 @@ class ExecutionEngine:
                         f"📋 {reason}\n"
                         f"🔧 Manueller Reset: <code>engine.reset()</code>"
                     )
+
+    def _maybe_auto_clear_transient_emergency_pause(self) -> bool:
+        """
+        Löst Exec-Error-/Rejection-Pausen nach CIRCUIT_BREAKER_COOLDOWN_SEC.
+        Ohne Auto-Clear bleibt run_cycle() dauerhaft übersprungen (inkl. SL/TP),
+        weil engine.reset() aus Telegram nicht erreichbar ist.
+        """
+        reason = self._pause_reason or ""
+        if reason.startswith("KILL SWITCH"):
+            return False
+        # Slippage-Fenster wird separat behandelt (eigene Zeitlogik).
+        if reason.startswith("Zu viele Slippage-Events"):
+            return False
+        transient = reason.startswith("Emergency Pause:") or reason.startswith(
+            "Zu viele aufeinanderfolgende Rejections"
+        )
+        if not transient:
+            return False
+        if self._pause_started_at <= 0:
+            return False
+        cooldown = float(getattr(settings, "CIRCUIT_BREAKER_COOLDOWN_SEC", 300) or 300)
+        if cooldown <= 0:
+            return False
+        elapsed = time.monotonic() - self._pause_started_at
+        if elapsed < cooldown:
+            return False
+
+        logger.warning(
+            "[yellow]Emergency-Pause-Cooldown abgelaufen – "
+            "transiente Pause aufgehoben[/yellow] | vorher=%s | elapsed=%.0fs",
+            reason,
+            elapsed,
+        )
+        self._emergency_paused = False
+        self._pause_reason = ""
+        self._pause_started_at = 0.0
+        self._consecutive_rejections = 0
+        # Error-Counter bleibt dem Circuit Breaker überlassen (HALF_OPEN-Pfad).
+        return True
 
 
 # ─────────────────────────────────────────────────────────────────────────────

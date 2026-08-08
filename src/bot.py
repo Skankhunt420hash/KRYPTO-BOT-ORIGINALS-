@@ -4,7 +4,13 @@ import time
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from config.settings import settings
-from src.exchange.connector import ExchangeConnector
+from src.exchange.connector import (
+    ExchangeConnector,
+    amounts_compatible,
+    exchange_position_exposure,
+    is_open_exchange_position,
+    normalize_trading_symbol,
+)
 from src.exchange.universe import resolve_trading_pairs, format_pairs_for_log
 from src.engine.portfolio_risk import PortfolioRiskEngine, build_config_from_settings
 from src.strategies import get_strategy, get_all_enhanced_strategies, Signal
@@ -944,34 +950,92 @@ class MultiStrategyBot:
         open_orders_count = 0
         exchange_order_symbols: Set[str] = set()
         exchange_pos_symbols: Set[str] = set()
+        # normalized_symbol -> list of (side, abs_amount)
+        exchange_exposures: Dict[str, List[Tuple[str, float]]] = {}
 
         if settings.TRADING_MODE == "live":
             try:
                 open_orders = self.exchange.fetch_open_orders() or []
                 open_orders_count = len(open_orders)
                 exchange_order_symbols = {
-                    str(o.get("symbol") or "").strip() for o in open_orders if o.get("symbol")
+                    normalize_trading_symbol(o.get("symbol"))
+                    for o in open_orders
+                    if normalize_trading_symbol(o.get("symbol"))
                 }
             except Exception as e:
                 logger.warning(f"Recovery: Open-Orders konnten nicht geladen werden: {e}")
             try:
                 open_positions = self.exchange.fetch_open_positions() or []
-                exchange_pos_symbols = {
-                    str(p.get("symbol") or "").strip() for p in open_positions if p.get("symbol")
-                }
+                # Doppelte Absicherung: auch wenn ein Caller ungefilterte Rows liefert.
+                for pos_row in open_positions:
+                    if not is_open_exchange_position(pos_row):
+                        continue
+                    norm_sym, side, amount = exchange_position_exposure(pos_row)
+                    if not norm_sym or amount <= 0:
+                        continue
+                    exchange_pos_symbols.add(norm_sym)
+                    exchange_exposures.setdefault(norm_sym, []).append((side, amount))
             except Exception as e:
                 logger.warning(f"Recovery: Open-Positions konnten nicht geladen werden: {e}")
 
-        db_symbols = set(self.risk.open_positions.keys())
+        db_symbol_by_norm: Dict[str, str] = {}
+        for sym in self.risk.open_positions.keys():
+            norm = normalize_trading_symbol(sym)
+            if norm:
+                db_symbol_by_norm[norm] = sym
+        db_symbols = set(db_symbol_by_norm.keys())
         orphan_order_symbols = exchange_order_symbols - db_symbols
         orphan_position_symbols = exchange_pos_symbols - db_symbols
         self._recovery_blocked_symbols.update(orphan_order_symbols)
         self._recovery_blocked_symbols.update(orphan_position_symbols)
 
+        # Gleiches Symbol auf Exchange, aber Side/Size weicht ab → Fail-Closed.
+        # Sonst exitet der Bot nur die DB-Menge und lässt Rest-Exposure untracked.
+        mismatched_symbols: Set[str] = set()
+        for norm_sym, local_sym in db_symbol_by_norm.items():
+            local_pos = self.risk.open_positions.get(local_sym)
+            if local_pos is None:
+                continue
+            remote_rows = exchange_exposures.get(norm_sym) or []
+            if not remote_rows:
+                # Spot liefert oft keine Positionen; nur abgleichen wenn Exposure bekannt.
+                continue
+            local_side = str(getattr(local_pos, "side", "long") or "long").lower()
+            local_amount = float(getattr(local_pos, "amount", 0.0) or 0.0)
+            side_matches = [amt for side, amt in remote_rows if side == local_side]
+            if not side_matches:
+                mismatched_symbols.add(local_sym)
+                logger.error(
+                    "[red]RECOVERY POSITION MISMATCH[/red] %s | DB side=%s amount=%.8f | "
+                    "Exchange sides=%s – Symbol gesperrt",
+                    local_sym,
+                    local_side,
+                    local_amount,
+                    ",".join(sorted({s for s, _ in remote_rows})),
+                )
+                continue
+            remote_amount = float(side_matches[0])
+            if not amounts_compatible(local_amount, remote_amount):
+                mismatched_symbols.add(local_sym)
+                logger.error(
+                    "[red]RECOVERY POSITION MISMATCH[/red] %s | DB side=%s amount=%.8f | "
+                    "Exchange amount=%.8f – Symbol gesperrt",
+                    local_sym,
+                    local_side,
+                    local_amount,
+                    remote_amount,
+                )
+
+        self._recovery_blocked_symbols.update(mismatched_symbols)
+
         issues = self._startup_sanity_checks()
         if orphan_position_symbols:
             issues.append(
                 f"orphan_exchange_positions:{','.join(sorted(orphan_position_symbols))}"
+            )
+        if mismatched_symbols:
+            issues.append(
+                f"position_size_or_side_mismatch:{','.join(sorted(mismatched_symbols))}"
             )
         if issues:
             self._startup_checks_ok = False

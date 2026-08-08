@@ -10,6 +10,97 @@ from src.utils.logger import setup_logger
 logger = setup_logger("exchange")
 
 
+def normalize_trading_symbol(symbol: str) -> str:
+    """
+    Vereinheitlicht Exchange-Symbole für Vergleiche.
+    Futures-ccxt nutzt oft 'BTC/USDT:USDT' während der Bot 'BTC/USDT' speichert.
+    """
+    s = str(symbol or "").strip()
+    if not s:
+        return ""
+    if ":" in s:
+        s = s.split(":", 1)[0].strip()
+    return s
+
+
+def is_open_exchange_position(position: Dict[str, Any]) -> bool:
+    """
+    True nur bei echter Exposure. ccxt/Binance-positionRisk liefert oft
+    Hunderte Einträge mit contracts/positionAmt == 0.
+    """
+    if not isinstance(position, dict):
+        return False
+    for key in ("contracts", "size", "amount", "notional"):
+        try:
+            if abs(float(position.get(key) or 0.0)) > 0.0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    info = position.get("info") or {}
+    if isinstance(info, dict):
+        for key in ("positionAmt", "position_amt", "contracts"):
+            try:
+                if abs(float(info.get(key) or 0.0)) > 0.0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
+def exchange_position_exposure(position: Dict[str, Any]) -> Tuple[str, str, float]:
+    """
+    Extrahiert (normalized_symbol, side, abs_amount) aus einer ccxt-Position.
+    side ist 'long' oder 'short'; Menge immer absolut.
+    """
+    if not isinstance(position, dict):
+        return "", "long", 0.0
+
+    symbol = normalize_trading_symbol(position.get("symbol"))
+    raw = 0.0
+    for key in ("contracts", "size", "amount"):
+        try:
+            value = float(position.get(key) or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if abs(value) > abs(raw):
+            raw = value
+
+    info = position.get("info") or {}
+    if isinstance(info, dict):
+        for key in ("positionAmt", "position_amt", "contracts"):
+            try:
+                value = float(info.get(key) or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if abs(value) > abs(raw):
+                raw = value
+
+    side_raw = str(position.get("side") or "").strip().lower()
+    if side_raw in ("long", "short"):
+        side = side_raw
+    elif raw < 0:
+        side = "short"
+    else:
+        side = "long"
+
+    return symbol, side, abs(raw)
+
+
+def amounts_compatible(local_amount: float, exchange_amount: float) -> bool:
+    """
+    True wenn lokale und Exchange-Größe nah genug beieinander liegen.
+    Relative 0.5%-Toleranz deckt Precision-Rundung ab; große Drift bleibt Fail-Closed.
+    """
+    try:
+        local = abs(float(local_amount))
+        remote = abs(float(exchange_amount))
+    except (TypeError, ValueError):
+        return False
+    diff = abs(local - remote)
+    scale = max(local, remote, 1e-12)
+    return diff <= max(1e-8, scale * 0.005)
+
+
 class ExchangeConnector:
     """
     Robuste Exchange-Schicht mit klarer Trennung:
@@ -182,10 +273,13 @@ class ExchangeConnector:
         if not hasattr(self._exchange, "fetch_positions"):
             return []
         try:
-            return self._call_with_retry(
+            rows = self._call_with_retry(
                 lambda: self._exchange.fetch_positions(symbols=symbols),
                 op="fetch_positions",
             ) or []
+            # Nur echte Exposure behalten — sonst markiert Recovery Null-Rows als Orphans
+            # und blockiert den gesamten Bot-Zyklus (inkl. Exits).
+            return [p for p in rows if is_open_exchange_position(p)]
         except Exception as e:
             msg = str(e).lower()
             if "apikey" in msg or "authentication" in msg or "requires" in msg:

@@ -869,9 +869,19 @@ class MultiStrategyBot:
         except Exception as e:
             logger.warning(f"Recovery-Control-State konnte nicht geladen werden: {e}")
 
-    def _recover_open_positions_from_db(self) -> int:
+    def _recover_open_positions_from_db(self) -> Tuple[int, Set[str]]:
+        """
+        Stellt offene DB-Trades des aktuellen Modus wieder her.
+
+        Returns:
+            (restored_count, duplicate_symbols) — duplicate_symbols sind Symbole
+            mit mehr als einer open-Row. Diese müssen fail-closed behandelt werden,
+            weil _recovery_blocked_symbols sonst Exits für die restaurierte
+            Position dauerhaft überspringt.
+        """
         restored = 0
         restored_notional = 0.0
+        duplicate_symbols: Set[str] = set()
         open_rows = self.repo.get_open_trades(
             limit=int(getattr(settings, "RECOVERY_MAX_OPEN_TRADES_RESTORE", 100))
         )
@@ -881,6 +891,7 @@ class MultiStrategyBot:
             if not symbol or symbol in seen_symbols:
                 # Duplicate offene Trades auf demselben Symbol bleiben konservativ blockiert.
                 if symbol:
+                    duplicate_symbols.add(symbol)
                     self._recovery_blocked_symbols.add(symbol)
                 continue
             seen_symbols.add(symbol)
@@ -912,7 +923,7 @@ class MultiStrategyBot:
                 self._recovery_blocked_symbols.add(symbol)
         if restored_notional > 0 and not paper_equity_ledger_enabled():
             self.risk.balance = max(0.0, float(self.risk.balance) - restored_notional)
-        return restored
+        return restored, duplicate_symbols
 
     def _startup_sanity_checks(self) -> List[str]:
         issues: List[str] = []
@@ -940,7 +951,7 @@ class MultiStrategyBot:
 
     def _recover_after_restart(self) -> None:
         self._restore_control_state_from_file()
-        restored_positions = self._recover_open_positions_from_db()
+        restored_positions, duplicate_db_symbols = self._recover_open_positions_from_db()
         open_orders_count = 0
         exchange_order_symbols: Set[str] = set()
         exchange_pos_symbols: Set[str] = set()
@@ -973,6 +984,44 @@ class MultiStrategyBot:
             issues.append(
                 f"orphan_exchange_positions:{','.join(sorted(orphan_position_symbols))}"
             )
+        if duplicate_db_symbols:
+            # Duplikate restaurieren die neueste Row, blockieren das Symbol danach aber
+            # in _process_pair inkl. SL/TP — ohne Startup-Block bliebe Exposure untracked.
+            issues.append(
+                f"duplicate_open_db_trades:{','.join(sorted(duplicate_db_symbols))}"
+            )
+
+        # Paper-Start mit noch offenen Live-DB-Trades: Exchange-Fetch ist im Paper-Modus
+        # absichtlich deaktiviert → Exposure würde sonst unsichtbar weiterlaufen.
+        if str(getattr(settings, "TRADING_MODE", "paper")).lower() == "paper":
+            live_open_rows: List[dict] = []
+            try:
+                live_open_rows = self.repo.get_open_trades(
+                    limit=int(getattr(settings, "RECOVERY_MAX_OPEN_TRADES_RESTORE", 100)),
+                    paper_mode=False,
+                ) or []
+            except Exception as e:
+                logger.warning(
+                    "Recovery: Live-Open-Trades (Cross-Mode) konnten nicht geladen werden: %s",
+                    e,
+                )
+            live_symbols = sorted(
+                {
+                    str(r.get("symbol") or "").strip()
+                    for r in live_open_rows
+                    if str(r.get("symbol") or "").strip()
+                }
+            )
+            if live_symbols:
+                self._recovery_blocked_symbols.update(live_symbols)
+                issues.append(
+                    f"live_open_trades_while_paper:{','.join(live_symbols[:8])}"
+                )
+                logger.error(
+                    "[red]RECOVERY[/red] Paper-Modus, aber offene Live-DB-Trades vorhanden: %s",
+                    ", ".join(live_symbols[:8]),
+                )
+
         if issues:
             self._startup_checks_ok = False
             self._startup_block_reason = " | ".join(issues)

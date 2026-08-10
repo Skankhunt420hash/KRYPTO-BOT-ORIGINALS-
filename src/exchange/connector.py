@@ -10,6 +10,15 @@ from src.utils.logger import setup_logger
 logger = setup_logger("exchange")
 
 
+class ExchangePrivateDataError(RuntimeError):
+    """
+    Private Exchange-Daten (Orders/Positionen) konnten nicht geladen werden.
+
+    Wichtig für Recovery: darf NICHT als leere Liste erscheinen, sonst wirken
+    API-Fehler wie „keine offenen Positionen/Orders“ und Orphan-Checks greifen nicht.
+    """
+
+
 class ExchangeConnector:
     """
     Robuste Exchange-Schicht mit klarer Trennung:
@@ -173,7 +182,8 @@ class ExchangeConnector:
                 logger.warning("Offene Orders nicht verfügbar (fehlende Exchange-Credentials).")
             else:
                 logger.error(f"Fehler beim Laden offener Orders: {e}")
-            return []
+            # Fail-closed: leere Liste würde Recovery als „keine Orders“ interpretieren.
+            raise ExchangePrivateDataError(f"fetch_open_orders failed: {e}") from e
 
     def fetch_open_positions(self, symbols: Optional[List[str]] = None) -> List[Dict[str, Any]]:
         if self.is_paper:
@@ -192,7 +202,8 @@ class ExchangeConnector:
                 logger.warning("Offene Positionen nicht verfügbar (fehlende Exchange-Credentials).")
             else:
                 logger.error(f"Fehler beim Laden offener Positionen: {e}")
-            return []
+            # Fail-closed: leere Liste würde Orphan-Exposure bei API-Fehlern verstecken.
+            raise ExchangePrivateDataError(f"fetch_open_positions failed: {e}") from e
 
     def fetch_symbol_info(self, symbol: str) -> Dict[str, Any]:
         market = self._get_market(symbol)

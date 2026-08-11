@@ -110,33 +110,23 @@ class TradingBot:
     def _process_pair(self, symbol: str):
         """Analysiert ein Handelspaar und führt ggf. eine Order aus."""
         df = self.exchange.fetch_ohlcv(symbol)
-        if df.empty:
+        ohlcv_ok = not df.empty
+        current_price = 0.0
+        if ohlcv_ok:
+            current_price = float(df["close"].iloc[-1])
+        elif symbol in self.risk.open_positions:
+            try:
+                current_price = float(self.exchange.fetch_market_price(symbol) or 0.0)
+            except Exception:
+                current_price = 0.0
+
+        if current_price <= 0:
             self._record_last_decision(symbol=symbol, decision="skip", reason="no_data")
             return
 
-        if bool(getattr(settings, "SHORT_ONLY_TRADING", False)):
-            self._record_last_decision(
-                symbol=symbol,
-                decision="skip",
-                reason="short_only_trading_requires_multi_mode",
-                strategy=self.strategy.name,
-            )
-            return
-
-        signal = self.strategy.analyze(df, symbol)
-        current_price = float(df["close"].iloc[-1])
         self._last_prices[symbol] = current_price
-        self._record_last_signal(
-            symbol=symbol,
-            strategy=self._active_strategy_runtime,
-            side="buy" if signal.is_buy() else "sell" if signal.is_sell() else "none",
-            confidence=round(float(signal.confidence) * 100, 1),
-            reason=signal.reason,
-            entry=current_price,
-            timeframe=settings.TIMEFRAME,
-        )
 
-        # Prüfe Exit-Bedingungen für offene Positionen
+        # Prüfe Exit-Bedingungen für offene Positionen (auch ohne OHLCV via Ticker)
         exit_reason = self.risk.check_exit_conditions(symbol, current_price)
         if exit_reason:
             position = self.risk.open_positions.get(symbol)
@@ -185,6 +175,31 @@ class TradingBot:
                         strategy=self.strategy.name,
                     )
             return
+
+        # Ohne OHLCV keine Entry-/Strategie-Analyse
+        if not ohlcv_ok:
+            self._record_last_decision(symbol=symbol, decision="skip", reason="no_data")
+            return
+
+        if bool(getattr(settings, "SHORT_ONLY_TRADING", False)):
+            self._record_last_decision(
+                symbol=symbol,
+                decision="skip",
+                reason="short_only_trading_requires_multi_mode",
+                strategy=self.strategy.name,
+            )
+            return
+
+        signal = self.strategy.analyze(df, symbol)
+        self._record_last_signal(
+            symbol=symbol,
+            strategy=self._active_strategy_runtime,
+            side="buy" if signal.is_buy() else "sell" if signal.is_sell() else "none",
+            confidence=round(float(signal.confidence) * 100, 1),
+            reason=signal.reason,
+            entry=current_price,
+            timeframe=settings.TIMEFRAME,
+        )
 
         # Kaufsignal
         if signal.is_buy() and self.risk.can_open_trade(symbol):
@@ -1185,7 +1200,30 @@ class MultiStrategyBot:
             )
             return
         df = self.exchange.fetch_ohlcv(symbol)
-        if df.empty:
+        ohlcv_ok = not df.empty
+        current_price = 0.0
+        if ohlcv_ok:
+            current_price = float(df["close"].iloc[-1])
+        elif symbol in self.risk.open_positions:
+            # Kritisch: ohne OHLCV dürfen offene Positionen nicht „blind“ ohne SL/TP bleiben.
+            # Ticker/Last-Preis reicht für Exit-Checks; Entries brauchen weiterhin Kerzen.
+            try:
+                current_price = float(self.exchange.fetch_market_price(symbol) or 0.0)
+            except Exception as e:
+                logger.warning(
+                    f"{symbol} | OHLCV leer und Ticker-Fallback fehlgeschlagen: {e}"
+                )
+                current_price = 0.0
+            if current_price > 0:
+                logger.warning(
+                    f"{symbol} | Keine OHLCV-Daten – Exit-Schutz über Ticker "
+                    f"@ {current_price:.4f}"
+                )
+                self.health.record_error(
+                    "warning", f"{symbol}: OHLCV leer, Exit via Ticker"
+                )
+
+        if current_price <= 0:
             logger.warning(f"{symbol} | Keine OHLCV-Daten erhalten – übersprungen")
             self.health.record_error("warning", f"{symbol}: Keine OHLCV-Daten")
             self._record_last_decision(symbol=symbol, decision="skip", reason="no_data")
@@ -1203,10 +1241,10 @@ class MultiStrategyBot:
             )
             return
 
-        self.health.update_data_freshness(symbol)
-        current_price = float(df["close"].iloc[-1])
+        if ohlcv_ok:
+            self.health.update_data_freshness(symbol)
         self._last_prices[symbol] = current_price
-        market_ctx = self._market_context(df)
+        market_ctx = self._market_context(df) if ohlcv_ok else {}
 
         # 1. Exits prüfen (SL, TP, Trailing Stop) – side-aware
         exit_reason = self.risk.check_exit_conditions(symbol, current_price)
@@ -1289,6 +1327,23 @@ class MultiStrategyBot:
                 reject_reason="open_position_exists",
                 last_decision_reason="open_position_exists",
                 market_context=market_ctx,
+            )
+            return
+
+        # Ohne OHLCV keine Strategie-/Entry-Analyse (Exit-Pfad oben bereits erledigt).
+        if not ohlcv_ok:
+            self._record_last_decision(symbol=symbol, decision="skip", reason="no_data")
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime="NO_DATA",
+                ranking=[],
+                chosen_strategy="",
+                signal_score=0.0,
+                risk_decision="no_data",
+                allow_trade=False,
+                reject_reason="no_data",
+                last_decision_reason="no_data",
+                market_context={},
             )
             return
 

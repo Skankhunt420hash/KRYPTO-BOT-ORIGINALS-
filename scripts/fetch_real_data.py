@@ -50,12 +50,17 @@ def fetch_all_ohlcv(exchange, symbol: str, timeframe: str, since_ms: int, until_
         cursor = last_ts + tf_ms
 
         done_pct = min(100.0, (cursor - since_ms) / (until_ms - since_ms) * 100)
-        print(f"  {symbol} {timeframe}: {len(all_rows):>6} Kerzen geladen ({done_pct:5.1f}%)", end="\r", file=sys.stderr)
+        # Normale Zeile (kein \r) -- sonst zerschiesst die DO-Web-Konsole beim
+        # Kopieren den Text, weil sie Zeilen ueberschreibt statt neu anzuhaengen.
+        step_pct = int(done_pct // 10) * 10
+        if step_pct != getattr(fetch_all_ohlcv, "_last_pct", {}).get(symbol, -10):
+            fetch_all_ohlcv._last_pct = getattr(fetch_all_ohlcv, "_last_pct", {})
+            fetch_all_ohlcv._last_pct[symbol] = step_pct
+            print(f"  {symbol} {timeframe}: {len(all_rows):>6} Kerzen geladen ({done_pct:5.1f}%)", file=sys.stderr)
 
         if exchange.rateLimit:
             time.sleep(exchange.rateLimit / 1000)
 
-    print(file=sys.stderr)
     return all_rows
 
 

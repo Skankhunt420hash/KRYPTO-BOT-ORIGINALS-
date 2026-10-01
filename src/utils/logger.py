@@ -20,7 +20,11 @@ except Exception:
 console = Console(file=sys.stdout, legacy_windows=False)
 
 
-def setup_logger(name: str, level: str = "INFO") -> logging.Logger:
+def setup_logger(name: str, level: str = None) -> logging.Logger:
+    # Kein expliziter Pegel uebergeben? Dann aus LOG_LEVEL-Umgebungsvariable lesen
+    # (Default INFO). So kann z.B. ein Backtest-Lauf mit LOG_LEVEL=WARNING leise
+    # gestartet werden, ohne jeden einzelnen Logger-Aufruf im Code anzufassen.
+    level = level or os.getenv("LOG_LEVEL", "INFO")
     log_level = getattr(logging, level.upper(), logging.INFO)
 
     os.makedirs("logs", exist_ok=True)

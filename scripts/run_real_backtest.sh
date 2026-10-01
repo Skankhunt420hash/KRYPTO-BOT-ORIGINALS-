@@ -28,11 +28,19 @@ for SYM in "${SYMBOLS[@]}"; do
   python3 scripts/fetch_real_data.py --exchange binance --symbol "$SYM" --timeframe "$TF" --years "$YEARS"
 done
 
+# Leise waehrend des Backtests: der Meta-Selector protokolliert sonst eine Zeile
+# PRO KERZE (bei 17'500 Kerzen x 3 Symbole = zigtausende Zeilen) -- bremst alles
+# aus und sieht in der Konsole wie ein Haenger aus. Der Endbericht laeuft nicht
+# ueber den Logger und bleibt unveraendert sichtbar. Live-/Papierbetrieb ist
+# davon nicht betroffen (dort bleibt LOG_LEVEL unveraendert = INFO).
+export LOG_LEVEL=WARNING
+
 for SYM in "${SYMBOLS[@]}"; do
   CSV="data/real/${SYM//\//_}_${TF}.csv"
   echo ""
   echo "=================================================================="
   echo "==> Echter Backtest (alle Strategien + Meta-Selector): $SYM"
+  echo "    (laeuft leise -- bei 17.5k Kerzen dauert das ein paar Minuten)"
   echo "=================================================================="
   python3 main.py --backtest --csv "$CSV" --multi --export "$RESULTS_DIR" | tee "$RESULTS_DIR/${SYM//\//_}_report.txt"
 done

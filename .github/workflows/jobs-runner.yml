@@ -1,0 +1,69 @@
+name: Nemesis Jobs Runner
+
+# Fuehrt Auftraege aus jobs/pending/ automatisch aus -- auf GitHub's eigenen
+# Rechnern, mit echtem Internetzugang (z.B. zu Binance). Kein Server, keine
+# Konsole, kein Login noetig. Ausgeloest einfach dadurch, dass eine neue
+# Auftrags-Datei nach jobs/pending/ gepusht wird. Ergebnis landet als
+# jobs/done/<name>.log wieder im Repo.
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'jobs/pending/**'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: nemesis-jobs-runner
+  cancel-in-progress: false
+
+jobs:
+  run-jobs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Abhaengigkeiten installieren
+        run: pip install -r requirements.txt
+
+      - name: Offene Auftraege ausfuehren
+        run: |
+          set -uo pipefail
+          git config user.email "actions@github.com"
+          git config user.name "Nemesis Jobs Runner (GitHub Actions)"
+          shopt -s nullglob
+          mkdir -p jobs/done jobs/archive
+
+          ran_any=0
+          for job in jobs/pending/*.sh; do
+            ran_any=1
+            name=$(basename "$job" .sh)
+            echo "=== Starte Auftrag: $name ==="
+            {
+              echo "=== $name gestartet $(date -u +%FT%TZ) (GitHub Actions) ==="
+              bash "$job"
+              echo "=== $name fertig $(date -u +%FT%TZ) (exit $?) ==="
+            } > "jobs/done/${name}.log" 2>&1 || true
+            echo "--- Ende $name, letzte 40 Zeilen: ---"
+            tail -n 40 "jobs/done/${name}.log" || true
+            git mv -f "$job" "jobs/archive/${name}.sh" 2>/dev/null || mv -f "$job" "jobs/archive/${name}.sh"
+          done
+
+          if [ "$ran_any" = "1" ]; then
+            git add -A jobs/done jobs/archive
+            git commit -m "actions: Auftraege ausgefuehrt [skip ci]" || echo "nichts zu committen"
+            git pull --no-rebase origin main
+            git push origin HEAD:main
+          else
+            echo "Keine offenen Auftraege in jobs/pending/."
+          fi

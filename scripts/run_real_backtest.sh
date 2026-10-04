@@ -25,7 +25,7 @@ for SYM in "${SYMBOLS[@]}"; do
   echo "=================================================================="
   echo "==> Echte Daten holen: $SYM"
   echo "=================================================================="
-  python3 scripts/fetch_real_data.py --exchange binance --symbol "$SYM" --timeframe "$TF" --years "$YEARS"
+  python3 scripts/fetch_real_data.py --exchange auto --symbol "$SYM" --timeframe "$TF" --years "$YEARS"
 done
 
 # Leise waehrend des Backtests: der Meta-Selector protokolliert sonst eine Zeile

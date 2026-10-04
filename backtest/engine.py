@@ -50,6 +50,7 @@ class BacktestConfig:
     max_open_trades: int = 1        # Im Backtest üblicherweise 1 pro Symbol
     timeframe: str = "1h"
     symbol: str = "UNKNOWN"
+    max_window: int = 800           # Nur die letzten N Kerzen an Strategien geben (Tempo)
     min_confidence: float = 40.0    # Mindest-Konfidenz für Signale (0-100)
 
 
@@ -292,7 +293,7 @@ class BacktestEngine:
 
             # Schritt 3: Signal generieren (kein offener Trade, kein Pending)
             if self._open_pos is None and self._pending_signal is None:
-                window = df.iloc[: i + 1]
+                window = df.iloc[max(0, i + 1 - self.config.max_window): i + 1]
                 try:
                     sig = strategy.analyze(
                         window, self.config.symbol, self.config.timeframe
@@ -352,7 +353,7 @@ class BacktestEngine:
 
             # Schritt 3: Regime + alle Strategien + MetaSelector
             if self._open_pos is None and self._pending_signal is None:
-                window = df.iloc[: i + 1]
+                window = df.iloc[max(0, i + 1 - self.config.max_window): i + 1]
                 try:
                     regime = _regime.detect(window)
                     signals = []

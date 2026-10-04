@@ -24,7 +24,8 @@ for job in jobs/pending/*.sh; do
   {
     echo "=== $name gestartet $(date -u +%FT%TZ) ==="
     bash "$job"
-    echo "=== $name fertig $(date -u +%FT%TZ) (exit $?) ==="
+    rc=$?
+    echo "=== $name fertig $(date -u +%FT%TZ) (exit $rc) ==="
   } > "jobs/done/${name}.log" 2>&1
 
   git mv -f "$job" "jobs/archive/${name}.sh" 2>/dev/null || mv -f "$job" "jobs/archive/${name}.sh"

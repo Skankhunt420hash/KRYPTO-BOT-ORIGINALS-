@@ -1,0 +1,45 @@
+=== export_data gestartet 2026-10-04T20:39:59Z (GitHub Actions) ===
+  binance (BTC/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus BTC/USDT
+==> Gespeichert: data/real/BTC_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+  binance (ETH/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus ETH/USDT
+==> Gespeichert: data/real/ETH_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+  binance (SOL/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus SOL/USDT
+==> Gespeichert: data/real/SOL_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+  binance (BNB/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus BNB/USDT
+==> Gespeichert: data/real/BNB_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+  binance (XRP/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus XRP/USDT
+==> Gespeichert: data/real/XRP_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+  binance (ADA/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus ADA/USDT
+==> Gespeichert: data/real/ADA_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+  binance (DOGE/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus DOGE/USDT
+==> Gespeichert: data/real/DOGE_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+  binance (LINK/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus LINK/USDT
+==> Gespeichert: data/real/LINK_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+  binance (AVAX/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus AVAX/USDT
+==> Gespeichert: data/real/AVAX_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+  binance (LTC/USDT) nicht nutzbar: ExchangeNotAvailable: binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+==> Quelle: binanceus LTC/USDT
+==> Gespeichert: data/real/LTC_1h.csv  (17523 Kerzen, 730 Tage, 2024-10-04 09:00:00+00:00 bis 2026-10-04 20:00:00+00:00)
+total 2700
+drwxr-xr-x 2 runner runner   4096 Oct  4 20:40 .
+drwxr-xr-x 3 runner runner   4096 Oct  4 20:39 ..
+-rw-r--r-- 1 runner runner 257212 Oct  4 20:40 ADA_1h.csv.gz
+-rw-r--r-- 1 runner runner 212179 Oct  4 20:40 AVAX_1h.csv.gz
+-rw-r--r-- 1 runner runner 276979 Oct  4 20:40 BNB_1h.csv.gz
+-rw-r--r-- 1 runner runner 389340 Oct  4 20:40 BTC_1h.csv.gz
+-rw-r--r-- 1 runner runner 265597 Oct  4 20:40 DOGE_1h.csv.gz
+-rw-r--r-- 1 runner runner 333017 Oct  4 20:40 ETH_1h.csv.gz
+-rw-r--r-- 1 runner runner 215533 Oct  4 20:40 LINK_1h.csv.gz
+-rw-r--r-- 1 runner runner 238869 Oct  4 20:40 LTC_1h.csv.gz
+-rw-r--r-- 1 runner runner 274777 Oct  4 20:40 SOL_1h.csv.gz
+-rw-r--r-- 1 runner runner 273269 Oct  4 20:40 XRP_1h.csv.gz
+=== export_data fertig 2026-10-04T20:40:53Z (exit 0) ===

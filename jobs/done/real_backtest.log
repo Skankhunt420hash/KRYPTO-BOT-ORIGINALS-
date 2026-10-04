@@ -1,0 +1,40 @@
+=== real_backtest gestartet 2026-10-04T13:17:10Z (GitHub Actions) ===
+==> Code aktualisieren
+From https://github.com/Skankhunt420hash/KRYPTO-BOT-ORIGINALS-
+ * branch            main       -> FETCH_HEAD
+Already up to date.
+
+==================================================================
+==> Echte Daten holen: BTC/USDT
+==================================================================
+  Netzfehler (binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+  "code": 0,
+  "msg": "Service unavailable from a restricted location according to 'b. Eligibility' in https://www.binance.com/en/terms. Please contact customer service if you believe you received this message in error."
+}), neuer Versuch in 1s ...
+  Netzfehler (binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+  "code": 0,
+  "msg": "Service unavailable from a restricted location according to 'b. Eligibility' in https://www.binance.com/en/terms. Please contact customer service if you believe you received this message in error."
+}), neuer Versuch in 2s ...
+  Netzfehler (binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+  "code": 0,
+  "msg": "Service unavailable from a restricted location according to 'b. Eligibility' in https://www.binance.com/en/terms. Please contact customer service if you believe you received this message in error."
+}), neuer Versuch in 4s ...
+  Netzfehler (binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+  "code": 0,
+  "msg": "Service unavailable from a restricted location according to 'b. Eligibility' in https://www.binance.com/en/terms. Please contact customer service if you believe you received this message in error."
+}), neuer Versuch in 8s ...
+  Netzfehler (binance GET https://api.binance.com/api/v3/exchangeInfo 451  {
+  "code": 0,
+  "msg": "Service unavailable from a restricted location according to 'b. Eligibility' in https://www.binance.com/en/terms. Please contact customer service if you believe you received this message in error."
+}), neuer Versuch in 16s ...
+==> Lade BTC/USDT 1h von binance, 2024-10-04 bis 2026-10-04
+Traceback (most recent call last):
+  File "/home/runner/work/KRYPTO-BOT-ORIGINALS-/KRYPTO-BOT-ORIGINALS-/scripts/fetch_real_data.py", line 104, in <module>
+    main()
+  File "/home/runner/work/KRYPTO-BOT-ORIGINALS-/KRYPTO-BOT-ORIGINALS-/scripts/fetch_real_data.py", line 85, in main
+    rows = fetch_all_ohlcv(exchange, args.symbol, args.timeframe, since_ms, until_ms)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/runner/work/KRYPTO-BOT-ORIGINALS-/KRYPTO-BOT-ORIGINALS-/scripts/fetch_real_data.py", line 42, in fetch_all_ohlcv
+    raise RuntimeError(f"Konnte Kerzen ab {cursor} nicht laden (5 Versuche fehlgeschlagen).")
+RuntimeError: Konnte Kerzen ab 1728004648551 nicht laden (5 Versuche fehlgeschlagen).
+=== real_backtest fertig 2026-10-04T13:17:59Z (exit 0) ===

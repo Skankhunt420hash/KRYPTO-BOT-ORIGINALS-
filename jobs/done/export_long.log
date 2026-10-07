@@ -1,0 +1,50 @@
+=== export_long gestartet 2026-10-07T19:53:23Z (GitHub Actions) ===
+==> Quelle: binanceus BTC/USDT
+==> Gespeichert: data/real/BTC_1d.csv  (2556 Kerzen, 2555 Tage, 2019-10-09 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus ETH/USDT
+==> Gespeichert: data/real/ETH_1d.csv  (2556 Kerzen, 2555 Tage, 2019-10-09 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus SOL/USDT
+==> Gespeichert: data/real/SOL_1d.csv  (2191 Kerzen, 2190 Tage, 2020-10-08 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus BNB/USDT
+==> Gespeichert: data/real/BNB_1d.csv  (2556 Kerzen, 2555 Tage, 2019-10-09 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus XRP/USDT
+==> Gespeichert: data/real/XRP_1d.csv  (1645 Kerzen, 2555 Tage, 2019-10-09 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus ADA/USDT
+==> Gespeichert: data/real/ADA_1d.csv  (2556 Kerzen, 2555 Tage, 2019-10-09 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus DOGE/USDT
+==> Gespeichert: data/real/DOGE_1d.csv  (2540 Kerzen, 2539 Tage, 2019-10-25 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: coinbaseexchange LINK/USD
+==> Gespeichert: data/real/LINK_1d.csv  (2556 Kerzen, 2555 Tage, 2019-10-09 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: coinbaseexchange AVAX/USD
+==> Gespeichert: data/real/AVAX_1d.csv  (1826 Kerzen, 1825 Tage, 2021-10-08 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus LTC/USDT
+==> Gespeichert: data/real/LTC_1d.csv  (2556 Kerzen, 2555 Tage, 2019-10-09 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: coinbaseexchange DOT/USD
+==> Gespeichert: data/real/DOT_1d.csv  (1826 Kerzen, 1825 Tage, 2021-10-08 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus ATOM/USDT
+==> Gespeichert: data/real/ATOM_1d.csv  (2533 Kerzen, 2532 Tage, 2019-11-01 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus TRX/USDT
+==> Gespeichert: data/real/TRX_1d.csv  (369 Kerzen, 1460 Tage, 2022-10-08 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus XLM/USDT
+==> Gespeichert: data/real/XLM_1d.csv  (2556 Kerzen, 2555 Tage, 2019-10-09 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+==> Quelle: binanceus BCH/USDT
+==> Gespeichert: data/real/BCH_1d.csv  (2556 Kerzen, 2555 Tage, 2019-10-09 00:00:00+00:00 bis 2026-10-07 00:00:00+00:00)
+total 696
+drwxr-xr-x 2 runner runner  4096 Oct  7 19:54 .
+drwxr-xr-x 4 runner runner  4096 Oct  7 19:53 ..
+-rw-r--r-- 1 runner runner 50091 Oct  7 19:53 ADA_1d.csv.gz
+-rw-r--r-- 1 runner runner 46275 Oct  7 19:54 ATOM_1d.csv.gz
+-rw-r--r-- 1 runner runner 37404 Oct  7 19:53 AVAX_1d.csv.gz
+-rw-r--r-- 1 runner runner 47386 Oct  7 19:54 BCH_1d.csv.gz
+-rw-r--r-- 1 runner runner 52730 Oct  7 19:53 BNB_1d.csv.gz
+-rw-r--r-- 1 runner runner 65012 Oct  7 19:53 BTC_1d.csv.gz
+-rw-r--r-- 1 runner runner 52701 Oct  7 19:53 DOGE_1d.csv.gz
+-rw-r--r-- 1 runner runner 38805 Oct  7 19:54 DOT_1d.csv.gz
+-rw-r--r-- 1 runner runner 57335 Oct  7 19:53 ETH_1d.csv.gz
+-rw-r--r-- 1 runner runner 53939 Oct  7 19:53 LINK_1d.csv.gz
+-rw-r--r-- 1 runner runner 47867 Oct  7 19:54 LTC_1d.csv.gz
+-rw-r--r-- 1 runner runner 44898 Oct  7 19:53 SOL_1d.csv.gz
+-rw-r--r-- 1 runner runner  6287 Oct  7 19:54 TRX_1d.csv.gz
+-rw-r--r-- 1 runner runner 46018 Oct  7 19:54 XLM_1d.csv.gz
+-rw-r--r-- 1 runner runner 30943 Oct  7 19:53 XRP_1d.csv.gz
+=== export_long fertig 2026-10-07T19:54:26Z (exit 0) ===

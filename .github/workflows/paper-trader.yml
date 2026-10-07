@@ -1,5 +1,8 @@
 name: Paper Trader (kein echtes Geld)
 on:
+  push:
+    branches: [main]
+    paths: ['paper/run.trigger']
   schedule:
     - cron: '17 * * * *'
   workflow_dispatch: {}

@@ -1,0 +1,28 @@
+name: Paper Trader (kein echtes Geld)
+on:
+  schedule:
+    - cron: '17 * * * *'
+  workflow_dispatch: {}
+permissions:
+  contents: write
+concurrency:
+  group: nemesis-paper
+  cancel-in-progress: false
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: '3.11' }
+      - run: pip install ccxt==4.4.27
+      - run: python3 scripts/paper_momentum.py
+      - name: Ergebnis speichern
+        run: |
+          git config user.email "actions@github.com"
+          git config user.name "Nemesis Paper Trader"
+          git add paper
+          git commit -m "paper: Lauf $(date -u +%FT%H:%MZ) [skip ci]" || exit 0
+          git pull --rebase origin main
+          git push origin HEAD:main

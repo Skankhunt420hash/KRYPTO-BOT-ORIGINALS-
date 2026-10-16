@@ -1,5 +1,6 @@
 import os
 from pathlib import Path
+from typing import Optional
 
 from dotenv import load_dotenv
 
@@ -482,8 +483,13 @@ class Settings:
     SAFETY_WATCHDOG_LOG_TAIL_LINES: int = int(
         os.getenv("SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)
     )
-    # Optional: eigene Log-Datei (leer = SUPERVISOR_BOT_LOGFILE). Bei systemd+journalctl ggf. leer lassen und nur Prozess-Check nutzen.
-    SAFETY_WATCHDOG_LOG_FILE: str = os.getenv("SAFETY_WATCHDOG_LOG_FILE", "").strip()
+    # Optional: eigene Log-Datei. Nicht gesetzt = SUPERVISOR_BOT_LOGFILE,
+    # explizit leer = Log-Burst-Prüfung aus (z.B. reine systemd/journalctl Setups).
+    SAFETY_WATCHDOG_LOG_FILE: Optional[str] = (
+        os.getenv("SAFETY_WATCHDOG_LOG_FILE", "").strip()
+        if "SAFETY_WATCHDOG_LOG_FILE" in os.environ
+        else None
+    )
     SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD: int = int(
         os.getenv("SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)
     )
@@ -497,9 +503,10 @@ class Settings:
     SAFETY_WATCHDOG_RUN_COMPILEALL: bool = _env_bool(
         "SAFETY_WATCHDOG_RUN_COMPILEALL", default=True
     )
-    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (festgefahren)
+    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (opt-in;
+    # kann sonst manuelle /pause- oder /riskoff-Sicherheitszustände löschen).
     SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY: bool = _env_bool(
-        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=True
+        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=False
     )
     # Nur wenn ruff installiert und explizit true — vorsichtig
     SAFETY_WATCHDOG_RUFF_AUTOFIX: bool = _env_bool(

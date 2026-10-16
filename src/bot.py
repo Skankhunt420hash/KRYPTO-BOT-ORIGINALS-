@@ -15,7 +15,7 @@ from src.engine.brain import IntelligenceBrain
 from src.engine.risk_engine import RiskEngine
 from src.engine.performance_tracker import PerformanceTracker
 from src.engine.strategy_scorer import StrategyScorer
-from src.engine.execution_engine import ExecutionEngine
+from src.engine.execution_engine import ExecutionEngine, accounting_exit_price
 from src.engine.health_monitor import HealthMonitor
 from src.engine.runtime_control import runtime_control
 from src.engine.runtime_state import runtime_state
@@ -1229,7 +1229,9 @@ class MultiStrategyBot:
                         f"Position wird trotzdem lokal geschlossen"
                     )
 
-                pnl = self.risk.close_position(symbol, current_price)
+                # Live-PnL / Daily-Loss müssen den Exchange-Fill nutzen, nicht nur Candle-Close
+                exit_price = accounting_exit_price(exit_result, current_price)
+                pnl = self.risk.close_position(symbol, exit_price)
 
                 side_label = "[LONG]" if pos_side == "long" else "[SHORT]"
                 pnl_str = f"{pnl:+.4f} USDT" if pnl is not None else "?"
@@ -1244,7 +1246,7 @@ class MultiStrategyBot:
                     cost = entry_price * pos_size
                     pnl_pct = (pnl / cost * 100) if cost > 0 else 0.0
                     if trade_id is not None:
-                        self.repo.close_trade(trade_id, current_price, pnl, pnl_pct, exit_reason)
+                        self.repo.close_trade(trade_id, exit_price, pnl, pnl_pct, exit_reason)
                     try:
                         self.perf_tracker.refresh()
                     except Exception:
@@ -1253,7 +1255,7 @@ class MultiStrategyBot:
                         symbol=symbol,
                         side=pos_side,
                         entry=entry_price,
-                        exit_price=current_price,
+                        exit_price=exit_price,
                         pnl=pnl,
                         pnl_pct=pnl_pct,
                         reason=exit_reason,

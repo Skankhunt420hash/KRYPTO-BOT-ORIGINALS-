@@ -1223,11 +1223,31 @@ class MultiStrategyBot:
                     symbol, exit_side, position.amount
                 )
                 if not exit_result.success:
+                    reason = exit_result.reason or "exit_order_failed"
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
-                        f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"{reason} | "
+                        f"Position bleibt lokal offen"
                     )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason=reason,
+                        strategy=position.strategy_name,
+                    )
+                    self._log_decision_cycle(
+                        symbol=symbol,
+                        regime="EXIT",
+                        ranking=[],
+                        chosen_strategy=position.strategy_name,
+                        signal_score=0.0,
+                        risk_decision="exit_failed",
+                        allow_trade=False,
+                        reject_reason=reason,
+                        last_decision_reason=reason,
+                        market_context=market_ctx,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -1802,11 +1822,30 @@ class MultiStrategyBot:
             return
 
         if is_live and settings.FUTURES_MODE:
+            reason = "live_futures_short_not_implemented"
             logger.warning(
                 f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+                f"{symbol} – echte Sell-Order blockiert"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="execution_blocked",
+                reason=reason,
+                strategy=signal.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=signal.regime or "UNKNOWN",
+                ranking=list((self._last_brain_snapshot or {}).get("last_strategy_ranking") or []),
+                chosen_strategy=signal.strategy_name,
+                signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0) or 0.0),
+                risk_decision="execution_blocked",
+                allow_trade=False,
+                reject_reason=reason,
+                last_decision_reason=reason,
+                market_context={},
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(

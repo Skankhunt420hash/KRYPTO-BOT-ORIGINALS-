@@ -417,6 +417,12 @@ class ExchangeConnector:
         return normalized, "ok"
 
     def _has_sufficient_balance(self, symbol: str, side: str, amount: float, price: float) -> bool:
+        # Linear/swap futures do not hold spot-style free base inventory.
+        # Checking free base blocks every sell exit (and short entry) on USDT-M.
+        # Exact margin is enforced by the exchange (InsufficientFunds).
+        if bool(getattr(settings, "FUTURES_MODE", False)):
+            return True
+
         bal = self.fetch_balance() or {}
         market = self._get_market(symbol)
         base = market.get("base")

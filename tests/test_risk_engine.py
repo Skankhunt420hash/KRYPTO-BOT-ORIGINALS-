@@ -1,6 +1,8 @@
 import unittest
+from unittest import mock
 
 from src.engine.risk_engine import RiskEngine
+from src.engine import risk_engine
 from src.strategies.signal import EnhancedSignal, Side
 
 
@@ -29,7 +31,8 @@ class RiskEngineTests(unittest.TestCase):
         engine._daily_loss = -600.0  # intern: negativer Wert
         engine._initial_balance = 10_000.0
 
-        allowed, reason = engine.check_signal(sig)
+        with mock.patch.object(risk_engine.settings, "DAILY_LOSS_LIMIT_PCT", 5.0):
+            allowed, reason = engine.check_signal(sig)
         self.assertFalse(allowed)
         self.assertIn("DAILY LOSS LIMIT", reason)
 

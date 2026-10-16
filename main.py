@@ -576,13 +576,12 @@ def main():
 
     app = TradingApplication(use_multi=use_multi, interval_seconds=args.interval)
 
-    if args.once:
-        app.run_once(autostart_services=False)
-        show_status(app.bot)
-        app.stop()
-        return
-
     try:
+        if args.once:
+            app.run_once(autostart_services=False)
+            show_status(app.bot)
+            app.stop()
+            return
         app.run_forever()
     except RuntimeError as e:
         if str(e) == "single_instance_lock_failed":

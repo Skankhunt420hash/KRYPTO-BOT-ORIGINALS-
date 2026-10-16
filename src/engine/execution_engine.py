@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal
 from src.utils.logger import setup_logger
 
@@ -39,6 +40,8 @@ logger = setup_logger("execution")
 
 # Diese Ausnahmen lösen KEINEN Retry aus (sofort abbrechen)
 _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
+    "EntryControlBlocked",
+    "OrderResultUnavailable",
     "InsufficientFunds",
     "InvalidOrder",
     "AuthenticationError",
@@ -49,6 +52,14 @@ _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
     "InvalidAddress",
     "InvalidNonce",
 )
+
+
+class OrderResultUnavailable(RuntimeError):
+    """Connector returned no order object, so retrying could duplicate a live order."""
+
+
+class EntryControlBlocked(PermissionError):
+    """Runtime control paused new entries while execution was in progress."""
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -259,6 +270,18 @@ class ExecutionEngine:
         intended_price = signal.entry if signal else 0.0
         strategy_name = signal.strategy_name if signal else "unknown"
 
+        ctrl = runtime_control.get_snapshot()
+        if ctrl.get("paused"):
+            return ExecutionResult.rejected(
+                f"entry_{symbol}_{order_side}_{int(time.time() / 60)}",
+                "CONTROL PAUSE: Neue Entries sind pausiert",
+            )
+        if ctrl.get("risk_off"):
+            return ExecutionResult.rejected(
+                f"entry_{symbol}_{order_side}_{int(time.time() / 60)}",
+                "RISK OFF: Neue Entries sind vorübergehend deaktiviert",
+            )
+
         # 1. Fingerprint (5-Minuten-Bucket verhindert Doppel-Orders im gleichen Zyklus)
         fp = _make_fingerprint(symbol, order_side, strategy_name)
         if _is_duplicate(fp, self._fingerprints):
@@ -292,7 +315,9 @@ class ExecutionEngine:
 
         # 4. Order ausführen
         try:
-            order, retries = self._execute_with_retry(symbol, order_side, amount)
+            order, retries = self._execute_with_retry(
+                symbol, order_side, amount, respect_entry_controls=True
+            )
             fill_price = _extract_fill_price(order, intended_price)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
@@ -394,7 +419,12 @@ class ExecutionEngine:
     # ── Interne Methoden ──────────────────────────────────────────────────
 
     def _execute_with_retry(
-        self, symbol: str, side: str, amount: float
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        *,
+        respect_entry_controls: bool = False,
     ) -> Tuple[Dict[str, Any], int]:
         """
         Führt Order mit Retry + exponentiellem Backoff aus.
@@ -410,13 +440,20 @@ class ExecutionEngine:
 
         for attempt in range(max_retries + 1):
             try:
+                if respect_entry_controls:
+                    ctrl = runtime_control.get_snapshot()
+                    if ctrl.get("paused"):
+                        raise EntryControlBlocked("CONTROL PAUSE: Neue Entries sind pausiert")
+                    if ctrl.get("risk_off"):
+                        raise EntryControlBlocked("RISK OFF: Neue Entries sind vorübergehend deaktiviert")
+
                 if side == "buy":
                     order = self._connector.create_market_buy_order(symbol, amount)
                 else:
                     order = self._connector.create_market_sell_order(symbol, amount)
 
                 if not order:
-                    raise ValueError("Leeres Order-Ergebnis vom Connector")
+                    raise OrderResultUnavailable("Leeres Order-Ergebnis vom Connector")
 
                 # TODO: Partial-Fill-Handling für Live-Exchange
                 # status = order.get("status", "unknown")

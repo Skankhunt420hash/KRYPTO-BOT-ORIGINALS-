@@ -292,7 +292,9 @@ class ExecutionEngine:
 
         # 4. Order ausführen
         try:
-            order, retries = self._execute_with_retry(symbol, order_side, amount)
+            order, retries = self._execute_with_retry(
+                symbol, order_side, amount, is_exit=False
+            )
             fill_price = _extract_fill_price(order, intended_price)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
@@ -360,7 +362,9 @@ class ExecutionEngine:
             )
 
         try:
-            order, retries = self._execute_with_retry(symbol, order_side, amount)
+            order, retries = self._execute_with_retry(
+                symbol, order_side, amount, is_exit=True
+            )
             fill_price = _extract_fill_price(order, 0.0)
             self._on_success()
 
@@ -394,7 +398,7 @@ class ExecutionEngine:
     # ── Interne Methoden ──────────────────────────────────────────────────
 
     def _execute_with_retry(
-        self, symbol: str, side: str, amount: float
+        self, symbol: str, side: str, amount: float, *, is_exit: bool = False
     ) -> Tuple[Dict[str, Any], int]:
         """
         Führt Order mit Retry + exponentiellem Backoff aus.
@@ -411,9 +415,13 @@ class ExecutionEngine:
         for attempt in range(max_retries + 1):
             try:
                 if side == "buy":
-                    order = self._connector.create_market_buy_order(symbol, amount)
+                    order = self._connector.create_market_buy_order(
+                        symbol, amount, is_exit=is_exit
+                    )
                 else:
-                    order = self._connector.create_market_sell_order(symbol, amount)
+                    order = self._connector.create_market_sell_order(
+                        symbol, amount, is_exit=is_exit
+                    )
 
                 if not order:
                     raise ValueError("Leeres Order-Ergebnis vom Connector")

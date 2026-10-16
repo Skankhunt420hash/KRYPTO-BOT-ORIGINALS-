@@ -1226,8 +1226,16 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"Position bleibt lokal offen"
                     )
+                    self.health.record_error("error", f"{symbol}: exit_failed")
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason=exit_result.reason,
+                        strategy=position.strategy_name,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 

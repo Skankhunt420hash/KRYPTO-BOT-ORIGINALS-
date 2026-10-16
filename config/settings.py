@@ -497,9 +497,10 @@ class Settings:
     SAFETY_WATCHDOG_RUN_COMPILEALL: bool = _env_bool(
         "SAFETY_WATCHDOG_RUN_COMPILEALL", default=True
     )
-    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (festgefahren)
+    # Paper: risk_off/paused in runtime_recovery.json zurücksetzen (nur explizit opt-in).
+    # Default false, damit manuelle /pause-/risk_off-Sperren nicht beim Watchdog-Poll verloren gehen.
     SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY: bool = _env_bool(
-        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=True
+        "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", default=False
     )
     # Nur wenn ruff installiert und explizit true — vorsichtig
     SAFETY_WATCHDOG_RUFF_AUTOFIX: bool = _env_bool(

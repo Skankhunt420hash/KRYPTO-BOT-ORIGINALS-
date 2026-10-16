@@ -1062,7 +1062,10 @@ class TelegramControlPanel:
             self._send_text(
                 chat_id,
                 "✅ Kill-Switch deaktiviert. "
-                "Hinweis: /resume und /riskon ggf. separat setzen."
+                "Die dateibasierte Sperre ist aufgehoben; "
+                "der Bot nimmt Exits im nächsten Zyklus wieder auf. "
+                "Hinweis: /resume und /riskon ggf. separat setzen "
+                "(Kill-Switch hatte Pause/Risk-Off gesetzt)."
             )
         except Exception as e:
             logger.error(f"Kill-Switch Deaktivierung fehlgeschlagen: {e}")

@@ -740,6 +740,7 @@ class MultiStrategyBot:
                 get_runtime_status=self._runtime_status,
                 request_bot_stop=self.stop,
                 request_bot_start=self._request_start_from_panel,
+                persist_control_state=self._persist_recovery_state,
             ),
         )
 
@@ -1987,6 +1988,9 @@ class MultiStrategyBot:
             return
 
         self._paper_undo_unwanted_control_locks()
+        # Controller schreibt Pause/Risk-Off in die Recovery-Datei (eigener Prozess).
+        # Nach optionalem Paper-Clear erneut einlesen, damit manuelle Sperren greifen.
+        self._restore_control_state_from_file()
 
         # Scorer zu Beginn jedes Zyklus aktualisieren (liest neue Trades aus DB)
         try:

@@ -64,6 +64,10 @@ class PanelCallbacks:
     request_bot_start: Optional[Callable[[], Tuple[bool, str]]] = None
     request_bot_restart: Optional[Callable[[], Tuple[bool, str]]] = None
     get_bot_status: Optional[Callable[[], Dict]] = None
+    # Optional: Bot-Prozess schreibt denselben Recovery-State (inkl. last_signal).
+    # Fehlt der Callback (Controller-Prozess), fällt das Panel auf den
+    # cross-process File-Store zurück.
+    persist_control_state: Optional[Callable[[], None]] = None
 
 
 class TelegramControlPanel:
@@ -996,6 +1000,7 @@ class TelegramControlPanel:
     def _handle_pause(self, chat_id: str) -> None:
         runtime_control.pause_entries()
         runtime_state.update_engine(paused=True)
+        self._persist_control_state()
         runtime_state.append_log("TELEGRAM /pause -> entries pausiert")
         logger.warning("Telegram-Aktion: /pause -> neue Entries pausiert")
         self._notifier.notify_bot_paused("telegram:/pause")
@@ -1007,6 +1012,7 @@ class TelegramControlPanel:
     def _handle_resume(self, chat_id: str) -> None:
         runtime_control.resume_entries()
         runtime_state.update_engine(paused=False)
+        self._persist_control_state()
         runtime_state.append_log("TELEGRAM /resume -> entries aktiviert")
         logger.info("Telegram-Aktion: /resume -> Entries wieder aktiv")
         self._notifier.notify_bot_resumed("telegram:/resume")
@@ -1015,6 +1021,7 @@ class TelegramControlPanel:
     def _handle_riskoff(self, chat_id: str) -> None:
         runtime_control.enable_risk_off()
         runtime_state.update_engine(risk_off=True)
+        self._persist_control_state()
         runtime_state.append_log("TELEGRAM /riskoff -> risk_off aktiv")
         logger.warning("Telegram-Aktion: /riskoff -> Risk-Off aktiviert")
         self._notifier.notify_risk_off(True, "telegram:/riskoff")
@@ -1023,6 +1030,7 @@ class TelegramControlPanel:
     def _handle_riskon(self, chat_id: str) -> None:
         runtime_control.disable_risk_off()
         runtime_state.update_engine(risk_off=False)
+        self._persist_control_state()
         runtime_state.append_log("TELEGRAM /riskon -> risk_off deaktiviert")
         logger.info("Telegram-Aktion: /riskon -> Risk-Off deaktiviert")
         self._notifier.notify_risk_off(False, "telegram:/riskon")
@@ -1039,6 +1047,7 @@ class TelegramControlPanel:
             runtime_control.pause_entries()
             runtime_control.enable_risk_off()
             runtime_state.update_engine(paused=True, risk_off=True)
+            self._persist_control_state()
             runtime_state.append_log("TELEGRAM /killswitch -> kill switch aktiviert")
             logger.error("Telegram-Aktion: /killswitch -> KILL SWITCH AKTIV")
             self._notifier.notify_bot_paused("telegram:/killswitch")
@@ -1051,6 +1060,31 @@ class TelegramControlPanel:
         except Exception as e:
             logger.error(f"Kill-Switch Aktivierung fehlgeschlagen: {e}")
             self._send_text(chat_id, "⚠️ Kill-Switch konnte nicht aktiviert werden.")
+
+    def _persist_control_state(self) -> None:
+        """
+        Sofortige Persistenz von Pause/Risk-Off.
+        - Mit Bot-Callback: vollständiger Recovery-State des Bot-Prozesses
+        - Ohne Callback (Controller): Merge in STATE_RECOVERY_FILE für den Child-Bot
+        """
+        callback = self._callbacks.persist_control_state
+        if callback is not None:
+            try:
+                callback()
+                return
+            except Exception as e:
+                logger.error(
+                    "Control-State Callback-Persistenz fehlgeschlagen: %s", e
+                )
+        try:
+            from src.engine.control_state_store import persist_runtime_control_to_recovery
+
+            if not persist_runtime_control_to_recovery():
+                logger.error(
+                    "Control-State konnte nicht in Recovery-Datei geschrieben werden."
+                )
+        except Exception as e:
+            logger.error("Control-State Persistenz fehlgeschlagen: %s", e)
 
     def _handle_killswitch_off(self, chat_id: str) -> None:
         path = Path(settings.KILL_SWITCH_FILE)

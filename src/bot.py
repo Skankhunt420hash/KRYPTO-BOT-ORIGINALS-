@@ -826,7 +826,9 @@ class MultiStrategyBot:
                 "brain": snap.get("brain") or {},
                 "updated_at": snap.get("updated_at"),
             }
-            path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+            tmp = path.with_name(f".{path.name}.{os.getpid()}.tmp")
+            tmp.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+            os.replace(tmp, path)
         except Exception as e:
             logger.warning(f"Recovery-State konnte nicht gespeichert werden: {e}")
 
@@ -1226,8 +1228,15 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"Position bleibt lokal offen"
                     )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason=exit_result.reason,
+                        strategy=position.strategy_name,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -1804,9 +1813,15 @@ class MultiStrategyBot:
         if is_live and settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+                f"{symbol} – Live-Order wird blockiert"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="execution_blocked",
+                reason="futures_live_short_not_implemented",
+                strategy=signal.strategy_name,
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(

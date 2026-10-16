@@ -1,6 +1,7 @@
 import json
 import os
 import time
+from dataclasses import replace
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 from config.settings import settings
@@ -1158,7 +1159,7 @@ class MultiStrategyBot:
             logger.error(f"Live-Kapital-Snapshot fehlgeschlagen für {symbol}: {e}")
             return 0.0, 0.0
 
-    def _process_pair(self, symbol: str):
+    def _process_pair(self, symbol: str, allow_entries: bool = True):
         """Führt den vollständigen Analyse- und Ausführungszyklus für ein Pair durch."""
         if symbol in self._recovery_blocked_symbols:
             logger.warning(
@@ -1226,8 +1227,27 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"Position bleibt lokal offen"
                     )
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_order_failed",
+                        reason=exit_result.reason,
+                        strategy=position.strategy_name,
+                    )
+                    self._log_decision_cycle(
+                        symbol=symbol,
+                        regime="EXIT_ORDER_FAILED",
+                        ranking=[],
+                        chosen_strategy=position.strategy_name,
+                        signal_score=0.0,
+                        risk_decision="exit_order_failed",
+                        allow_trade=False,
+                        reject_reason=exit_result.reason,
+                        last_decision_reason=exit_result.reason,
+                        market_context=market_ctx,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -1288,6 +1308,27 @@ class MultiStrategyBot:
                 allow_trade=False,
                 reject_reason="open_position_exists",
                 last_decision_reason="open_position_exists",
+                market_context=market_ctx,
+            )
+            return
+
+        if not allow_entries:
+            self._record_last_decision(
+                symbol=symbol,
+                decision="entries_blocked",
+                reason="entry_gate_disabled",
+                strategy=self._active_strategy_runtime,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime="ENTRY_GATE_DISABLED",
+                ranking=[],
+                chosen_strategy="",
+                signal_score=0.0,
+                risk_decision="entries_blocked",
+                allow_trade=False,
+                reject_reason="entry_gate_disabled",
+                last_decision_reason="entry_gate_disabled",
                 market_context=market_ctx,
             )
             return
@@ -1698,7 +1739,9 @@ class MultiStrategyBot:
                 )
                 return
 
-            self.risk.open_with_signal(best, amount)
+            actual_entry = exec_result.fill_price if exec_result.fill_price > 0 else best.entry
+            filled_signal = replace(best, entry=actual_entry)
+            self.risk.open_with_signal(filled_signal, amount)
             _snap = self._last_brain_snapshot or {}
             _bs_raw = _snap.get("last_signal_score")
             _brain_f = float(_bs_raw) if _bs_raw is not None else None
@@ -1712,7 +1755,7 @@ class MultiStrategyBot:
             logger.info(
                 f"[bold green]LONG ERÖFFNET[/bold green] {symbol} | "
                 f"Strategie: {best.strategy_name} | "
-                f"Einstieg: {best.entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
+                f"Einstieg: {actual_entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
                 f"Menge: {amount:.6f} | SL: {best.stop_loss:.4f} | "
                 f"TP: {best.take_profit:.4f} | RR: {best.rr:.2f} | "
                 f"Konfidenz: {best.confidence:.0f}/100 | "
@@ -1724,7 +1767,7 @@ class MultiStrategyBot:
                 timeframe=best.timeframe,
                 strategy_name=best.strategy_name,
                 side=best.side.value,
-                entry_price=best.entry,
+                entry_price=actual_entry,
                 stop_loss=best.stop_loss,
                 take_profit=best.take_profit,
                 position_size=amount,
@@ -1741,7 +1784,7 @@ class MultiStrategyBot:
             self.tg.notify_trade_opened(
                 symbol=symbol,
                 side="long",
-                entry=best.entry,
+                entry=actual_entry,
                 sl=best.stop_loss,
                 tp=best.take_profit,
                 rr=best.rr,
@@ -1804,9 +1847,27 @@ class MultiStrategyBot:
         if is_live and settings.FUTURES_MODE:
             logger.warning(
                 f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+                f"{symbol} – Live-Order blockiert"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="blocked_live_short",
+                reason="live_futures_short_not_implemented",
+                strategy=signal.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=signal.regime or "UNKNOWN",
+                ranking=list((self._last_brain_snapshot or {}).get("last_strategy_ranking") or []),
+                chosen_strategy=signal.strategy_name,
+                signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0) or 0.0),
+                risk_decision="live_short_block",
+                allow_trade=False,
+                reject_reason="live_futures_short_not_implemented",
+                last_decision_reason="live_futures_short_not_implemented",
+                market_context={},
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(
@@ -1840,7 +1901,9 @@ class MultiStrategyBot:
             )
             return
 
-        self.risk.open_with_signal(signal, amount)
+        actual_entry = exec_result.fill_price if exec_result.fill_price > 0 else signal.entry
+        filled_signal = replace(signal, entry=actual_entry)
+        self.risk.open_with_signal(filled_signal, amount)
         _snap_s = self._last_brain_snapshot or {}
         _bs_raw_s = _snap_s.get("last_signal_score")
         _brain_fs = float(_bs_raw_s) if _bs_raw_s is not None else None
@@ -1854,7 +1917,7 @@ class MultiStrategyBot:
         logger.info(
             f"[bold red]SHORT ERÖFFNET [PAPER][/bold red] {symbol} | "
             f"Strategie: {signal.strategy_name} | "
-            f"Einstieg: {signal.entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
+            f"Einstieg: {actual_entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
             f"Menge: {amount:.6f} | SL: {signal.stop_loss:.4f} (oben) | "
             f"TP: {signal.take_profit:.4f} (unten) | "
             f"RR: {signal.rr:.2f} | Konfidenz: {signal.confidence:.0f}/100 | "
@@ -1866,7 +1929,7 @@ class MultiStrategyBot:
             timeframe=signal.timeframe,
             strategy_name=signal.strategy_name,
             side=signal.side.value,
-            entry_price=signal.entry,
+            entry_price=actual_entry,
             stop_loss=signal.stop_loss,
             take_profit=signal.take_profit,
             position_size=amount,
@@ -1883,7 +1946,7 @@ class MultiStrategyBot:
         self.tg.notify_trade_opened(
             symbol=symbol,
             side="short",
-            entry=signal.entry,
+            entry=actual_entry,
             sl=signal.stop_loss,
             tp=signal.take_profit,
             rr=signal.rr,
@@ -1960,6 +2023,13 @@ class MultiStrategyBot:
                     "strategy": self._active_strategy_runtime,
                 }
             )
+            for symbol in self.pairs:
+                try:
+                    self._process_pair(symbol, allow_entries=False)
+                except Exception as e:
+                    logger.error(f"Exit-Prüfung trotz Startup-Gate fehlgeschlagen bei {symbol}: {e}")
+                    self.health.record_error("error", f"{symbol}: {e}")
+            self._sync_runtime_state()
             return
 
         # Heartbeat aktualisieren (Health Monitor Liveness-Tracking)
@@ -1984,6 +2054,13 @@ class MultiStrategyBot:
                     "strategy": self._active_strategy_runtime,
                 }
             )
+            for symbol in self.pairs:
+                try:
+                    self._process_pair(symbol, allow_entries=False)
+                except Exception as e:
+                    logger.error(f"Exit-Prüfung trotz Execution-Pause fehlgeschlagen bei {symbol}: {e}")
+                    self.health.record_error("error", f"{symbol}: {e}")
+            self._sync_runtime_state()
             return
 
         self._paper_undo_unwanted_control_locks()

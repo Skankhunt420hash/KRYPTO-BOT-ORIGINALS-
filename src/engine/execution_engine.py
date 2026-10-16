@@ -382,7 +382,7 @@ class ExecutionEngine:
 
         except Exception as e:
             self._on_failure(str(e))
-            reason = f"EXIT FEHLER (Position wird lokal geschlossen): {type(e).__name__}: {str(e)[:120]}"
+            reason = f"EXIT FEHLER (Position bleibt offen): {type(e).__name__}: {str(e)[:120]}"
             logger.error(f"[red]{reason}[/red]")
             if self._tg:
                 self._tg.notify_error(

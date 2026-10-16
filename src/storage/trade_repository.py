@@ -361,14 +361,20 @@ class TradeRepository:
             logger.error(f"[red]DB-Fehler get_recent_trades:[/red] {e}")
             return []
 
-    def get_open_trades(self, limit: int = 200) -> List[dict]:
+    def get_open_trades(
+        self, limit: int = 200, *, paper_mode: Optional[bool] = None
+    ) -> List[dict]:
         """
-        Liefert aktuell offene Trades (status='open') für den aktuellen Modus
-        (paper_mode passend zu Settings) – neueste zuerst.
+        Liefert aktuell offene Trades (status='open') – neueste zuerst.
+
+        Standard: paper_mode passend zu Settings (aktueller TRADING_MODE).
+        Explizites paper_mode=True/False erlaubt Cross-Mode-Checks
+        (z. B. Paper-Start mit noch offenen Live-DB-Trades → fail-closed).
         """
         if not self.available:
             return []
         try:
+            mode_flag = int(_IS_PAPER if paper_mode is None else bool(paper_mode))
             sql = """
                 SELECT * FROM trades
                 WHERE status = 'open' AND paper_mode = ?
@@ -379,7 +385,7 @@ class TradeRepository:
             if conn is None:
                 return []
             try:
-                rows = conn.execute(sql, (int(_IS_PAPER), limit)).fetchall()
+                rows = conn.execute(sql, (mode_flag, limit)).fetchall()
                 return [dict(row) for row in rows]
             finally:
                 conn.close()

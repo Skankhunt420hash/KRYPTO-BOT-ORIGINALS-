@@ -15,7 +15,11 @@ from src.engine.brain import IntelligenceBrain
 from src.engine.risk_engine import RiskEngine
 from src.engine.performance_tracker import PerformanceTracker
 from src.engine.strategy_scorer import StrategyScorer
-from src.engine.execution_engine import ExecutionEngine
+from src.engine.execution_engine import (
+    ExecutionEngine,
+    resolve_entry_fill,
+    resolve_order_fill,
+)
 from src.engine.health_monitor import HealthMonitor
 from src.engine.runtime_control import runtime_control
 from src.engine.runtime_state import runtime_state
@@ -258,7 +262,10 @@ class TradingBot:
                     return
             order = self.exchange.create_market_buy_order(symbol, amount)
             if order:
-                pos = self.risk.open_position(symbol, current_price, amount)
+                fill_price, fill_amount = resolve_order_fill(
+                    order, price_fallback=current_price, amount_fallback=amount
+                )
+                pos = self.risk.open_position(symbol, fill_price, fill_amount)
                 # DB speichern
                 if pos:
                     rr = (pos.take_profit - pos.entry_price) / max(
@@ -281,10 +288,10 @@ class TradingBot:
                         timeframe=settings.TIMEFRAME,
                         strategy_name=self.strategy.name,
                         side="long",
-                        entry_price=current_price,
+                        entry_price=fill_price,
                         stop_loss=pos.stop_loss,
                         take_profit=pos.take_profit,
-                        position_size=amount,
+                        position_size=fill_amount,
                         rr_planned=round(rr, 2),
                         confidence=round(signal.confidence * 100, 1),
                         regime="UNKNOWN",
@@ -299,11 +306,11 @@ class TradingBot:
                     self.tg.notify_trade_opened(
                         symbol=symbol,
                         side="long",
-                        entry=current_price,
+                        entry=fill_price,
                         sl=pos.stop_loss,
                         tp=pos.take_profit,
                         rr=round(rr, 2),
-                        amount=amount,
+                        amount=fill_amount,
                         strategy=self.strategy.name,
                         confidence=conf_pct,
                         regime="UNKNOWN",
@@ -1698,40 +1705,44 @@ class MultiStrategyBot:
                 )
                 return
 
-            self.risk.open_with_signal(best, amount)
+            # Lokale Position/DB an Exchange-Fill koppeln (Precision/Partial-Fill)
+            filled_signal, fill_amount, fill_price = resolve_entry_fill(
+                best, exec_result, amount
+            )
+            self.risk.open_with_signal(filled_signal, fill_amount)
             _snap = self._last_brain_snapshot or {}
             _bs_raw = _snap.get("last_signal_score")
             _brain_f = float(_bs_raw) if _bs_raw is not None else None
             _wc, _wl = effective_entry_win_chance_pct(
-                best.confidence,
+                filled_signal.confidence,
                 brain_score=_brain_f,
-                rr=best.rr,
-                strategy_name=best.strategy_name,
+                rr=filled_signal.rr,
+                strategy_name=filled_signal.strategy_name,
                 perf_tracker=self.perf_tracker,
             )
             logger.info(
                 f"[bold green]LONG ERÖFFNET[/bold green] {symbol} | "
-                f"Strategie: {best.strategy_name} | "
-                f"Einstieg: {best.entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
-                f"Menge: {amount:.6f} | SL: {best.stop_loss:.4f} | "
-                f"TP: {best.take_profit:.4f} | RR: {best.rr:.2f} | "
-                f"Konfidenz: {best.confidence:.0f}/100 | "
+                f"Strategie: {filled_signal.strategy_name} | "
+                f"Einstieg: {fill_price:.4f} | Fill: {fill_price:.4f} | "
+                f"Menge: {fill_amount:.6f} | SL: {filled_signal.stop_loss:.4f} | "
+                f"TP: {filled_signal.take_profit:.4f} | RR: {filled_signal.rr:.2f} | "
+                f"Konfidenz: {filled_signal.confidence:.0f}/100 | "
                 f"Gewinnchance(effektiv): {_wc:.0f}% ({_wl}) | "
                 f"Dev: {exec_result.deviation_pct:.3f}%"
             )
             trade_id = self.repo.save_open_trade(
                 symbol=symbol,
-                timeframe=best.timeframe,
-                strategy_name=best.strategy_name,
-                side=best.side.value,
-                entry_price=best.entry,
-                stop_loss=best.stop_loss,
-                take_profit=best.take_profit,
-                position_size=amount,
-                rr_planned=best.rr,
-                confidence=best.confidence,
-                regime=best.regime,
-                reason_open=best.reason,
+                timeframe=filled_signal.timeframe,
+                strategy_name=filled_signal.strategy_name,
+                side=filled_signal.side.value,
+                entry_price=fill_price,
+                stop_loss=filled_signal.stop_loss,
+                take_profit=filled_signal.take_profit,
+                position_size=fill_amount,
+                rr_planned=filled_signal.rr,
+                confidence=filled_signal.confidence,
+                regime=filled_signal.regime,
+                reason_open=filled_signal.reason,
                 signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0)),
                 risk_state_at_entry=self._risk_state_at_entry_snapshot(),
                 order_id=exec_result.order.get("id", ""),
@@ -1741,14 +1752,14 @@ class MultiStrategyBot:
             self.tg.notify_trade_opened(
                 symbol=symbol,
                 side="long",
-                entry=best.entry,
-                sl=best.stop_loss,
-                tp=best.take_profit,
-                rr=best.rr,
-                amount=amount,
-                strategy=best.strategy_name,
-                confidence=best.confidence,
-                regime=best.regime,
+                entry=fill_price,
+                sl=filled_signal.stop_loss,
+                tp=filled_signal.take_profit,
+                rr=filled_signal.rr,
+                amount=fill_amount,
+                strategy=filled_signal.strategy_name,
+                confidence=filled_signal.confidence,
+                regime=filled_signal.regime,
                 is_paper=settings.TRADING_MODE == "paper",
                 brain_score=_brain_f,
             )
@@ -1756,26 +1767,26 @@ class MultiStrategyBot:
                 event="opened",
                 symbol=symbol,
                 side="long",
-                strategy=best.strategy_name,
+                strategy=filled_signal.strategy_name,
                 pnl=None,
-                reason=best.reason,
+                reason=filled_signal.reason,
             )
             self._record_last_decision(
                 symbol=symbol,
                 decision="entry_opened",
-                reason=best.reason,
-                strategy=best.strategy_name,
+                reason=filled_signal.reason,
+                strategy=filled_signal.strategy_name,
             )
             self._log_decision_cycle(
                 symbol=symbol,
                 regime=regime.value,
                 ranking=ranking,
-                chosen_strategy=best.strategy_name,
+                chosen_strategy=filled_signal.strategy_name,
                 signal_score=signal_score,
                 risk_decision="allow_trade",
                 allow_trade=True,
                 reject_reason="",
-                last_decision_reason=best.reason,
+                last_decision_reason=filled_signal.reason,
                 market_context=market_ctx,
             )
 
@@ -1840,40 +1851,44 @@ class MultiStrategyBot:
             )
             return
 
-        self.risk.open_with_signal(signal, amount)
+        # Lokale Position/DB an Exchange-Fill koppeln (Precision/Partial-Fill)
+        filled_signal, fill_amount, fill_price = resolve_entry_fill(
+            signal, exec_result, amount
+        )
+        self.risk.open_with_signal(filled_signal, fill_amount)
         _snap_s = self._last_brain_snapshot or {}
         _bs_raw_s = _snap_s.get("last_signal_score")
         _brain_fs = float(_bs_raw_s) if _bs_raw_s is not None else None
         _wcs, _wls = effective_entry_win_chance_pct(
-            signal.confidence,
+            filled_signal.confidence,
             brain_score=_brain_fs,
-            rr=signal.rr,
-            strategy_name=signal.strategy_name,
+            rr=filled_signal.rr,
+            strategy_name=filled_signal.strategy_name,
             perf_tracker=self.perf_tracker,
         )
         logger.info(
             f"[bold red]SHORT ERÖFFNET [PAPER][/bold red] {symbol} | "
-            f"Strategie: {signal.strategy_name} | "
-            f"Einstieg: {signal.entry:.4f} | Fill: {exec_result.fill_price:.4f} | "
-            f"Menge: {amount:.6f} | SL: {signal.stop_loss:.4f} (oben) | "
-            f"TP: {signal.take_profit:.4f} (unten) | "
-            f"RR: {signal.rr:.2f} | Konfidenz: {signal.confidence:.0f}/100 | "
+            f"Strategie: {filled_signal.strategy_name} | "
+            f"Einstieg: {fill_price:.4f} | Fill: {fill_price:.4f} | "
+            f"Menge: {fill_amount:.6f} | SL: {filled_signal.stop_loss:.4f} (oben) | "
+            f"TP: {filled_signal.take_profit:.4f} (unten) | "
+            f"RR: {filled_signal.rr:.2f} | Konfidenz: {filled_signal.confidence:.0f}/100 | "
             f"Gewinnchance(effektiv): {_wcs:.0f}% ({_wls}) | "
             f"Dev: {exec_result.deviation_pct:.3f}%"
         )
         trade_id = self.repo.save_open_trade(
             symbol=symbol,
-            timeframe=signal.timeframe,
-            strategy_name=signal.strategy_name,
-            side=signal.side.value,
-            entry_price=signal.entry,
-            stop_loss=signal.stop_loss,
-            take_profit=signal.take_profit,
-            position_size=amount,
-            rr_planned=signal.rr,
-            confidence=signal.confidence,
-            regime=signal.regime,
-            reason_open=signal.reason,
+            timeframe=filled_signal.timeframe,
+            strategy_name=filled_signal.strategy_name,
+            side=filled_signal.side.value,
+            entry_price=fill_price,
+            stop_loss=filled_signal.stop_loss,
+            take_profit=filled_signal.take_profit,
+            position_size=fill_amount,
+            rr_planned=filled_signal.rr,
+            confidence=filled_signal.confidence,
+            regime=filled_signal.regime,
+            reason_open=filled_signal.reason,
             signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0)),
             risk_state_at_entry=self._risk_state_at_entry_snapshot(),
             order_id=exec_result.order.get("id", ""),
@@ -1883,14 +1898,14 @@ class MultiStrategyBot:
         self.tg.notify_trade_opened(
             symbol=symbol,
             side="short",
-            entry=signal.entry,
-            sl=signal.stop_loss,
-            tp=signal.take_profit,
-            rr=signal.rr,
-            amount=amount,
-            strategy=signal.strategy_name,
-            confidence=signal.confidence,
-            regime=signal.regime,
+            entry=fill_price,
+            sl=filled_signal.stop_loss,
+            tp=filled_signal.take_profit,
+            rr=filled_signal.rr,
+            amount=fill_amount,
+            strategy=filled_signal.strategy_name,
+            confidence=filled_signal.confidence,
+            regime=filled_signal.regime,
             is_paper=settings.TRADING_MODE == "paper",
             brain_score=_brain_fs,
         )
@@ -1898,26 +1913,26 @@ class MultiStrategyBot:
             event="opened",
             symbol=symbol,
             side="short",
-            strategy=signal.strategy_name,
+            strategy=filled_signal.strategy_name,
             pnl=None,
-            reason=signal.reason,
+            reason=filled_signal.reason,
         )
         self._record_last_decision(
             symbol=symbol,
             decision="entry_opened",
-            reason=signal.reason,
-            strategy=signal.strategy_name,
+            reason=filled_signal.reason,
+            strategy=filled_signal.strategy_name,
         )
         self._log_decision_cycle(
             symbol=symbol,
-            regime=signal.regime or "UNKNOWN",
+            regime=filled_signal.regime or "UNKNOWN",
             ranking=list((self._last_brain_snapshot or {}).get("last_strategy_ranking") or []),
-            chosen_strategy=signal.strategy_name,
+            chosen_strategy=filled_signal.strategy_name,
             signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0) or 0.0),
             risk_decision="allow_trade",
             allow_trade=True,
             reject_reason="",
-            last_decision_reason=signal.reason,
+            last_decision_reason=filled_signal.reason,
             market_context={},
         )
 

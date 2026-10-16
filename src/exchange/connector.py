@@ -10,6 +10,43 @@ from src.utils.logger import setup_logger
 logger = setup_logger("exchange")
 
 
+def normalize_trading_symbol(symbol: str) -> str:
+    """
+    Vereinheitlicht Exchange-Symbole für Vergleiche.
+    Futures-ccxt nutzt oft 'BTC/USDT:USDT' während der Bot 'BTC/USDT' speichert.
+    """
+    s = str(symbol or "").strip()
+    if not s:
+        return ""
+    if ":" in s:
+        s = s.split(":", 1)[0].strip()
+    return s
+
+
+def is_open_exchange_position(position: Dict[str, Any]) -> bool:
+    """
+    True nur bei echter Exposure. ccxt/Binance-positionRisk liefert oft
+    Hunderte Einträge mit contracts/positionAmt == 0.
+    """
+    if not isinstance(position, dict):
+        return False
+    for key in ("contracts", "size", "amount", "notional"):
+        try:
+            if abs(float(position.get(key) or 0.0)) > 0.0:
+                return True
+        except (TypeError, ValueError):
+            continue
+    info = position.get("info") or {}
+    if isinstance(info, dict):
+        for key in ("positionAmt", "position_amt", "contracts"):
+            try:
+                if abs(float(info.get(key) or 0.0)) > 0.0:
+                    return True
+            except (TypeError, ValueError):
+                continue
+    return False
+
+
 class ExchangeConnector:
     """
     Robuste Exchange-Schicht mit klarer Trennung:
@@ -182,10 +219,13 @@ class ExchangeConnector:
         if not hasattr(self._exchange, "fetch_positions"):
             return []
         try:
-            return self._call_with_retry(
+            rows = self._call_with_retry(
                 lambda: self._exchange.fetch_positions(symbols=symbols),
                 op="fetch_positions",
             ) or []
+            # Nur echte Exposure behalten — sonst markiert Recovery Null-Rows als Orphans
+            # und blockiert den gesamten Bot-Zyklus (inkl. Exits).
+            return [p for p in rows if is_open_exchange_position(p)]
         except Exception as e:
             msg = str(e).lower()
             if "apikey" in msg or "authentication" in msg or "requires" in msg:

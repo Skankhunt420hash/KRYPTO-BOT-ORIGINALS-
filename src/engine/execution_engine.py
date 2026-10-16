@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal
 from src.utils.logger import setup_logger
 
@@ -39,6 +40,8 @@ logger = setup_logger("execution")
 
 # Diese Ausnahmen lösen KEINEN Retry aus (sofort abbrechen)
 _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
+    "EntryBlockedError",
+    "OrderResultUnavailable",
     "InsufficientFunds",
     "InvalidOrder",
     "AuthenticationError",
@@ -49,6 +52,14 @@ _NON_RETRYABLE_PATTERNS: Tuple[str, ...] = (
     "InvalidAddress",
     "InvalidNonce",
 )
+
+
+class EntryBlockedError(RuntimeError):
+    """Entry wurde nach Freigabe durch eine Laufzeit-Sperre gestoppt."""
+
+
+class OrderResultUnavailable(RuntimeError):
+    """Connector lieferte keinen sicheren Orderstatus; nie blind wiederholen."""
 
 
 def _is_retryable(exc: Exception) -> bool:
@@ -284,15 +295,32 @@ class ExecutionEngine:
             self._check_rejection_limit()
             return ExecutionResult.rejected(fp, dev_reason, deviation_pct=deviation_pct)
 
-        # 3. Circuit Breaker / Emergency Pause
+        # 3. Runtime-Control ist die letzte Entry-Sperre vor dem Connector.
+        ctrl = runtime_control.get_snapshot()
+        if ctrl.get("paused"):
+            reason = "CONTROL PAUSE: Neue Entries sind pausiert"
+            logger.warning(f"[yellow]{reason}[/yellow]")
+            self._consecutive_rejections += 1
+            self._check_rejection_limit()
+            return ExecutionResult.rejected(fp, reason, deviation_pct=deviation_pct)
+        if ctrl.get("risk_off"):
+            reason = "RISK OFF: Neue Entries sind vorübergehend deaktiviert"
+            logger.warning(f"[yellow]{reason}[/yellow]")
+            self._consecutive_rejections += 1
+            self._check_rejection_limit()
+            return ExecutionResult.rejected(fp, reason, deviation_pct=deviation_pct)
+
+        # 4. Circuit Breaker / Emergency Pause
         if not self.is_healthy:
             status = self.get_status()
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             return ExecutionResult.rejected(fp, reason)
 
-        # 4. Order ausführen
+        # 5. Order ausführen
         try:
-            order, retries = self._execute_with_retry(symbol, order_side, amount)
+            order, retries = self._execute_with_retry(
+                symbol, order_side, amount, entry_order=True
+            )
             fill_price = _extract_fill_price(order, intended_price)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
@@ -382,7 +410,7 @@ class ExecutionEngine:
 
         except Exception as e:
             self._on_failure(str(e))
-            reason = f"EXIT FEHLER (Position wird lokal geschlossen): {type(e).__name__}: {str(e)[:120]}"
+            reason = f"EXIT FEHLER (Position bleibt lokal offen): {type(e).__name__}: {str(e)[:120]}"
             logger.error(f"[red]{reason}[/red]")
             if self._tg:
                 self._tg.notify_error(
@@ -394,7 +422,7 @@ class ExecutionEngine:
     # ── Interne Methoden ──────────────────────────────────────────────────
 
     def _execute_with_retry(
-        self, symbol: str, side: str, amount: float
+        self, symbol: str, side: str, amount: float, *, entry_order: bool = False
     ) -> Tuple[Dict[str, Any], int]:
         """
         Führt Order mit Retry + exponentiellem Backoff aus.
@@ -410,13 +438,25 @@ class ExecutionEngine:
 
         for attempt in range(max_retries + 1):
             try:
+                if entry_order:
+                    ctrl = runtime_control.get_snapshot()
+                    if ctrl.get("paused"):
+                        raise EntryBlockedError(
+                            "CONTROL PAUSE: Neue Entries sind pausiert"
+                        )
+                    if ctrl.get("risk_off"):
+                        raise EntryBlockedError(
+                            "RISK OFF: Neue Entries sind vorübergehend deaktiviert"
+                        )
                 if side == "buy":
                     order = self._connector.create_market_buy_order(symbol, amount)
                 else:
                     order = self._connector.create_market_sell_order(symbol, amount)
 
                 if not order:
-                    raise ValueError("Leeres Order-Ergebnis vom Connector")
+                    raise OrderResultUnavailable(
+                        "Leeres Order-Ergebnis vom Connector; Exchange-Status unklar"
+                    )
 
                 # TODO: Partial-Fill-Handling für Live-Exchange
                 # status = order.get("status", "unknown")

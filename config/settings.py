@@ -482,7 +482,7 @@ class Settings:
     SAFETY_WATCHDOG_LOG_TAIL_LINES: int = int(
         os.getenv("SAFETY_WATCHDOG_LOG_TAIL_LINES", 500)
     )
-    # Optional: eigene Log-Datei (leer = SUPERVISOR_BOT_LOGFILE). Bei systemd+journalctl ggf. leer lassen und nur Prozess-Check nutzen.
+    # Optional: eigene Log-Datei. Unset = SUPERVISOR_BOT_LOGFILE; explizit leer = Log-Check aus.
     SAFETY_WATCHDOG_LOG_FILE: str = os.getenv("SAFETY_WATCHDOG_LOG_FILE", "").strip()
     SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD: int = int(
         os.getenv("SAFETY_WATCHDOG_ERROR_LINE_THRESHOLD", 20)

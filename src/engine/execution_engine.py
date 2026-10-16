@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal
 from src.utils.logger import setup_logger
 
@@ -259,7 +260,18 @@ class ExecutionEngine:
         intended_price = signal.entry if signal else 0.0
         strategy_name = signal.strategy_name if signal else "unknown"
 
-        # 1. Fingerprint (5-Minuten-Bucket verhindert Doppel-Orders im gleichen Zyklus)
+        # 1. Runtime-Control direkt vor der Order: Entries fail-closed, Exits nutzen execute_exit().
+        ctrl = runtime_control.get_snapshot()
+        if ctrl.get("paused"):
+            reason = "CONTROL PAUSE: Neue Entries sind pausiert"
+            logger.warning(f"[yellow]{reason}[/yellow]")
+            return ExecutionResult.rejected("", reason)
+        if ctrl.get("risk_off"):
+            reason = "RISK OFF: Neue Entries sind vorübergehend deaktiviert"
+            logger.warning(f"[yellow]{reason}[/yellow]")
+            return ExecutionResult.rejected("", reason)
+
+        # 2. Fingerprint (5-Minuten-Bucket verhindert Doppel-Orders im gleichen Zyklus)
         fp = _make_fingerprint(symbol, order_side, strategy_name)
         if _is_duplicate(fp, self._fingerprints):
             reason = f"DUPLICATE ORDER BLOCKED: {fp}"
@@ -268,7 +280,7 @@ class ExecutionEngine:
             self._check_rejection_limit()
             return ExecutionResult.rejected(fp, reason)
 
-        # 2. Preisabweichungs-Prüfung
+        # 3. Preisabweichungs-Prüfung
         price_ok, deviation_pct, dev_reason = self._check_price_deviation(
             symbol, intended_price
         )
@@ -284,13 +296,13 @@ class ExecutionEngine:
             self._check_rejection_limit()
             return ExecutionResult.rejected(fp, dev_reason, deviation_pct=deviation_pct)
 
-        # 3. Circuit Breaker / Emergency Pause
+        # 4. Circuit Breaker / Emergency Pause
         if not self.is_healthy:
             status = self.get_status()
             reason = status.get("pause_reason") or f"Circuit Breaker: {status['circuit_state']}"
             return ExecutionResult.rejected(fp, reason)
 
-        # 4. Order ausführen
+        # 5. Order ausführen
         try:
             order, retries = self._execute_with_retry(symbol, order_side, amount)
             fill_price = _extract_fill_price(order, intended_price)
@@ -382,7 +394,7 @@ class ExecutionEngine:
 
         except Exception as e:
             self._on_failure(str(e))
-            reason = f"EXIT FEHLER (Position wird lokal geschlossen): {type(e).__name__}: {str(e)[:120]}"
+            reason = f"EXIT FEHLER (Position bleibt lokal offen): {type(e).__name__}: {str(e)[:120]}"
             logger.error(f"[red]{reason}[/red]")
             if self._tg:
                 self._tg.notify_error(

@@ -28,6 +28,7 @@ from enum import Enum
 from typing import Any, Dict, List, Optional, Tuple
 
 from config.settings import settings
+from src.engine.runtime_control import runtime_control
 from src.strategies.signal import EnhancedSignal
 from src.utils.logger import setup_logger
 
@@ -59,6 +60,10 @@ def _is_retryable(exc: Exception) -> bool:
         if pattern in exc_type or pattern in exc_msg:
             return False
     return True
+
+
+class RuntimeEntryBlocked(Exception):
+    """Entry wurde durch Laufzeit-Pause/Risk-Off vor dem Connector geblockt."""
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -261,6 +266,11 @@ class ExecutionEngine:
 
         # 1. Fingerprint (5-Minuten-Bucket verhindert Doppel-Orders im gleichen Zyklus)
         fp = _make_fingerprint(symbol, order_side, strategy_name)
+        block_reason = _runtime_entry_block_reason()
+        if block_reason:
+            logger.warning(f"[yellow]{block_reason}[/yellow]")
+            return ExecutionResult.rejected(fp, block_reason)
+
         if _is_duplicate(fp, self._fingerprints):
             reason = f"DUPLICATE ORDER BLOCKED: {fp}"
             logger.warning(f"[yellow]{reason}[/yellow]")
@@ -292,7 +302,9 @@ class ExecutionEngine:
 
         # 4. Order ausführen
         try:
-            order, retries = self._execute_with_retry(symbol, order_side, amount)
+            order, retries = self._execute_with_retry(
+                symbol, order_side, amount, enforce_entry_control=True
+            )
             fill_price = _extract_fill_price(order, intended_price)
             actual_dev = (
                 abs(fill_price - intended_price) / intended_price * 100
@@ -333,6 +345,11 @@ class ExecutionEngine:
                 fingerprint=fp,
                 reason="",
             )
+
+        except RuntimeEntryBlocked as e:
+            reason = str(e)
+            logger.warning(f"[yellow]{reason}[/yellow]")
+            return ExecutionResult.rejected(fp, reason)
 
         except Exception as e:
             self._on_failure(str(e))
@@ -394,7 +411,12 @@ class ExecutionEngine:
     # ── Interne Methoden ──────────────────────────────────────────────────
 
     def _execute_with_retry(
-        self, symbol: str, side: str, amount: float
+        self,
+        symbol: str,
+        side: str,
+        amount: float,
+        *,
+        enforce_entry_control: bool = False,
     ) -> Tuple[Dict[str, Any], int]:
         """
         Führt Order mit Retry + exponentiellem Backoff aus.
@@ -409,6 +431,10 @@ class ExecutionEngine:
         last_exc: Optional[Exception] = None
 
         for attempt in range(max_retries + 1):
+            if enforce_entry_control:
+                block_reason = _runtime_entry_block_reason()
+                if block_reason:
+                    raise RuntimeEntryBlocked(block_reason)
             try:
                 if side == "buy":
                     order = self._connector.create_market_buy_order(symbol, amount)
@@ -566,6 +592,16 @@ def _kill_switch_active() -> bool:
         return os.path.exists(settings.KILL_SWITCH_FILE)
     except Exception:
         return False
+
+
+def _runtime_entry_block_reason() -> str:
+    """Runtime-Control blockiert nur neue Entries; Exits laufen weiter."""
+    ctrl = runtime_control.get_snapshot()
+    if ctrl.get("paused"):
+        return "CONTROL PAUSE: Neue Entries sind pausiert"
+    if ctrl.get("risk_off"):
+        return "RISK OFF: Neue Entries sind vorübergehend deaktiviert"
+    return ""
 
 
 def _make_fingerprint(symbol: str, side: str, strategy: str) -> str:

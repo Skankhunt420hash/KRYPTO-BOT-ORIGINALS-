@@ -945,6 +945,7 @@ class MultiStrategyBot:
         exchange_order_symbols: Set[str] = set()
         exchange_pos_symbols: Set[str] = set()
 
+        exchange_private_fetch_issues: List[str] = []
         if settings.TRADING_MODE == "live":
             try:
                 open_orders = self.exchange.fetch_open_orders() or []
@@ -953,14 +954,23 @@ class MultiStrategyBot:
                     str(o.get("symbol") or "").strip() for o in open_orders if o.get("symbol")
                 }
             except Exception as e:
-                logger.warning(f"Recovery: Open-Orders konnten nicht geladen werden: {e}")
+                # Vorher: nur Warning → leere Menge wirkte wie „keine Orders“.
+                logger.error(f"Recovery: Open-Orders konnten nicht geladen werden: {e}")
+                exchange_private_fetch_issues.append(
+                    f"exchange_open_orders_unavailable:{type(e).__name__}"
+                )
             try:
                 open_positions = self.exchange.fetch_open_positions() or []
                 exchange_pos_symbols = {
                     str(p.get("symbol") or "").strip() for p in open_positions if p.get("symbol")
                 }
             except Exception as e:
-                logger.warning(f"Recovery: Open-Positions konnten nicht geladen werden: {e}")
+                # Kritisch: API-Fehler als [] zu behandeln versteckt Live-Orphans
+                # (z.B. nach Failed-Exit-Local-Clear oder fehlgeschlagenem DB-OPEN).
+                logger.error(f"Recovery: Open-Positions konnten nicht geladen werden: {e}")
+                exchange_private_fetch_issues.append(
+                    f"exchange_open_positions_unavailable:{type(e).__name__}"
+                )
 
         db_symbols = set(self.risk.open_positions.keys())
         orphan_order_symbols = exchange_order_symbols - db_symbols
@@ -969,6 +979,7 @@ class MultiStrategyBot:
         self._recovery_blocked_symbols.update(orphan_position_symbols)
 
         issues = self._startup_sanity_checks()
+        issues.extend(exchange_private_fetch_issues)
         if orphan_position_symbols:
             issues.append(
                 f"orphan_exchange_positions:{','.join(sorted(orphan_position_symbols))}"

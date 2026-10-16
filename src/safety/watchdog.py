@@ -6,7 +6,7 @@ Was er tut:
 - Prüft, ob der Bot-Prozess (main.py …) läuft; optional Neustart per Shell-Befehl.
 - Liest Bot-Log-Tail: viele ERROR/Traceback-Zeilen → optional Neustart (Cooldown).
 - python -m compileall auf src/ + config/ (Syntax-Fehler erkennen, kein Blind-Fix).
-- Paper: festgefahrenes runtime_recovery.json (paused/risk_off) optional zurücksetzen.
+- Paper: festgefahrenes runtime_recovery.json (paused/risk_off) nur opt-in zurücksetzen.
 - Optional: ruff --fix nur wenn SAFETY_WATCHDOG_RUFF_AUTOFIX=true und ruff im PATH.
 
 Was er bewusst NICHT tut:
@@ -121,7 +121,7 @@ def _maybe_ruff_autofix(root: Path) -> Tuple[bool, str]:
 def _clear_stuck_recovery(root: Path) -> Tuple[bool, str]:
     if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
         return False, "nur paper"
-    if not bool(getattr(settings, "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", True)):
+    if not bool(getattr(settings, "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", False)):
         return False, "clear recovery aus"
     rel = getattr(settings, "STATE_RECOVERY_FILE", "data/runtime_recovery.json")
     path = Path(rel)

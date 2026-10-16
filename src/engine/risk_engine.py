@@ -136,6 +136,14 @@ class RiskEngine(RiskManager):
             return self._reject("INVALID SIGNAL: LONG benötigt SL < Entry < TP")
         if signal.side == Side.SHORT and not (signal.stop_loss > signal.entry > signal.take_profit):
             return self._reject("INVALID SIGNAL: SHORT benötigt SL > Entry > TP")
+        if signal.side == Side.SHORT:
+            if not bool(getattr(settings, "SHORT_ENABLED", True)):
+                return self._reject("SHORT DISABLED: SHORT_ENABLED=false")
+            if (
+                str(getattr(settings, "TRADING_MODE", "paper")).lower() == "live"
+                and not bool(getattr(settings, "FUTURES_MODE", False))
+            ):
+                return self._reject("SHORT LIVE BLOCK: FUTURES_MODE=false")
 
         # 1. Daily Loss Limit (<=0 = deaktiviert; bei 0 kein „Limit 0 USDT“-Bug)
         if settings.DAILY_LOSS_LIMIT_PCT <= 0:

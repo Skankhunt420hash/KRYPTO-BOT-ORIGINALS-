@@ -395,8 +395,14 @@ class Settings:
     # 0.0 = Prüfung deaktiviert
     MAX_ENTRY_DEVIATION_PCT: float = float(os.getenv("MAX_ENTRY_DEVIATION_PCT", 0.5))
 
-    # Maximale Slippage-Events in einem Fenster bevor Emergency Pause
+    # Maximale Slippage-Events in einem Zeitfenster bevor Emergency Pause
     MAX_SLIPPAGE_EVENTS_WINDOW: int = int(os.getenv("MAX_SLIPPAGE_EVENTS_WINDOW", 5))
+
+    # Zeitfenster (Sekunden) für Slippage-Events. Ohne Verfall bleiben alte Events
+    # im Deque und lösen nach N Treffern eine dauerhafte Emergency Pause aus.
+    SLIPPAGE_EVENTS_WINDOW_SEC: float = float(
+        os.getenv("SLIPPAGE_EVENTS_WINDOW_SEC", 300.0)
+    )
 
     # Anzahl aufeinanderfolgender Execution-Fehler bis Circuit Breaker auslöst
     MAX_CONSECUTIVE_EXEC_ERRORS: int = int(os.getenv("MAX_CONSECUTIVE_EXEC_ERRORS", 5))

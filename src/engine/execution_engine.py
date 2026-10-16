@@ -163,10 +163,10 @@ class ExecutionEngine:
         # fingerprint → unix-timestamp der letzten Ausführung
         self._fingerprints: Dict[str, float] = {}
 
-        # ── Slippage-Event-Fenster ────────────────────────────────────
-        self._slippage_events: deque = deque(
-            maxlen=settings.MAX_SLIPPAGE_EVENTS_WINDOW
-        )
+        # ── Slippage-Event-Fenster (Timestamps; zeitlich begrenzt) ────
+        # Kein maxlen: sonst bleiben N Events „ewig“ voll und jeder weitere
+        # Slippage-Block löst sofort wieder Emergency Pause aus.
+        self._slippage_events: deque = deque()
 
         logger.info(
             f"[cyan]ExecutionEngine aktiv[/cyan] | "
@@ -193,6 +193,22 @@ class ExecutionEngine:
                     f"KILL SWITCH: Datei '{settings.KILL_SWITCH_FILE}' gefunden"
                 )
             return False
+
+        # Slippage-Pause nur halten, solange das Zeitfenster noch „voll“ ist.
+        # Sonst bleiben Exits nach volatilen Phasen dauerhaft tot (run_cycle skip).
+        if (
+            self._emergency_paused
+            and self._pause_reason.startswith("Zu viele Slippage-Events")
+        ):
+            self._prune_slippage_events()
+            if len(self._slippage_events) < settings.MAX_SLIPPAGE_EVENTS_WINDOW:
+                logger.warning(
+                    "[yellow]Slippage-Fenster abgelaufen – "
+                    "Emergency Pause (Slippage) aufgehoben[/yellow]"
+                )
+                self._emergency_paused = False
+                self._pause_reason = ""
+                self._consecutive_rejections = 0
 
         # 2. Emergency Pause
         if self._emergency_paused:
@@ -274,12 +290,14 @@ class ExecutionEngine:
         )
         if not price_ok:
             logger.warning(f"[yellow]{dev_reason}[/yellow]")
+            self._prune_slippage_events()
             self._slippage_events.append(time.monotonic())
             self._consecutive_rejections += 1
             if len(self._slippage_events) >= settings.MAX_SLIPPAGE_EVENTS_WINDOW:
                 self._trigger_pause(
                     f"Zu viele Slippage-Events "
-                    f"({len(self._slippage_events)}/{settings.MAX_SLIPPAGE_EVENTS_WINDOW})"
+                    f"({len(self._slippage_events)}/{settings.MAX_SLIPPAGE_EVENTS_WINDOW} "
+                    f"in {float(getattr(settings, 'SLIPPAGE_EVENTS_WINDOW_SEC', 300.0)):.0f}s)"
                 )
             self._check_rejection_limit()
             return ExecutionResult.rejected(fp, dev_reason, deviation_pct=deviation_pct)
@@ -492,10 +510,21 @@ class ExecutionEngine:
 
         return True, deviation_pct, ""
 
+    def _prune_slippage_events(self) -> None:
+        """Entfernt Slippage-Timestamps außerhalb des konfigurierten Zeitfensters."""
+        window = float(getattr(settings, "SLIPPAGE_EVENTS_WINDOW_SEC", 300.0) or 300.0)
+        if window <= 0:
+            self._slippage_events.clear()
+            return
+        now = time.monotonic()
+        while self._slippage_events and (now - self._slippage_events[0]) > window:
+            self._slippage_events.popleft()
+
     def _on_success(self) -> None:
         """Setzt Fehler-Counter zurück nach erfolgreicher Order."""
         self._consecutive_errors = 0
         self._consecutive_rejections = 0
+        self._prune_slippage_events()
         if self._circuit_state == CircuitState.HALF_OPEN:
             self._circuit_state = CircuitState.CLOSED
             logger.info(

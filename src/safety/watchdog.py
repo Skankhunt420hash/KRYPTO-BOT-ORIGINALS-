@@ -63,8 +63,19 @@ def _find_bot_pids() -> List[int]:
 def _tail_log(path: Path, max_lines: int) -> List[str]:
     if not path.is_file():
         return []
+    max_bytes = max(64 * 1024, max_lines * 4096)
+    block_size = 8192
+    data = bytearray()
     try:
-        raw = path.read_text(encoding="utf-8", errors="replace").splitlines()
+        with path.open("rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            pos = fh.tell()
+            while pos > 0 and data.count(b"\n") <= max_lines and len(data) < max_bytes:
+                read_size = min(block_size, pos, max_bytes - len(data))
+                pos -= read_size
+                fh.seek(pos)
+                data[:0] = fh.read(read_size)
+        raw = bytes(data[-max_bytes:]).decode("utf-8", errors="replace").splitlines()
         return raw[-max_lines:] if len(raw) > max_lines else raw
     except OSError as e:
         logger.warning("Log lesen fehlgeschlagen %s: %s", path, e)
@@ -121,7 +132,7 @@ def _maybe_ruff_autofix(root: Path) -> Tuple[bool, str]:
 def _clear_stuck_recovery(root: Path) -> Tuple[bool, str]:
     if str(getattr(settings, "TRADING_MODE", "paper")).lower() != "paper":
         return False, "nur paper"
-    if not bool(getattr(settings, "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", True)):
+    if not bool(getattr(settings, "SAFETY_WATCHDOG_CLEAR_STUCK_RECOVERY", False)):
         return False, "clear recovery aus"
     rel = getattr(settings, "STATE_RECOVERY_FILE", "data/runtime_recovery.json")
     path = Path(rel)
@@ -153,7 +164,7 @@ def _restart_bot(reason: str, tg: Optional[TelegramNotifier], last_mono: float) 
     cmd = (getattr(settings, "SAFETY_WATCHDOG_RESTART_CMD", "") or "").strip()
     now = time.monotonic()
     cooldown = float(getattr(settings, "SAFETY_WATCHDOG_RESTART_COOLDOWN_SEC", 1800))
-    if now - last_mono < cooldown:
+    if last_mono > 0 and now - last_mono < cooldown:
         logger.info("Neustart übersprungen (Cooldown): %s", reason)
         return last_mono
     if not cmd:

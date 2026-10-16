@@ -145,7 +145,22 @@ class TradingBot:
                 entry_price = position.entry_price
                 pos_size = position.amount
 
-                self.exchange.create_market_sell_order(symbol, position.amount)
+                order = self.exchange.create_market_sell_order(symbol, position.amount)
+                if not order:
+                    logger.error(
+                        f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
+                        "Position bleibt lokal offen"
+                    )
+                    runtime_control.pause_entries()
+                    runtime_control.enable_risk_off()
+                    runtime_state.update_engine(paused=True, risk_off=True)
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason="exchange_order_failed",
+                        strategy=self.strategy.name,
+                    )
+                    return
                 pnl = self.risk.close_position(symbol, current_price)
 
                 # DB + Telegram: getrennt, damit Telegram auch ohne DB-Eintrag sendet
@@ -1226,8 +1241,18 @@ class MultiStrategyBot:
                     logger.error(
                         f"[red]EXIT-ORDER FEHLER[/red] {symbol} | "
                         f"{exit_result.reason} | "
-                        f"Position wird trotzdem lokal geschlossen"
+                        f"Position bleibt lokal offen"
                     )
+                    runtime_control.pause_entries()
+                    runtime_control.enable_risk_off()
+                    runtime_state.update_engine(paused=True, risk_off=True)
+                    self._record_last_decision(
+                        symbol=symbol,
+                        decision="exit_failed",
+                        reason=exit_result.reason,
+                        strategy=position.strategy_name,
+                    )
+                    return
 
                 pnl = self.risk.close_position(symbol, current_price)
 
@@ -1803,10 +1828,28 @@ class MultiStrategyBot:
 
         if is_live and settings.FUTURES_MODE:
             logger.warning(
-                f"[yellow]SHORT (Futures-Live) noch nicht implementiert[/yellow] "
-                f"{symbol} – Paper-Simulation wird verwendet"
+                f"[yellow]SHORT BLOCKIERT (Futures-Live nicht implementiert)[/yellow] "
+                f"{symbol} | Strategie: {signal.strategy_name}"
             )
-            # Fällt durch in Paper-Simulation
+            self._record_last_decision(
+                symbol=symbol,
+                decision="execution_blocked",
+                reason="live_futures_short_not_implemented",
+                strategy=signal.strategy_name,
+            )
+            self._log_decision_cycle(
+                symbol=symbol,
+                regime=signal.regime or "UNKNOWN",
+                ranking=list((self._last_brain_snapshot or {}).get("last_strategy_ranking") or []),
+                chosen_strategy=signal.strategy_name,
+                signal_score=float((self._last_brain_snapshot or {}).get("last_signal_score", 0.0) or 0.0),
+                risk_decision="execution_blocked",
+                allow_trade=False,
+                reject_reason="live_futures_short_not_implemented",
+                last_decision_reason="live_futures_short_not_implemented",
+                market_context={},
+            )
+            return
 
         # Paper-SHORT-Simulation via Execution Engine (Retry, Slippage-Schutz)
         self._notify_mini_live_order(

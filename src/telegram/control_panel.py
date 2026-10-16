@@ -19,9 +19,10 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, Any, List
 
 import requests
 
@@ -43,6 +44,10 @@ _STRATEGY_ALIASES = {
     "volatility_breakout": "VolatilityBreakout",
     "trendcontinuation": "TrendContinuation",
     "trend_continuation": "TrendContinuation",
+    "liquiditysweepreversal": "LiquiditySweepReversal",
+    "liquidity_sweep_reversal": "LiquiditySweepReversal",
+    "emareclaimbreakout": "EMAReclaimBreakout",
+    "ema_reclaim_breakout": "EMAReclaimBreakout",
     "rsi_ema": "RSI_EMA",
     "macd_crossover": "MACD_Crossover",
     "combined": "Combined",
@@ -64,6 +69,8 @@ class PanelCallbacks:
     request_bot_start: Optional[Callable[[], Tuple[bool, str]]] = None
     request_bot_restart: Optional[Callable[[], Tuple[bool, str]]] = None
     get_bot_status: Optional[Callable[[], Dict]] = None
+    apply_runtime_settings: Optional[Callable[[Dict[str, Any]], Tuple[bool, str]]] = None
+    request_test_trade: Optional[Callable[[], Tuple[bool, str]]] = None
 
 
 class TelegramControlPanel:
@@ -122,6 +129,35 @@ class TelegramControlPanel:
         self._thread: Optional[threading.Thread] = None
         self._poll_fail_streak: int = 0
         self._last_conflict_warn_ts: float = 0.0
+        self._autoheal_enabled: bool = False
+        self._autoheal_cooldown_sec: int = int(
+            getattr(settings, "TELEGRAM_AUTOHEAL_COOLDOWN_SEC", 900)
+        )
+        self._last_autoheal_ts: float = 0.0
+        self._ampel_auto_enabled: bool = bool(getattr(settings, "AMPEL_AUTO_ENABLED", True))
+        self._ampel_auto_interval_sec: int = int(
+            getattr(settings, "AMPEL_AUTO_INTERVAL_SEC", 180)
+        )
+        self._ampel_auto_notify_cooldown_sec: int = int(
+            getattr(settings, "AMPEL_AUTO_NOTIFY_COOLDOWN_SEC", 1800)
+        )
+        self._last_ampel_auto_ts: float = 0.0
+        self._last_ampel_auto_notify_state: str = ""
+        self._last_ampel_auto_notify_action: str = ""
+        self._last_ampel_auto_notify_ts: float = 0.0
+        self._ampel_last_state: str = "UNKNOWN"
+        self._ampel_last_reason: str = "init"
+        self._ampel_last_action: str = "none"
+        self._ampel_last_eval_ts: float = 0.0
+        self._ampel_red_started_ts: float = 0.0
+        self._ampel_red_loop_trip_count: int = 0
+        # Latch gegen Red-Loop-Spam:
+        # Wenn Ampel einmal auf RED gestellt hat, wird die Sperre gehalten,
+        # ohne bei jedem Tick erneut Pause/RiskOff-Notifications zu senden.
+        ctrl_boot = runtime_control.get_snapshot()
+        self._ampel_guard_latched_red: bool = bool(
+            ctrl_boot.get("paused") and ctrl_boot.get("risk_off")
+        )
         token_state = "set" if bool(self._token) else "missing"
         chat_state = "set" if bool(self._chat_id) else "missing"
         logger.info(
@@ -297,9 +333,11 @@ class TelegramControlPanel:
                         self._last_update_id, update.get("update_id", 0)
                     )
                     self._handle_update(update)
+                self._safe_ampel_auto_tick()
 
             except requests.exceptions.Timeout:
                 # normal bei Long-Polling – einfach weiter
+                self._safe_ampel_auto_tick()
                 continue
             except Exception as e:
                 self._poll_fail_streak += 1
@@ -309,6 +347,17 @@ class TelegramControlPanel:
                 time.sleep(self._poll_interval)
 
         logger.info("Telegram-Control-Panel Polling-Loop beendet.")
+
+    def _safe_ampel_auto_tick(self) -> None:
+        """
+        Ampel-Auto darf den Polling-Thread niemals beenden.
+        Alle Fehler werden geloggt und geschluckt.
+        """
+        try:
+            self._maybe_run_ampel_auto()
+        except Exception as e:
+            logger.error("AmpelAuto Tick-Fehler (%s): %s", type(e).__name__, e)
+            runtime_state.append_log(f"AMPEL_AUTO_ERROR {type(e).__name__}")
 
     # ------------------------------------------------------------------
     # Update-Handling
@@ -342,66 +391,178 @@ class TelegramControlPanel:
     # ------------------------------------------------------------------
 
     def _dispatch_command(self, chat_id: str, text: str) -> None:
-        cmd = text.split()[0].lower()
-        # Gruppen-Chats: /start@MeinBot_Bot — sonst kein Match
-        if "@" in cmd:
-            cmd = cmd.split("@", 1)[0]
+        parts = self._split_command_parts(text)
+        if not parts:
+            return
+        cmd = parts[0]
+
         try:
-            if cmd == "/start":
+            if cmd == "start":
                 self._send_start(chat_id)
-            elif cmd == "/help":
+            elif cmd == "help":
                 self._send_help(chat_id)
-            elif cmd == "/status":
+            elif cmd == "status":
                 self._send_status(chat_id)
-            elif cmd == "/mode":
-                self._send_mode(chat_id)
-            elif cmd == "/strategy":
+            elif cmd == "diag":
+                self._send_diag(chat_id)
+            elif cmd == "diagfull":
+                self._send_diagfull(chat_id)
+            elif cmd == "autoheal":
+                self._handle_autoheal(chat_id, text)
+            elif cmd == "ampel":
+                self._send_ampel(chat_id)
+            elif cmd == "ampelauto":
+                self._handle_ampelauto(chat_id, text)
+            elif cmd == "ampeldebug":
+                self._send_ampel_debug(chat_id)
+            elif cmd in ("testtrade", "testtrades"):
+                self._handle_testtrade(chat_id, text)
+            elif cmd == "mode":
+                self._handle_mode_command(chat_id, text)
+            elif cmd == "strategy":
                 self._send_strategy(chat_id)
-            elif cmd == "/risk":
-                self._send_risk(chat_id)
-            elif cmd == "/positions":
+            elif cmd == "risk":
+                self._handle_risk_command(chat_id, text)
+            elif cmd == "positions":
                 self._send_positions(chat_id)
-            elif cmd == "/trades":
+            elif cmd == "trades":
                 self._send_trades(chat_id)
-            elif cmd == "/balance":
+            elif cmd == "balance":
                 self._send_balance(chat_id)
-            elif cmd == "/logs":
+            elif cmd == "logs":
                 self._send_logs(chat_id)
-            elif cmd == "/summary":
+            elif cmd == "summary":
                 self._send_summary(chat_id)
-            elif cmd == "/pause":
+            elif cmd == "analysis":
+                self._send_analysis(chat_id)
+            elif cmd == "brain":
+                self._send_brain(chat_id)
+            elif cmd == "config":
+                self._send_config(chat_id)
+            elif cmd == "pause":
                 self._handle_pause(chat_id)
-            elif cmd == "/resume":
+            elif cmd == "resume":
                 self._handle_resume(chat_id)
-            elif cmd == "/riskoff":
+            elif cmd == "riskoff":
                 self._handle_riskoff(chat_id)
-            elif cmd == "/riskon":
+            elif cmd == "riskon":
                 self._handle_riskon(chat_id)
-            elif cmd == "/killswitch":
+            elif cmd == "killswitch":
                 self._handle_killswitch_on(chat_id)
-            elif cmd == "/killswitchoff":
+            elif cmd == "killswitchoff":
                 self._handle_killswitch_off(chat_id)
-            elif cmd == "/setmode":
+            elif cmd in ("setmode", "mode_set"):
                 self._handle_setmode(chat_id, text)
-            elif cmd == "/setstrategy":
+            elif cmd == "setstrategy":
                 self._handle_setstrategy(chat_id, text)
-            elif cmd == "/stop_bot":
+            elif cmd == "setbrain":
+                self._handle_setbrain(chat_id, text)
+            elif cmd in ("setrisk", "riskset", "risktune", "risktuning"):
+                self._handle_setrisk(chat_id, text)
+            elif cmd in ("setprofile", "profile"):
+                self._handle_setprofile(chat_id, text)
+            elif cmd == "profiles":
+                self._send_profiles(chat_id)
+            elif cmd in ("stop_bot", "stopbot"):
                 self._handle_stop_bot(chat_id)
-            elif cmd == "/start_bot":
+            elif cmd in ("start_bot", "startbot"):
                 self._handle_start_bot(chat_id)
-            elif cmd == "/botstart":
+            elif cmd in ("botstart", "start"):
                 self._handle_bot_start(chat_id)
-            elif cmd == "/botstop":
+            elif cmd in ("botstop", "stop"):
                 self._handle_bot_stop(chat_id)
-            elif cmd == "/botrestart":
+            elif cmd in ("botrestart", "restartbot", "restart"):
                 self._handle_bot_restart(chat_id)
-            elif cmd == "/botstatus":
+            elif cmd == "botstatus":
                 self._send_bot_status(chat_id)
             else:
-                self._send_text(chat_id, "Unbekannter Befehl. Sende /help für eine Übersicht.")
+                self._send_text(
+                    chat_id,
+                    "Unbekannter Befehl. Nutze /help.\n"
+                    "Tipp: /setprofile defensive, /setrisk daily_loss_limit_pct 10, /ampel, /botrestart",
+                )
         except Exception as e:
             logger.error(f"Telegram-Panel Dispatch-Fehler ({cmd}): {e}")
             self._send_text(chat_id, "Interner Fehler im Telegram-Panel. Siehe Logs.")
+
+    # ------------------------------------------------------------------
+    # Command-Parsing Helper
+    # ------------------------------------------------------------------
+
+    def _handle_mode_command(self, chat_id: str, text: str) -> None:
+        """
+        /mode
+          -> zeigt aktuellen Modus
+        /mode paper
+          -> alias für /setmode paper
+        /mode growth|continuous|defensive|balanced|aggressive|sniper|scalping
+          -> alias für /setprofile <name>
+        """
+        parts = self._split_command_parts(text)
+        if len(parts) <= 1:
+            self._send_mode(chat_id)
+            return
+        target = parts[1].strip().lower()
+        if target in self._profile_presets():
+            self._handle_setprofile(chat_id, f"/setprofile {target}")
+            return
+        if target == "paper":
+            self._handle_setmode(chat_id, "/setmode paper")
+            return
+        self._send_text(
+            chat_id,
+            "Verwendung:\n"
+            "• /mode (Status)\n"
+            "• /mode paper\n"
+            "• /mode <growth|continuous|defensive|balanced|aggressive|sniper|scalping>",
+        )
+
+    def _handle_risk_command(self, chat_id: str, text: str) -> None:
+        """
+        /risk
+          -> zeigt Risk-Status
+        /risk <key> <value>
+          -> alias für /setrisk <key> <value>
+        /risk set|tune|tuning|live <key> <value>
+          -> alias für /setrisk <key> <value>
+        """
+        parts = self._split_command_parts(text)
+        if len(parts) <= 1:
+            self._send_risk(chat_id)
+            return
+
+        marker = parts[1].strip().lower()
+        if marker in ("set", "tune", "tuning", "live", "update"):
+            key_idx = 2
+            if len(parts) > key_idx and parts[key_idx].strip().lower() in (
+                "set",
+                "tune",
+                "tuning",
+                "live",
+                "update",
+            ):
+                key_idx += 1
+            if len(parts) <= key_idx + 1:
+                self._send_text(
+                    chat_id,
+                    "Verwendung: /risk <key> <value>\n"
+                    "oder: /risk live <key> <value>\n"
+                    "Keys: risk_per_trade, max_open_risk, max_positions, "
+                    "max_notional, min_notional, daily_loss_limit_pct, live_daily_loss_limit_pct",
+                )
+                return
+            self._handle_setrisk(chat_id, f"/setrisk {parts[key_idx]} {parts[key_idx + 1]}")
+            return
+
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /risk <key> <value>\n"
+                "Keys: risk_per_trade, max_open_risk, max_positions, "
+                "max_notional, min_notional, daily_loss_limit_pct, live_daily_loss_limit_pct",
+            )
+            return
+        self._handle_setrisk(chat_id, f"/setrisk {parts[1]} {parts[2]}")
 
     # ------------------------------------------------------------------
     # Senden an den anfragenden Chat
@@ -501,14 +662,35 @@ class TelegramControlPanel:
             "Sicherheits-Hinweis: Trading-Modus bleibt durch .env gesteuert."
         )
 
+    @staticmethod
+    def _strip_command_token(token: str) -> str:
+        cleaned = token.strip().lower()
+        cleaned = cleaned.strip("()[]{}")
+        if "@" in cleaned:
+            cleaned = cleaned.split("@", 1)[0]
+        return cleaned.lstrip("/")
+
+    def _split_command_parts(self, text: str) -> List[str]:
+        cleaned_text = (text or "").replace("\u200b", " ").replace("\ufeff", " ").strip()
+        parts = cleaned_text.split()
+        if not parts:
+            return []
+        first = self._strip_command_token(parts[0])
+        return [first] + [part.strip() for part in parts[1:]]
+
     def _send_help(self, chat_id: str) -> None:
         self._send_text(
             chat_id,
             "<b>KRYPTO-BOT Control Center</b>\n"
-            "📖 <b>Lesend</b>: /status /summary /balance /positions /trades /risk /strategy /mode /logs\n"
-            "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff\n"
-            "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper\n"
+            "📖 <b>Lesend</b>: /status /diag /diagfull /summary /analysis /brain /config /balance /positions /trades /risk /strategy /mode /logs\n"
+            "🎛 <b>Steuerung</b>: /pause /resume /riskoff /riskon /killswitch /killswitchoff /testtrade\n"
+            "⚙ <b>Optional</b>: /setstrategy &lt;name&gt;, /setmode paper, /setbrain &lt;key&gt; &lt;value&gt;, /setrisk &lt;key&gt; &lt;value&gt;\n"
+            "🩹 <b>Auto-Heal</b>: /autoheal status | /autoheal on | /autoheal off | /autoheal now\n"
+            "🚦 <b>Ampel</b>: /ampel | /ampelauto status | /ampelauto on | /ampelauto off | /ampelauto now\n"
+            "🧪 <b>Ampel Debug</b>: /ampeldebug\n"
+            "🎚 <b>Profile</b>: /profiles, /setprofile &lt;growth|continuous|defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75&gt;\n"
             "🤖 <b>Supervisor</b>: /botstart /botstop /botrestart /botstatus\n"
+            "ℹ️ /botrestart nutzt Callback oder automatisch Stop+Start-Fallback.\n"
             "🧠 Alle Kernbefehle lesen echte Runtime-, Brain-, Risk- und Trade-Daten."
         )
 
@@ -555,6 +737,427 @@ class TelegramControlPanel:
             f"Brain Decision: <code>{(rt.get('brain') or {}).get('last_decision_reason') or 'n/a'}</code>\n"
             f"Top Ranking:\n{top_txt}"
         )
+
+    def _send_analysis(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        selector = rt.get("selector") or {}
+        gate = rt.get("risk_gate") or {}
+        last_signal = rt.get("last_signal") or {}
+        last_decision = rt.get("last_decision") or {}
+        ranking = list(brain.get("last_strategy_ranking") or [])
+
+        lines = [
+            "🧠 <b>Luxus Analyse</b>",
+            f"Regime: <code>{brain.get('last_regime', 'n/a')}</code>",
+            f"Brain-Score: <code>{brain.get('last_signal_score', 'n/a')}</code> | "
+            f"Risky: <code>{brain.get('risky_phase', 'n/a')}</code>",
+            f"Decision: <code>{brain.get('last_decision_reason', 'n/a')}</code>",
+            f"Selector Winner: <code>{selector.get('winner') or 'none'}</code> | "
+            f"Score: <code>{selector.get('winner_score', 'n/a')}</code> | "
+            f"Eligible: <code>{selector.get('eligible', 'n/a')}</code>",
+            f"Risk-Gate: <code>{gate.get('last_gate_reason', 'n/a')}</code>",
+        ]
+
+        if last_signal:
+            lines.append(
+                "Letztes Signal: "
+                f"<code>{last_signal.get('symbol', 'n/a')} {last_signal.get('side', 'n/a')} "
+                f"{last_signal.get('strategy', 'n/a')}</code> | "
+                f"conf={last_signal.get('confidence', 'n/a')} rr={last_signal.get('rr', 'n/a')}"
+            )
+        if last_decision:
+            lines.append(
+                "Letzte Entscheidung: "
+                f"<code>{last_decision.get('decision', 'n/a')}</code> | "
+                f"{last_decision.get('strategy', 'n/a')} | "
+                f"{last_decision.get('reason', 'n/a')}"
+            )
+
+        if ranking:
+            lines.append("")
+            lines.append("<b>Top 5 Ranking</b>")
+            for i, item in enumerate(ranking[:5], start=1):
+                comps = item.get("components") or {}
+                lines.append(
+                    f"{i}. {item.get('strategy')} [{item.get('side')}] "
+                    f"score={item.get('brain_score')} elig={item.get('eligible')} "
+                    f"reward={comps.get('reward_bias', 'n/a')} perf={comps.get('perf_score', 'n/a')}"
+                )
+
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_brain(self, chat_id: str) -> None:
+        rt = self._safe_runtime_status()
+        brain = rt.get("brain") or {}
+        ranking = list(brain.get("last_strategy_ranking") or [])
+        lines = [
+            "🧠 <b>Brain Deep-Dive</b>",
+            f"Regime: <code>{brain.get('last_regime', 'n/a')}</code>",
+            f"Last Score: <code>{brain.get('last_signal_score', 'n/a')}</code>",
+            f"Decision: <code>{brain.get('last_decision_reason', 'n/a')}</code>",
+            f"Risky Phase: <code>{brain.get('risky_phase', 'n/a')}</code>",
+            f"Min Trade Score: <code>{brain.get('min_trade_score', 'n/a')}</code>",
+            f"Reward Weight: <code>{getattr(settings, 'BRAIN_REWARD_WEIGHT', 'n/a')}</code>",
+            f"Perf Weight: <code>{settings.PERF_SELECTOR_WEIGHT}</code>",
+            f"Priority Bonus: <code>{settings.CONTROL_STRATEGY_PRIORITY_BONUS}</code>",
+        ]
+        if ranking:
+            lines.append("")
+            lines.append("<b>Ranking-Details</b>")
+            for i, item in enumerate(ranking[:6], start=1):
+                comps = item.get("components") or {}
+                lines.append(
+                    f"{i}) {item.get('strategy')} {item.get('side')} "
+                    f"s={item.get('brain_score')} e={item.get('eligible')} "
+                    f"| trend={comps.get('trend_quality')} rr={comps.get('rr_quality')} "
+                    f"perf={comps.get('perf_score')} rew={comps.get('reward_bias')}"
+                )
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_config(self, chat_id: str) -> None:
+        lines = [
+            "⚙️ <b>Aktive Runtime-Konfiguration</b>",
+            f"MIN_CONFIDENCE: <code>{settings.MIN_CONFIDENCE}</code>",
+            f"MIN_RR: <code>{settings.MIN_RR}</code>",
+            f"BRAIN_MIN_SCORE_TO_TRADE: <code>{settings.BRAIN_MIN_SCORE_TO_TRADE}</code>",
+            f"BRAIN_RISKY_PHASE_SCORE: <code>{settings.BRAIN_RISKY_PHASE_SCORE}</code>",
+            f"PERF_SELECTOR_WEIGHT: <code>{settings.PERF_SELECTOR_WEIGHT}</code>",
+            f"CONTROL_STRATEGY_PRIORITY_BONUS: <code>{settings.CONTROL_STRATEGY_PRIORITY_BONUS}</code>",
+            f"BRAIN_REWARD_WEIGHT: <code>{getattr(settings, 'BRAIN_REWARD_WEIGHT', 'n/a')}</code>",
+            f"BRAIN_REWARD_WINDOW: <code>{getattr(settings, 'BRAIN_REWARD_WINDOW', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_ENABLED: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_ENABLED', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_WINDOW: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_WINDOW', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_MIN_TRADES: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_MIN_TRADES', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_MIN_WINRATE_PCT', 'n/a')}</code>",
+            f"BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT: <code>{getattr(settings, 'BRAIN_POSITIVE_PATTERN_BONUS_WEIGHT', 'n/a')}</code>",
+            f"RISK_PER_TRADE_PCT: <code>{settings.RISK_PER_TRADE_PCT}</code>",
+            f"MAX_TOTAL_OPEN_RISK_PCT: <code>{settings.MAX_TOTAL_OPEN_RISK_PCT}</code>",
+            f"MAX_POSITIONS_TOTAL: <code>{settings.MAX_POSITIONS_TOTAL}</code>",
+            f"MAX_POSITION_NOTIONAL: <code>{settings.MAX_POSITION_NOTIONAL}</code>",
+            "",
+            "<i>Setzen via: /setbrain KEY VALUE oder /setrisk KEY VALUE</i>",
+        ]
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _handle_setbrain(self, chat_id: str, text: str) -> None:
+        parts = self._split_command_parts(text)
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setbrain <key> <value>\n"
+                "Keys: min_score, risky_score, perf_weight, priority_bonus, reward_weight, reward_window, pattern_enabled, pattern_window, pattern_min_trades, pattern_min_winrate, pattern_bonus, min_confidence, min_rr, min_win_chance, min_historical_wr, perf_min_trades, min_expectancy, min_recency_wr, min_profit_factor, max_losing_streak, weak_phase_scale"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "min_score": ("brain_min_score_to_trade", float, 0.0, 1.5),
+            "risky_score": ("brain_risky_phase_score", float, 0.0, 1.5),
+            "perf_weight": ("perf_selector_weight", float, 0.0, 1.0),
+            "priority_bonus": ("control_strategy_priority_bonus", float, 0.0, 1.0),
+            "reward_weight": ("reward_weight", float, 0.0, 0.5),
+            "reward_window": ("reward_window", int, 2, 50),
+            "pattern_enabled": ("brain_positive_pattern_enabled", int, 0, 1),
+            "pattern_window": ("brain_positive_pattern_window", int, 10, 300),
+            "pattern_min_trades": ("brain_positive_pattern_min_trades", int, 3, 300),
+            "pattern_min_winrate": ("brain_positive_pattern_min_winrate_pct", float, 40.0, 95.0),
+            "pattern_bonus": ("brain_positive_pattern_bonus_weight", float, 0.0, 0.30),
+            "min_confidence": ("min_confidence", float, 0.0, 100.0),
+            "min_rr": ("min_rr", float, 0.0, 10.0),
+            "min_win_chance": ("min_win_chance_pct", float, 0.0, 100.0),
+            "min_historical_wr": ("min_historical_win_rate_pct", float, 0.0, 100.0),
+            "perf_min_trades": ("perf_tracker_min_trades", int, 1, 500),
+            "min_expectancy": ("min_expectancy_pct", float, -100.0, 100.0),
+            "min_recency_wr": ("min_recency_win_rate_pct", float, 0.0, 100.0),
+            "min_profit_factor": ("min_profit_factor", float, 0.0, 20.0),
+            "max_losing_streak": ("max_losing_streak_to_trade", int, 0, 20),
+            "weak_phase_scale": ("weak_phase_position_scale", float, 0.1, 1.0),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setbrain-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            if ok:
+                self._send_text(chat_id, f"🧠 {msg}")
+            else:
+                self._send_text(chat_id, f"⚠️ {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    def _handle_setrisk(self, chat_id: str, text: str) -> None:
+        parts = self._split_command_parts(text)
+        if len(parts) < 3:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setrisk <key> <value>\n"
+                "Keys: risk_per_trade, max_open_risk, max_positions, "
+                "max_notional, min_notional, daily_loss_limit_pct, live_daily_loss_limit_pct, coin_cooldown_minutes, strategy_cooldown_minutes, duplicate_signal_minutes"
+            )
+            return
+        key = parts[1].strip().lower()
+        value_raw = parts[2].strip()
+        mapping = {
+            "risk_per_trade": ("risk_per_trade_pct", float, 0.1, 10.0),
+            "max_open_risk": ("max_total_open_risk_pct", float, 1.0, 50.0),
+            "max_positions": ("max_positions_total", int, 1, 50),
+            "max_notional": ("max_position_notional", float, 5.0, 1_000_000.0),
+            "min_notional": ("min_position_notional", float, 1.0, 100_000.0),
+            "daily_loss_limit_pct": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "daily_loss_pct": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "daily_loss": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "daily_limit_pct": ("daily_loss_limit_pct", float, 0.1, 100.0),
+            "live_daily_loss_limit_pct": ("live_test_daily_loss_limit_pct", float, 0.1, 100.0),
+            "coin_cooldown_minutes": ("coin_cooldown_minutes", int, 0, 240),
+            "strategy_cooldown_minutes": ("strategy_cooldown_minutes", int, 0, 240),
+            "duplicate_signal_minutes": ("duplicate_signal_minutes", int, 0, 180),
+        }
+        if key not in mapping:
+            self._send_text(chat_id, f"Unbekannter setrisk-Key: {key}")
+            return
+        runtime_key, caster, lo, hi = mapping[key]
+        try:
+            val = caster(value_raw)
+        except Exception:
+            self._send_text(chat_id, f"Ungültiger Wert für {key}: {value_raw}")
+            return
+        if not (lo <= val <= hi):
+            self._send_text(chat_id, f"Wert außerhalb Bereich [{lo}, {hi}] für {key}")
+            return
+        if self._callbacks.apply_runtime_settings:
+            ok, msg = self._callbacks.apply_runtime_settings({runtime_key: val})
+            if ok:
+                self._send_text(chat_id, f"🛡 {msg}")
+            else:
+                self._send_text(chat_id, f"⚠️ {msg}")
+            return
+        self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+
+    @staticmethod
+    def _profile_presets() -> Dict[str, Dict[str, float]]:
+        return {
+            "defensive": {
+                "min_confidence": 58.0,
+                "min_rr": 2.0,
+                "brain_min_score_to_trade": 0.56,
+                "brain_risky_phase_score": 0.45,
+                "perf_selector_weight": 0.30,
+                "reward_weight": 0.05,
+                "risk_per_trade_pct": 0.6,
+                "max_total_open_risk_pct": 5.0,
+                "max_positions_total": 3,
+            },
+            "balanced": {
+                "min_confidence": 46.0,
+                "min_rr": 1.6,
+                "brain_min_score_to_trade": 0.48,
+                "brain_risky_phase_score": 0.36,
+                "perf_selector_weight": 0.24,
+                "reward_weight": 0.08,
+                "risk_per_trade_pct": 0.9,
+                "max_total_open_risk_pct": 9.0,
+                "max_positions_total": 5,
+            },
+            "aggressive": {
+                "min_confidence": 36.0,
+                "min_rr": 1.3,
+                "brain_min_score_to_trade": 0.38,
+                "brain_risky_phase_score": 0.28,
+                "perf_selector_weight": 0.18,
+                "reward_weight": 0.12,
+                "risk_per_trade_pct": 1.3,
+                "max_total_open_risk_pct": 14.0,
+                "max_positions_total": 7,
+            },
+            "sniper": {
+                "min_confidence": 62.0,
+                "min_rr": 2.4,
+                "brain_min_score_to_trade": 0.60,
+                "brain_risky_phase_score": 0.48,
+                "perf_selector_weight": 0.32,
+                "reward_weight": 0.06,
+                "risk_per_trade_pct": 0.7,
+                "max_total_open_risk_pct": 6.0,
+                "max_positions_total": 2,
+            },
+            "scalping": {
+                "min_confidence": 34.0,
+                "min_rr": 1.2,
+                "brain_min_score_to_trade": 0.34,
+                "brain_risky_phase_score": 0.24,
+                "perf_selector_weight": 0.14,
+                "reward_weight": 0.15,
+                "risk_per_trade_pct": 0.8,
+                "max_total_open_risk_pct": 12.0,
+                "max_positions_total": 8,
+            },
+            "growth": {
+                # Kontinuierliches Wachstum statt schneller Peak:
+                # konservativeres Risiko, strengere Qualitätsgates, moderates Pattern-Lernen.
+                "min_confidence": 52.0,
+                "min_rr": 1.8,
+                "brain_min_score_to_trade": 0.52,
+                "brain_risky_phase_score": 0.40,
+                "perf_selector_weight": 0.28,
+                "reward_weight": 0.07,
+                "risk_per_trade_pct": 0.45,
+                "max_total_open_risk_pct": 4.5,
+                "max_positions_total": 3,
+                "coin_cooldown_minutes": 5,
+                "strategy_cooldown_minutes": 6,
+                "duplicate_signal_minutes": 4,
+                "min_win_chance_pct": 72.0,
+                "min_historical_win_rate_pct": 25.0,
+                "perf_tracker_min_trades": 25,
+                "min_expectancy_pct": 8.0,
+                "min_recency_win_rate_pct": 62.0,
+                "min_profit_factor": 1.18,
+                "max_losing_streak_to_trade": 1,
+                "weak_phase_position_scale": 0.50,
+                "brain_positive_pattern_enabled": 1,
+                "brain_positive_pattern_window": 50,
+                "brain_positive_pattern_min_trades": 10,
+                "brain_positive_pattern_min_winrate_pct": 58.0,
+                "brain_positive_pattern_bonus_weight": 0.06,
+            },
+            "continuous": {
+                "min_confidence": 52.0,
+                "min_rr": 1.8,
+                "brain_min_score_to_trade": 0.52,
+                "brain_risky_phase_score": 0.40,
+                "perf_selector_weight": 0.28,
+                "reward_weight": 0.07,
+                "risk_per_trade_pct": 0.45,
+                "max_total_open_risk_pct": 4.5,
+                "max_positions_total": 3,
+                "coin_cooldown_minutes": 5,
+                "strategy_cooldown_minutes": 6,
+                "duplicate_signal_minutes": 4,
+                "min_win_chance_pct": 72.0,
+                "min_historical_win_rate_pct": 25.0,
+                "perf_tracker_min_trades": 25,
+                "min_expectancy_pct": 8.0,
+                "min_recency_win_rate_pct": 62.0,
+                "min_profit_factor": 1.18,
+                "max_losing_streak_to_trade": 1,
+                "weak_phase_position_scale": 0.50,
+                "brain_positive_pattern_enabled": 1,
+                "brain_positive_pattern_window": 50,
+                "brain_positive_pattern_min_trades": 10,
+                "brain_positive_pattern_min_winrate_pct": 58.0,
+                "brain_positive_pattern_bonus_weight": 0.06,
+            },
+            "hf75": {
+                # Ziel: mehr Entries bei großer Universe-Scanrate, aber 75%-Qualitätsgate
+                # + positives Erwartungswert-Gate (mathematischer Vorteil je Trade).
+                "min_confidence": 32.0,
+                "min_rr": 1.15,
+                "brain_min_score_to_trade": 0.24,
+                "brain_risky_phase_score": 0.18,
+                "perf_selector_weight": 0.10,
+                "reward_weight": 0.12,
+                "risk_per_trade_pct": 0.7,
+                "max_total_open_risk_pct": 12.0,
+                "max_positions_total": 10,
+                "coin_cooldown_minutes": 2,
+                "strategy_cooldown_minutes": 1,
+                "duplicate_signal_minutes": 1,
+                "min_win_chance_pct": 75.0,
+                "min_historical_win_rate_pct": 0.0,
+                "perf_tracker_min_trades": 12,
+                "min_expectancy_pct": 5.0,
+                "min_recency_win_rate_pct": 60.0,
+                "min_profit_factor": 1.05,
+                "max_losing_streak_to_trade": 2,
+                "weak_phase_position_scale": 0.7,
+            },
+            "highfreq75": {
+                "min_confidence": 32.0,
+                "min_rr": 1.15,
+                "brain_min_score_to_trade": 0.24,
+                "brain_risky_phase_score": 0.18,
+                "perf_selector_weight": 0.10,
+                "reward_weight": 0.12,
+                "risk_per_trade_pct": 0.7,
+                "max_total_open_risk_pct": 12.0,
+                "max_positions_total": 10,
+                "coin_cooldown_minutes": 2,
+                "strategy_cooldown_minutes": 1,
+                "duplicate_signal_minutes": 1,
+                "min_win_chance_pct": 75.0,
+                "min_historical_win_rate_pct": 0.0,
+                "perf_tracker_min_trades": 12,
+                "min_expectancy_pct": 5.0,
+                "min_recency_win_rate_pct": 60.0,
+                "min_profit_factor": 1.05,
+                "max_losing_streak_to_trade": 2,
+                "weak_phase_position_scale": 0.7,
+            },
+        }
+
+    def _send_profiles(self, chat_id: str) -> None:
+        presets = self._profile_presets()
+        lines = [
+            "🎚 <b>Luxus Profile</b>",
+            "Wähle per <code>/setprofile &lt;name&gt;</code>:",
+            "Neu: <code>growth</code> / <code>continuous</code> = stabiles, kontinuierliches Wachstum",
+            "Neu: <code>hf75</code> / <code>highfreq75</code> = mehr Entries + 75% Qualitätsgate",
+            "",
+        ]
+        for name, values in presets.items():
+            lines.append(
+                f"• <b>{name}</b> → "
+                f"risk={values['risk_per_trade_pct']}% | "
+                f"open_risk={values['max_total_open_risk_pct']}% | "
+                f"min_conf={values['min_confidence']} | "
+                f"min_rr={values['min_rr']}"
+            )
+        lines.append("")
+        lines.append("Beispiel: <code>/setprofile defensive</code>")
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _handle_setprofile(self, chat_id: str, text: str) -> None:
+        parts = self._split_command_parts(text)
+        if len(parts) < 2:
+            self._send_text(
+                chat_id,
+                "Verwendung: /setprofile <growth|continuous|defensive|balanced|aggressive|sniper|scalping|hf75|highfreq75>\n"
+                "Nutze /profiles für die Übersicht."
+            )
+            return
+        name = parts[1].strip().lower()
+        if name == "highfreq75":
+            name = "hf75"
+        if name in ("continuous_growth", "steady", "stable"):
+            name = "growth"
+        presets = self._profile_presets()
+        payload = presets.get(name)
+        if payload is None:
+            self._send_text(chat_id, f"Unbekanntes Profil: {name}. Nutze /profiles.")
+            return
+        if not self._callbacks.apply_runtime_settings:
+            self._send_text(chat_id, "⚠️ Runtime-Tuning-Callback nicht angebunden.")
+            return
+        ok, msg = self._callbacks.apply_runtime_settings(payload)
+        if ok:
+            runtime_state.append_log(f"TELEGRAM /setprofile {name}")
+            self._send_text(
+                chat_id,
+                f"✅ Profil <b>{name}</b> aktiviert.\n{msg}\n\n"
+                "Kontrolle mit /config und /analysis."
+            )
+        else:
+            self._send_text(chat_id, f"⚠️ Profil konnte nicht gesetzt werden: {msg}")
 
     def _send_risk(self, chat_id: str) -> None:
         runtime_daily_loss = "n/a"
@@ -623,6 +1226,12 @@ class TelegramControlPanel:
                 f"risky={brain.get('risky_phase')}"
             )
             parts.append(f"• Brain Decision: {brain.get('last_decision_reason')}")
+            parts.append(
+                f"• Brain Config: minScore={float(getattr(settings, 'BRAIN_MIN_SCORE_TO_TRADE', 0.45)):.3f} | "
+                f"riskyPhase<{float(getattr(settings, 'BRAIN_RISKY_PHASE_SCORE', 0.35)):.3f} | "
+                f"perfW={float(getattr(settings, 'PERF_SELECTOR_WEIGHT', 0.22)):.3f} | "
+                f"rewardW={float(getattr(settings, 'BRAIN_REWARD_WEIGHT', 0.08)):.3f}"
+            )
         gate = rt.get("risk_gate") or {}
         if gate:
             parts.append(
@@ -658,6 +1267,98 @@ class TelegramControlPanel:
                 f"worst={day.get('worst_strategy') or 'n/a'}"
             )
         self._send_text(chat_id, "\n".join(parts))
+
+    def _send_diag(self, chat_id: str) -> None:
+        """
+        Kompakte Diagnose für "warum kein Trade?".
+        """
+        rt = self._safe_runtime_status()
+        ctrl = runtime_control.get_snapshot()
+        gate = rt.get("risk_gate") or {}
+        selector = rt.get("selector") or {}
+        brain = rt.get("brain") or {}
+        last_decision = rt.get("last_decision") or {}
+        app_ctx = rt.get("app_context") or {}
+
+        startup_reason = (
+            gate.get("recovery_startup_reason")
+            or app_ctx.get("startup_block_reason")
+            or "none"
+        )
+        lines = [
+            "🧪 <b>Diag (No-Trade Debug)</b>",
+            f"Running: <code>{rt.get('running', False)}</code> | Health: <code>{rt.get('health_status', 'n/a')}</code>",
+            f"Pause/RiskOff: <code>{rt.get('paused', ctrl.get('paused'))}/{rt.get('risk_off', ctrl.get('risk_off'))}</code>",
+            f"Startup-Gate: <code>{'OK' if startup_reason in ('', 'none', None) else 'BLOCKED'}</code>",
+            f"Startup-Reason: <code>{startup_reason}</code>",
+            f"Selector: total/actionable/eligible=<code>{selector.get('candidates_total', 'n/a')}/{selector.get('actionable', 'n/a')}/{selector.get('eligible', 'n/a')}</code>",
+            f"Selector blocked: regime/perf=<code>{selector.get('blocked_regime', 'n/a')}/{selector.get('blocked_perf', 'n/a')}</code>",
+            f"Brain: regime=<code>{brain.get('last_regime', 'n/a')}</code> score=<code>{brain.get('last_signal_score', 'n/a')}</code> risky=<code>{brain.get('risky_phase', 'n/a')}</code>",
+            f"Risk-Gate last: <code>{gate.get('last_gate_reason', 'n/a')}</code>",
+            f"Live-Gate last: <code>{gate.get('live_last_gate_reason', 'n/a')}</code>",
+            f"Last Decision: <code>{last_decision.get('decision', 'n/a')}</code> | <code>{last_decision.get('reason', 'n/a')}</code>",
+            f"Open Pos: <code>{rt.get('open_positions', len(rt.get('open_positions_detail') or []))}</code>",
+        ]
+        self._send_text(chat_id, "\n".join(lines))
+
+    def _send_diagfull(self, chat_id: str) -> None:
+        """
+        Erweiterte Diagnose mit den letzten Block-/Skip-Ereignissen aus Runtime-Logs.
+        """
+        rt = self._safe_runtime_status()
+        ctrl = runtime_control.get_snapshot()
+        gate = rt.get("risk_gate") or {}
+        selector = rt.get("selector") or {}
+        brain = rt.get("brain") or {}
+        last_decision = rt.get("last_decision") or {}
+        app_ctx = rt.get("app_context") or {}
+        runtime_logs = list(rt.get("recent_logs") or [])
+
+        startup_reason = (
+            gate.get("recovery_startup_reason")
+            or app_ctx.get("startup_block_reason")
+            or "none"
+        )
+        lines = [
+            "🧪 <b>DiagFull (No-Trade Deep Debug)</b>",
+            f"Running: <code>{rt.get('running', False)}</code> | Health: <code>{rt.get('health_status', 'n/a')}</code> | Mode: <code>{rt.get('mode', settings.TRADING_MODE)}</code>",
+            f"Pause/RiskOff: <code>{rt.get('paused', ctrl.get('paused'))}/{rt.get('risk_off', ctrl.get('risk_off'))}</code>",
+            f"Startup-Gate: <code>{'OK' if startup_reason in ('', 'none', None) else 'BLOCKED'}</code> | <code>{startup_reason}</code>",
+            f"Selector regime=<code>{selector.get('regime', 'n/a')}</code> | total/actionable/eligible=<code>{selector.get('candidates_total', 'n/a')}/{selector.get('actionable', 'n/a')}/{selector.get('eligible', 'n/a')}</code>",
+            f"Selector blocked regime/perf=<code>{selector.get('blocked_regime', 'n/a')}/{selector.get('blocked_perf', 'n/a')}</code> | winner=<code>{selector.get('winner') or 'none'}</code>",
+            f"Brain regime=<code>{brain.get('last_regime', 'n/a')}</code> | score=<code>{brain.get('last_signal_score', 'n/a')}</code> | risky=<code>{brain.get('risky_phase', 'n/a')}</code>",
+            f"Brain decision=<code>{brain.get('last_decision_reason', 'n/a')}</code>",
+            f"Risk gate last=<code>{gate.get('last_gate_reason', 'n/a')}</code> | live=<code>{gate.get('live_last_gate_reason', 'n/a')}</code>",
+            f"Last Decision: <code>{last_decision.get('decision', 'n/a')}</code> | <code>{last_decision.get('reason', 'n/a')}</code>",
+            "",
+            "<b>Letzte Block-/Skip-Events (max 5)</b>",
+        ]
+        interesting_markers = (
+            "BLOCK",
+            "blocked",
+            "skip",
+            "startup",
+            "risk_off",
+            "pause",
+            "MIN_WIN_CHANCE",
+            "selector_none",
+            "brain_score_too_low",
+            "brain_risky_phase_block",
+            "LIVE_GATE",
+            "DAILY LOSS",
+        )
+        filtered: List[str] = []
+        for entry in reversed(runtime_logs):
+            if any(marker in entry for marker in interesting_markers):
+                filtered.append(entry)
+            if len(filtered) >= 5:
+                break
+        if not filtered:
+            lines.append("- <code>Keine Block-/Skip-Events im Runtime-Log gefunden.</code>")
+        else:
+            for item in filtered:
+                lines.append(f"- <code>{item[:260]}</code>")
+        self._send_text(chat_id, "\n".join(lines))
 
     def _send_status(self, chat_id: str) -> None:
         rt = self._safe_runtime_status()
@@ -856,6 +1557,387 @@ class TelegramControlPanel:
             f"Avg PnL: {stats.get('avg_pnl', 0.0):+.4f} USDT"
         )
 
+    @staticmethod
+    def _ampel_profit_factor(pnls: List[float]) -> float:
+        wins = sum(p for p in pnls if p > 0.0)
+        losses = abs(sum(p for p in pnls if p <= 0.0))
+        if losses <= 1e-12:
+            return 99.0 if wins > 0 else 0.0
+        return float(wins / losses)
+
+    @staticmethod
+    def _parse_db_timestamp(raw: Any) -> Optional[datetime]:
+        text = str(raw or "").strip()
+        if not text:
+            return None
+        try:
+            dt = datetime.fromisoformat(text.replace("Z", "+00:00"))
+        except Exception:
+            return None
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt.astimezone(timezone.utc)
+
+    def _collect_closed_metrics(self, lookback: int) -> Tuple[List[float], Optional[datetime]]:
+        if not self._repo.available:
+            return [], None
+        rows = self._repo.get_recent_trades(limit=max(10, int(lookback) * 3), status="closed")
+        pnls: List[float] = []
+        latest_closed_at: Optional[datetime] = None
+        for row in rows:
+            value = row.get("pnl_abs")
+            if value is None:
+                continue
+            try:
+                pnls.append(float(value))
+            except Exception:
+                continue
+            ts = self._parse_db_timestamp(
+                row.get("timestamp_close") or row.get("updated_at") or row.get("created_at")
+            )
+            if ts is not None and (latest_closed_at is None or ts > latest_closed_at):
+                latest_closed_at = ts
+            if len(pnls) >= lookback:
+                break
+        return pnls, latest_closed_at
+
+    def _compute_ampel(self, lookback: Optional[int] = None) -> Dict[str, Any]:
+        lookback_n = int(lookback or int(getattr(settings, "AMPEL_WINDOW_TRADES", 50) or 50))
+        lookback_n = max(10, min(lookback_n, 300))
+        pnls, latest_closed_at = self._collect_closed_metrics(lookback_n)
+        n = len(pnls)
+        min_trades = int(getattr(settings, "AMPEL_MIN_TRADES", 20) or 20)
+        stale_hours: Optional[float] = None
+        if latest_closed_at is not None:
+            stale_hours = max(
+                0.0,
+                (datetime.now(timezone.utc) - latest_closed_at).total_seconds() / 3600.0,
+            )
+        stale_limit_hours = float(getattr(settings, "AMPEL_STALE_DATA_HOURS", 8.0) or 0.0)
+        stale_data = bool(
+            stale_limit_hours > 0.0 and stale_hours is not None and stale_hours >= stale_limit_hours
+        )
+        stale_force_yellow = bool(getattr(settings, "AMPEL_STALE_FORCE_YELLOW", True))
+        if n == 0:
+            return {
+                "state": "YELLOW",
+                "emoji": "🟡",
+                "reason": "no_closed_trades",
+                "trades": 0,
+                "lookback": lookback_n,
+                "winrate": 0.0,
+                "pf": 0.0,
+                "avg_pnl": 0.0,
+                "total_pnl": 0.0,
+                "expectancy_r": 0.0,
+                "losing_streak": 0,
+                "insufficient_data": True,
+                "stale_data": stale_data,
+                "last_closed_trade_age_h": round(stale_hours, 2) if stale_hours is not None else None,
+            }
+
+        wins = [p for p in pnls if p > 0.0]
+        losses = [p for p in pnls if p <= 0.0]
+        winrate = round((len(wins) / n) * 100.0, 1)
+        total_pnl = round(sum(pnls), 4)
+        avg_pnl = round(total_pnl / max(1, n), 6)
+        pf = round(self._ampel_profit_factor(pnls), 3)
+
+        rr_ref = float(max(0.5, getattr(settings, "MIN_RR", 1.2) or 1.2))
+        p = max(0.0, min(1.0, winrate / 100.0))
+        expectancy_r = round((p * rr_ref) - (1.0 - p), 4)
+
+        losing_streak = 0
+        for v in pnls:
+            if v <= 0.0:
+                losing_streak += 1
+            else:
+                break
+
+        green_wr = float(getattr(settings, "AMPEL_GREEN_WINRATE_PCT", 68.0) or 68.0)
+        green_pf = float(getattr(settings, "AMPEL_GREEN_PF", 1.25) or 1.25)
+        green_exp = float(getattr(settings, "AMPEL_GREEN_EXPECTANCY_R", 0.08) or 0.08)
+        green_ls = int(getattr(settings, "AMPEL_GREEN_MAX_LOSING_STREAK", 2) or 2)
+
+        red_wr = float(getattr(settings, "AMPEL_RED_WINRATE_PCT", 58.0) or 58.0)
+        red_pf = float(getattr(settings, "AMPEL_RED_PF", 1.05) or 1.05)
+        red_exp = float(getattr(settings, "AMPEL_RED_EXPECTANCY_R", 0.02) or 0.02)
+        red_ls = int(getattr(settings, "AMPEL_RED_LOSING_STREAK", 5) or 5)
+
+        if n < min_trades:
+            state = "YELLOW"
+            reason = f"insufficient_data:{n}/{min_trades}"
+        else:
+            is_green = (
+                winrate >= green_wr
+                and pf >= green_pf
+                and avg_pnl > 0.0
+                and expectancy_r >= green_exp
+                and losing_streak <= green_ls
+            )
+            is_red = (
+                winrate <= red_wr
+                or pf <= red_pf
+                or avg_pnl <= 0.0
+                or expectancy_r <= red_exp
+                or losing_streak >= red_ls
+            )
+            if is_green:
+                state = "GREEN"
+                reason = "metrics_green"
+            elif is_red:
+                state = "RED"
+                reason = "metrics_red"
+            else:
+                state = "YELLOW"
+                reason = "metrics_mixed"
+
+        # Anti-Stall: Wenn die Datengrundlage alt ist, RED nicht hart erzwingen.
+        # Sonst kann der Bot in einem dauerhaften "RED -> keine Entries -> keine neuen Closed-Trades"-Loop hängen.
+        if state == "RED" and stale_data and stale_force_yellow:
+            state = "YELLOW"
+            reason = f"stale_data_force_yellow:{stale_hours:.1f}h"
+
+        return {
+            "state": state,
+            "emoji": {"GREEN": "🟢", "YELLOW": "🟡", "RED": "🔴"}.get(state, "⚪"),
+            "reason": reason,
+            "trades": n,
+            "lookback": lookback_n,
+            "winrate": winrate,
+            "pf": pf,
+            "avg_pnl": avg_pnl,
+            "total_pnl": total_pnl,
+            "expectancy_r": expectancy_r,
+            "losing_streak": losing_streak,
+            "insufficient_data": n < min_trades,
+            "stale_data": stale_data,
+            "last_closed_trade_age_h": round(stale_hours, 2) if stale_hours is not None else None,
+        }
+
+    def _apply_ampel_guard(self, ampel: Dict[str, Any], *, source: str) -> Tuple[bool, str]:
+        state = str(ampel.get("state", "YELLOW")).upper()
+        ctrl = runtime_control.get_snapshot()
+        now = time.monotonic()
+        self._ampel_last_eval_ts = now
+        self._ampel_last_state = state
+        self._ampel_last_reason = str(ampel.get("reason", "n/a"))
+
+        if state == "RED":
+            if self._ampel_red_started_ts <= 0.0:
+                self._ampel_red_started_ts = now
+            need_pause = not bool(ctrl.get("paused"))
+            need_risk_off = not bool(ctrl.get("risk_off"))
+            if need_pause:
+                runtime_control.pause_entries()
+            if need_risk_off:
+                runtime_control.enable_risk_off()
+
+            if need_pause or need_risk_off:
+                runtime_state.update_engine(paused=True, risk_off=True)
+                runtime_state.append_log(f"AMPEL {source} RED -> pause+risk_off")
+                self._ampel_guard_latched_red = True
+                self._ampel_red_loop_trip_count += 1
+                try:
+                    self._notifier.notify_bot_paused(f"ampel:{source}:red")
+                    self._notifier.notify_risk_off(True, f"ampel:{source}:red")
+                except Exception:
+                    pass
+                self._ampel_last_action = "red_pause_risk_off"
+                return True, "red_pause_risk_off"
+
+            # Bereits gesperrt: nur halten, kein erneuter Spam.
+            self._ampel_guard_latched_red = True
+            self._ampel_last_action = "red_hold_latched"
+            return False, "red_hold_latched"
+
+        # Auto-Resume nur wenn die Sperre auch von Ampel gesetzt wurde.
+        if self._ampel_guard_latched_red:
+            had_pause = bool(ctrl.get("paused"))
+            had_risk_off = bool(ctrl.get("risk_off"))
+            if had_pause:
+                runtime_control.resume_entries()
+            if had_risk_off:
+                runtime_control.disable_risk_off()
+
+            self._ampel_guard_latched_red = False
+            if had_pause or had_risk_off:
+                runtime_state.update_engine(paused=False, risk_off=False)
+                runtime_state.append_log(f"AMPEL {source} {state} -> resume+risk_on")
+                try:
+                    self._notifier.notify_bot_resumed(f"ampel:{source}:{state.lower()}")
+                    self._notifier.notify_risk_off(False, f"ampel:{source}:{state.lower()}")
+                except Exception:
+                    pass
+                self._ampel_last_action = f"{state.lower()}_resume_risk_on"
+                self._ampel_red_started_ts = 0.0
+                return True, f"{state.lower()}_resume_risk_on"
+            self._ampel_last_action = f"{state.lower()}_latch_cleared"
+            self._ampel_red_started_ts = 0.0
+            return False, f"{state.lower()}_latch_cleared"
+
+        self._ampel_last_action = f"{state.lower()}_no_change"
+        self._ampel_red_started_ts = 0.0
+        return False, f"{state.lower()}_no_change"
+
+    def _format_ampel_text(self, ampel: Dict[str, Any], action: str) -> str:
+        state = str(ampel.get("state", "YELLOW")).upper()
+        action_txt = "Trading pausiert (ROT)" if state == "RED" else "Trading erlaubt"
+        return (
+            f"{ampel.get('emoji', '⚪')} <b>Ampel: {state}</b>\n"
+            f"Action: <code>{action}</code> | Guard: <code>{action_txt}</code>\n"
+            f"Trades: <code>{ampel.get('trades')}</code>/<code>{ampel.get('lookback')}</code>\n"
+            f"DataAge(h): <code>{ampel.get('last_closed_trade_age_h')}</code> | "
+            f"Stale: <code>{ampel.get('stale_data')}</code>\n"
+            f"Winrate: <code>{ampel.get('winrate')}%</code> | PF: <code>{ampel.get('pf')}</code>\n"
+            f"AvgPnL: <code>{ampel.get('avg_pnl')}</code> | TotalPnL: <code>{ampel.get('total_pnl')}</code>\n"
+            f"Expectancy(R): <code>{ampel.get('expectancy_r')}</code> | "
+            f"LosingStreak: <code>{ampel.get('losing_streak')}</code>\n"
+            f"Reason: <code>{ampel.get('reason')}</code>"
+        )
+
+    def _send_ampel(self, chat_id: str) -> None:
+        ampel = self._compute_ampel()
+        changed, action = self._apply_ampel_guard(ampel, source="telegram_manual")
+        if changed:
+            self._last_ampel_auto_ts = time.monotonic()
+        self._send_text(chat_id, self._format_ampel_text(ampel, action))
+
+    def _maybe_run_ampel_auto(self, force: bool = False) -> None:
+        if not self._ampel_auto_enabled and not force:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_ampel_auto_ts < self._ampel_auto_interval_sec):
+            return
+        self._last_ampel_auto_ts = now
+        ampel = self._compute_ampel()
+        state = str(ampel.get("state", "UNKNOWN")).upper()
+        # Hard anti-loop fail-safe:
+        # Wenn wir zu lange in RED stecken und keine frischen closed-trade Daten reinkommen,
+        # lösen wir die Ampel-Sperre temporär (YELLOW), damit wieder Daten entstehen können.
+        if state == "RED":
+            if self._ampel_red_started_ts <= 0.0:
+                self._ampel_red_started_ts = now
+            red_hold_sec = now - self._ampel_red_started_ts
+            stale_data = bool(ampel.get("stale_data", False))
+            max_red_hold_sec = int(
+                max(0, int(getattr(settings, "AMPEL_RED_LOOP_MAX_MINUTES", 0) or 0)) * 60
+            )
+            if (
+                bool(getattr(settings, "AMPEL_RED_LOOP_BREAKER_ENABLED", True))
+                and stale_data
+                and max_red_hold_sec > 0
+                and red_hold_sec >= float(max_red_hold_sec)
+            ):
+                ampel["state"] = "YELLOW"
+                ampel["emoji"] = "🟡"
+                ampel["reason"] = (
+                    f"red_loop_fail_safe:{int(red_hold_sec)}s:"
+                    f"max={int(max_red_hold_sec)}"
+                )
+                runtime_state.append_log(
+                    "AMPEL fail-safe -> YELLOW "
+                    f"(red_hold={int(red_hold_sec)}s stale={stale_data})"
+                )
+                state = "YELLOW"
+
+        changed, action = self._apply_ampel_guard(ampel, source="ampel_auto")
+        if changed and self._chat_id:
+            try:
+                state = str(ampel.get("state", state)).upper()
+                action_key = str(action or "").strip().lower()
+                prev_state = str(self._last_ampel_auto_notify_state or "").upper()
+                prev_action = str(self._last_ampel_auto_notify_action or "").lower()
+
+                # State-Wechsel soll immer sofort rausgehen.
+                state_changed = state != prev_state
+                same_signature = (state == prev_state) and (action_key == prev_action)
+
+                notify_now = force or state_changed
+                # Ohne State-Wechsel: nur zyklisch per Cooldown berichten.
+                if not notify_now and same_signature:
+                    elapsed = now - self._last_ampel_auto_notify_ts
+                    if elapsed >= float(self._ampel_auto_notify_cooldown_sec):
+                        notify_now = True
+                if notify_now:
+                    self._send_text(
+                        self._chat_id,
+                        "🚦 <b>AmpelAuto Aktion</b>\n" + self._format_ampel_text(ampel, action),
+                    )
+                    self._last_ampel_auto_notify_state = state
+                    self._last_ampel_auto_notify_action = action_key
+                    self._last_ampel_auto_notify_ts = now
+            except Exception:
+                pass
+
+    def _send_ampel_debug(self, chat_id: str) -> None:
+        now = time.monotonic()
+        ctrl = runtime_control.get_snapshot()
+        since_eval = (
+            int(now - self._ampel_last_eval_ts)
+            if self._ampel_last_eval_ts > 0.0
+            else -1
+        )
+        red_hold = (
+            int(now - self._ampel_red_started_ts)
+            if self._ampel_red_started_ts > 0.0
+            else 0
+        )
+        notify_wait = 0
+        if self._last_ampel_auto_notify_ts > 0.0:
+            elapsed = now - self._last_ampel_auto_notify_ts
+            notify_wait = max(0, int(self._ampel_auto_notify_cooldown_sec - elapsed))
+        self._send_text(
+            chat_id,
+            "🧪 <b>Ampel Debug</b>\n"
+            f"state=<code>{self._ampel_last_state}</code> | "
+            f"reason=<code>{self._ampel_last_reason}</code>\n"
+            f"last_action=<code>{self._ampel_last_action}</code> | "
+            f"latch_red=<code>{self._ampel_guard_latched_red}</code>\n"
+            f"red_hold_sec=<code>{red_hold}</code> | "
+            f"red_trip_count=<code>{self._ampel_red_loop_trip_count}</code>\n"
+            f"pause/riskoff=<code>{ctrl.get('paused')}/{ctrl.get('risk_off')}</code>\n"
+            f"auto_enabled=<code>{self._ampel_auto_enabled}</code> | "
+            f"interval=<code>{self._ampel_auto_interval_sec}s</code>\n"
+            f"notify_state/action=<code>{self._last_ampel_auto_notify_state}/"
+            f"{self._last_ampel_auto_notify_action}</code>\n"
+            f"notify_cooldown=<code>{self._ampel_auto_notify_cooldown_sec}s</code> | "
+            f"notify_wait=<code>{notify_wait}s</code>\n"
+            f"eval_ago=<code>{since_eval}s</code> | "
+            f"red_max_hold=<code>{int(getattr(settings, 'AMPEL_RED_LOOP_MAX_MINUTES', 0))}m</code>\n"
+            "Hinweis: Falls <code>risk_gate=CONTROL PAUSE</code> dauerhaft bleibt, "
+            "prüfe mit <code>/status</code>, ob <code>open=MAX</code> erreicht ist."
+        )
+
+    def _handle_ampelauto(self, chat_id: str, text: str) -> None:
+        parts = self._split_command_parts(text)
+        mode = parts[1].strip().lower() if len(parts) > 1 else "status"
+        if mode in ("status", "state"):
+            self._send_text(
+                chat_id,
+                "🚦 <b>AmpelAuto</b>\n"
+                f"enabled=<code>{self._ampel_auto_enabled}</code>\n"
+                f"interval=<code>{self._ampel_auto_interval_sec}s</code>\n"
+                f"notify_cooldown=<code>{self._ampel_auto_notify_cooldown_sec}s</code>",
+            )
+            return
+        if mode in ("on", "enable", "1", "true"):
+            self._ampel_auto_enabled = True
+            runtime_state.append_log("TELEGRAM /ampelauto on")
+            self._send_text(chat_id, "✅ AmpelAuto aktiviert.")
+            return
+        if mode in ("off", "disable", "0", "false"):
+            self._ampel_auto_enabled = False
+            runtime_state.append_log("TELEGRAM /ampelauto off")
+            self._send_text(chat_id, "⏸ AmpelAuto deaktiviert.")
+            return
+        if mode in ("now", "run", "check"):
+            self._last_ampel_auto_ts = 0.0
+            self._maybe_run_ampel_auto(force=True)
+            self._send_text(chat_id, "✅ AmpelAuto-Check ausgeführt.")
+            return
+        self._send_text(chat_id, "Verwendung: /ampelauto <on|off|status|now>")
+
     def _send_logs(self, chat_id: str) -> None:
         """
         Sendet die letzten wichtigen Ereignisse aus der aktuellsten Log-Datei.
@@ -963,10 +2045,41 @@ class TelegramControlPanel:
 
     def _handle_bot_restart(self, chat_id: str) -> None:
         if self._callbacks.request_bot_restart:
-            ok, msg = self._callbacks.request_bot_restart()
-            self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            try:
+                ok, msg = self._callbacks.request_bot_restart()
+                self._send_text(chat_id, f"{'✅' if ok else '⚠️'} {msg}")
+            except Exception as e:
+                logger.error("Restart-Callback-Fehler: %s", e)
+                self._send_text(chat_id, "⚠️ Restart-Callback fehlgeschlagen.")
             return
-        self._send_text(chat_id, "⚠️ Supervisor-Restart nicht angebunden.")
+
+        # Fallback: wenn kein dedizierter Restart vorhanden ist, versuche stop+start.
+        if self._callbacks.request_bot_stop and self._callbacks.request_bot_start:
+            try:
+                stop_result = self._callbacks.request_bot_stop()
+                stop_msg = ""
+                if isinstance(stop_result, tuple) and len(stop_result) == 2:
+                    stop_ok, stop_txt = stop_result
+                    stop_msg = f"Stop: {'ok' if stop_ok else 'warn'} ({stop_txt})"
+                else:
+                    stop_msg = "Stop: gesendet"
+
+                start_ok, start_msg = self._callbacks.request_bot_start()
+                icon = "✅" if start_ok else "⚠️"
+                self._send_text(
+                    chat_id,
+                    f"{icon} Restart via Fallback (stop+start).\n{stop_msg}\nStart: {start_msg}",
+                )
+            except Exception as e:
+                logger.error("Fallback-Restart (stop+start) fehlgeschlagen: %s", e)
+                self._send_text(chat_id, "⚠️ Fallback-Restart (stop+start) fehlgeschlagen.")
+            return
+
+        self._send_text(
+            chat_id,
+            "⚠️ Restart nicht angebunden.\n"
+            "Nutze /botstop + /botstart oder starte den Controller/Supervisor.",
+        )
 
     def _send_bot_status(self, chat_id: str) -> None:
         status = {}
@@ -995,6 +2108,7 @@ class TelegramControlPanel:
 
     def _handle_pause(self, chat_id: str) -> None:
         runtime_control.pause_entries()
+        self._ampel_guard_latched_red = False
         runtime_state.update_engine(paused=True)
         runtime_state.append_log("TELEGRAM /pause -> entries pausiert")
         logger.warning("Telegram-Aktion: /pause -> neue Entries pausiert")
@@ -1006,6 +2120,7 @@ class TelegramControlPanel:
 
     def _handle_resume(self, chat_id: str) -> None:
         runtime_control.resume_entries()
+        self._ampel_guard_latched_red = False
         runtime_state.update_engine(paused=False)
         runtime_state.append_log("TELEGRAM /resume -> entries aktiviert")
         logger.info("Telegram-Aktion: /resume -> Entries wieder aktiv")
@@ -1014,6 +2129,7 @@ class TelegramControlPanel:
 
     def _handle_riskoff(self, chat_id: str) -> None:
         runtime_control.enable_risk_off()
+        self._ampel_guard_latched_red = False
         runtime_state.update_engine(risk_off=True)
         runtime_state.append_log("TELEGRAM /riskoff -> risk_off aktiv")
         logger.warning("Telegram-Aktion: /riskoff -> Risk-Off aktiviert")
@@ -1022,6 +2138,7 @@ class TelegramControlPanel:
 
     def _handle_riskon(self, chat_id: str) -> None:
         runtime_control.disable_risk_off()
+        self._ampel_guard_latched_red = False
         runtime_state.update_engine(risk_off=False)
         runtime_state.append_log("TELEGRAM /riskon -> risk_off deaktiviert")
         logger.info("Telegram-Aktion: /riskon -> Risk-Off deaktiviert")
@@ -1029,6 +2146,91 @@ class TelegramControlPanel:
         self._send_text(
             chat_id,
             "🟢 Risk-Off deaktiviert. Neue Entries sind wieder möglich (wenn Risk-Regeln erfüllt)."
+        )
+
+    def _autoheal_status_text(self) -> str:
+        return (
+            f"enabled={self._autoheal_enabled} "
+            f"cooldown={self._autoheal_cooldown_sec}s "
+            f"last_action_ts={int(self._last_autoheal_ts) if self._last_autoheal_ts else 0}"
+        )
+
+    def _can_autoheal_now(self) -> Tuple[bool, str]:
+        now = time.monotonic()
+        if now - self._last_autoheal_ts < self._autoheal_cooldown_sec:
+            wait_left = int(self._autoheal_cooldown_sec - (now - self._last_autoheal_ts))
+            return False, f"cooldown_active:{wait_left}s"
+
+        if Path(settings.KILL_SWITCH_FILE).exists():
+            return False, "kill_switch_active"
+
+        ctrl = runtime_control.get_snapshot()
+        if bool(ctrl.get("paused")):
+            return True, "resume_entries"
+        if bool(ctrl.get("risk_off")):
+            return True, "disable_risk_off"
+        return False, "nothing_to_heal"
+
+    def _run_autoheal(self, source: str) -> Tuple[bool, str]:
+        ok, action = self._can_autoheal_now()
+        if not ok:
+            return False, action
+
+        if action == "resume_entries":
+            runtime_control.resume_entries()
+            runtime_state.update_engine(paused=False)
+            runtime_state.append_log(f"AUTOHEAL resume_entries source={source}")
+            try:
+                self._notifier.notify_bot_resumed(f"autoheal:{source}")
+            except Exception:
+                pass
+            self._last_autoheal_ts = time.monotonic()
+            return True, "pause_aufgehoben"
+
+        if action == "disable_risk_off":
+            runtime_control.disable_risk_off()
+            runtime_state.update_engine(risk_off=False)
+            runtime_state.append_log(f"AUTOHEAL risk_on source={source}")
+            try:
+                self._notifier.notify_risk_off(False, f"autoheal:{source}")
+            except Exception:
+                pass
+            self._last_autoheal_ts = time.monotonic()
+            return True, "risk_off_deaktiviert"
+
+        return False, "nothing_to_heal"
+
+    def _handle_autoheal(self, chat_id: str, text: str) -> None:
+        parts = self._split_command_parts(text)
+        mode = parts[1].strip().lower() if len(parts) > 1 else "status"
+
+        if mode in ("status", "state"):
+            self._send_text(chat_id, f"🩹 AutoHeal: <code>{self._autoheal_status_text()}</code>")
+            return
+
+        if mode in ("on", "enable", "1", "true"):
+            self._autoheal_enabled = True
+            runtime_state.append_log("TELEGRAM /autoheal on")
+            self._send_text(chat_id, f"✅ AutoHeal aktiviert.\n<code>{self._autoheal_status_text()}</code>")
+            return
+
+        if mode in ("off", "disable", "0", "false"):
+            self._autoheal_enabled = False
+            runtime_state.append_log("TELEGRAM /autoheal off")
+            self._send_text(chat_id, f"⏸ AutoHeal deaktiviert.\n<code>{self._autoheal_status_text()}</code>")
+            return
+
+        if mode in ("now", "run", "heal"):
+            ok, msg = self._run_autoheal("telegram_manual")
+            if ok:
+                self._send_text(chat_id, f"✅ AutoHeal ausgeführt: <code>{msg}</code>")
+            else:
+                self._send_text(chat_id, f"ℹ️ AutoHeal nicht ausgeführt: <code>{msg}</code>")
+            return
+
+        self._send_text(
+            chat_id,
+            "Verwendung: /autoheal <on|off|status|now>",
         )
 
     def _handle_killswitch_on(self, chat_id: str) -> None:
@@ -1069,7 +2271,7 @@ class TelegramControlPanel:
             self._send_text(chat_id, "⚠️ Kill-Switch konnte nicht deaktiviert werden.")
 
     def _handle_setmode(self, chat_id: str, text: str) -> None:
-        parts = text.split()
+        parts = self._split_command_parts(text)
         if len(parts) < 2:
             self._send_text(chat_id, "Verwendung: /setmode paper")
             return
@@ -1100,13 +2302,14 @@ class TelegramControlPanel:
         )
 
     def _handle_setstrategy(self, chat_id: str, text: str) -> None:
-        parts = text.split()
+        parts = self._split_command_parts(text)
         if len(parts) < 2:
             self._send_text(
                 chat_id,
                 "Verwendung: /setstrategy <name>\n"
                 "Beispiele: momentum_pullback, trend_continuation, range_reversion, "
-                "volatility_breakout, auto"
+                "volatility_breakout, liquidity_sweep_reversal, "
+                "ema_reclaim_breakout, auto"
             )
             return
         raw = parts[1].strip().lower()

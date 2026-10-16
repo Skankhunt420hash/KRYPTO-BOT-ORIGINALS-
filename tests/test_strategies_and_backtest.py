@@ -9,6 +9,8 @@ from src.strategies import (
     RangeReversionStrategy,
     VolatilityBreakoutStrategy,
     TrendContinuationStrategy,
+    LiquiditySweepReversalStrategy,
+    EmaReclaimBreakoutStrategy,
 )
 
 
@@ -65,6 +67,12 @@ class StrategySmokeTests(unittest.TestCase):
 
     def test_trend_continuation_runs(self):
         self._assert_signal_ok(TrendContinuationStrategy)
+
+    def test_liquidity_sweep_reversal_runs(self):
+        self._assert_signal_ok(LiquiditySweepReversalStrategy)
+
+    def test_ema_reclaim_breakout_runs(self):
+        self._assert_signal_ok(EmaReclaimBreakoutStrategy)
 
 
 class BacktestEngineTests(unittest.TestCase):

@@ -11,10 +11,10 @@ if TYPE_CHECKING:
 
 logger = setup_logger("meta_selector")
 
-# Gewicht des Performance-Scores im Gesamt-Score.
-# final = signal_score + (perf_score - 0.5) * PERF_WEIGHT
-# Bei PERF_WEIGHT=0.15: max Anpassung = ±0.075 (konservativ)
-_PERF_WEIGHT: float = settings.PERF_SELECTOR_WEIGHT
+# Default-Gewicht des Performance-Scores im Gesamt-Score.
+# Der effektive Wert wird pro Auswahl dynamisch aus Settings gelesen,
+# damit /setbrain perf_weight sofort greift.
+_DEFAULT_PERF_WEIGHT: float = settings.PERF_SELECTOR_WEIGHT
 
 # Richtungs-Multiplikator: penalisiert Signale die gegen das Regime laufen.
 # SHORT im TREND_UP = kontra-zyklisch = 0.55 Abzug auf den Fit-Score.
@@ -34,8 +34,10 @@ REGIME_STRATEGY_FIT: Dict[Regime, Dict[str, float]] = {
     Regime.TREND_UP: {
         "TrendContinuation": 1.00,
         "MomentumPullback": 0.90,
+        "EMAReclaimBreakout": 0.95,
         "VolatilityBreakout": 0.50,
         "RangeReversion": 0.10,
+        "LiquiditySweepReversal": 0.25,
         "RSI_EMA": 0.60,
         "MACD_Crossover": 0.70,
         "Combined": 0.65,
@@ -43,15 +45,19 @@ REGIME_STRATEGY_FIT: Dict[Regime, Dict[str, float]] = {
     Regime.TREND_DOWN: {
         "TrendContinuation": 0.80,
         "MomentumPullback": 0.70,
+        "EMAReclaimBreakout": 0.90,
         "VolatilityBreakout": 0.50,
         "RangeReversion": 0.10,
+        "LiquiditySweepReversal": 0.25,
         "RSI_EMA": 0.40,
         "MACD_Crossover": 0.50,
         "Combined": 0.45,
     },
     Regime.RANGE: {
         "RangeReversion": 1.00,
+        "LiquiditySweepReversal": 0.95,
         "MomentumPullback": 0.40,
+        "EMAReclaimBreakout": 0.45,
         "VolatilityBreakout": 0.30,
         "TrendContinuation": 0.20,
         "RSI_EMA": 0.65,
@@ -60,6 +66,8 @@ REGIME_STRATEGY_FIT: Dict[Regime, Dict[str, float]] = {
     },
     Regime.HIGH_VOLATILITY: {
         "VolatilityBreakout": 1.00,
+        "EMAReclaimBreakout": 0.70,
+        "LiquiditySweepReversal": 0.80,
         "MomentumPullback": 0.70,
         "TrendContinuation": 0.50,
         "RangeReversion": 0.10,
@@ -69,8 +77,10 @@ REGIME_STRATEGY_FIT: Dict[Regime, Dict[str, float]] = {
     },
     Regime.LOW_VOLATILITY: {
         "RangeReversion": 0.85,
+        "LiquiditySweepReversal": 0.80,
         "TrendContinuation": 0.30,
         "MomentumPullback": 0.20,
+        "EMAReclaimBreakout": 0.35,
         "VolatilityBreakout": 0.10,
         "RSI_EMA": 0.55,
         "MACD_Crossover": 0.55,
@@ -111,6 +121,9 @@ class MetaSelector:
         regime: Regime,
         symbol: str,
     ) -> Optional[EnhancedSignal]:
+        perf_weight = float(
+            getattr(settings, "PERF_SELECTOR_WEIGHT", _DEFAULT_PERF_WEIGHT)
+        )
         self._last_selection = {
             "symbol": symbol,
             "regime": regime.value,
@@ -188,8 +201,8 @@ class MetaSelector:
                         )
                         continue
 
-                    if _PERF_WEIGHT > 0:
-                        perf_adj = (perf_score - 0.5) * _PERF_WEIGHT
+                    if perf_weight > 0:
+                        perf_adj = (perf_score - 0.5) * perf_weight
                 except Exception as e:
                     logger.warning(
                         f"Scorer.get_score fehlgeschlagen für {sig.strategy_name}: "
@@ -224,7 +237,7 @@ class MetaSelector:
         best_score, best, best_sig_score, best_perf_adj, best_perf_score, best_pref_adj = scored[0]
 
         # Logging: signal_score + perf_adj + final für den Gewinner
-        if self._scorer is not None and _PERF_WEIGHT > 0:
+        if self._scorer is not None and perf_weight > 0:
             perf_tag = (
                 f" | sig={best_sig_score:.3f} "
                 f"perf={best_perf_score:.2f} adj={best_perf_adj:+.3f} "

@@ -23,19 +23,131 @@ Hinweis:
 import argparse
 import sys
 import os
+import traceback
+from datetime import datetime, timezone
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from rich import box
-from rich.console import Console
-from rich.panel import Panel
-from rich.table import Table
-from src.bot import TradingBot, MultiStrategyBot
-from src.app import TradingApplication
-from src.storage.trade_repository import TradeRepository
+try:
+    from rich import box
+    from rich.console import Console
+    from rich.panel import Panel
+    from rich.table import Table
+except ModuleNotFoundError:
+    class _SimpleBox:
+        ROUNDED = None
+
+    box = _SimpleBox()
+
+    class Console:  # type: ignore[override]
+        def print(self, *args, **kwargs):
+            text = " ".join(str(a) for a in args)
+            print(text)
+
+    class Panel:  # type: ignore[override]
+        @staticmethod
+        def fit(content, border_style=None):
+            return content
+
+    class Table:  # type: ignore[override]
+        def __init__(self, title=None, border_style=None, box=None):
+            self.title = title or ""
+            self._rows = []
+
+        def add_column(self, *args, **kwargs):
+            return None
+
+        def add_row(self, *args, **kwargs):
+            self._rows.append(" | ".join(str(a) for a in args))
+
+        def __str__(self):
+            if self._rows:
+                body = "\n".join(self._rows)
+                return f"{self.title}\n{body}" if self.title else body
+            return self.title
+def _is_running_in_venv() -> bool:
+    return bool(
+        os.getenv("VIRTUAL_ENV")
+        or getattr(sys, "base_prefix", sys.prefix) != sys.prefix
+    )
+
+
+def _project_venv_python() -> str:
+    root = os.path.dirname(os.path.abspath(__file__))
+    candidates = (
+        os.path.join(root, ".venv", "bin", "python"),
+        os.path.join(root, "venv", "bin", "python"),
+    )
+    for path in candidates:
+        if os.path.isfile(path) and os.access(path, os.X_OK):
+            return path
+    return ""
+
+
+def _maybe_reexec_into_project_venv() -> None:
+    """
+    systemd startet manchmal mit dem falschen Python-Interpreter.
+    Falls eine Projekt-venv existiert und wir nicht darin laufen, re-exec.
+    """
+    if os.getenv("KRYPTO_BOT_SKIP_VENV_REEXEC") == "1":
+        return
+    if _is_running_in_venv():
+        return
+    target = _project_venv_python()
+    if not target:
+        return
+    try:
+        if os.path.realpath(sys.executable) == os.path.realpath(target):
+            return
+    except Exception:
+        # Bei ungewöhnlichen Dateisystemen konservativ weiter versuchen.
+        pass
+    os.environ["KRYPTO_BOT_SKIP_VENV_REEXEC"] = "1"
+    os.execv(target, [target, *sys.argv])
+
+
+_maybe_reexec_into_project_venv()
+
 from config.settings import settings
 
 console = Console()
+
+
+def _write_startup_crash_log(context: str, exc: BaseException) -> None:
+    """
+    Schreibt frühe Startfehler in eine lokale Datei, falls systemd/journal
+    keine verwertbare Ausgabe liefert.
+    """
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    payload = (
+        f"[{timestamp}] Startup failure in {context}\n"
+        f"{type(exc).__name__}: {exc}\n"
+        f"{traceback.format_exc()}\n"
+    )
+
+    candidates = [
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "logs", "startup_crash.log"),
+        "/tmp/krypto-bot-startup-crash.log",
+    ]
+    written_path = None
+    for path in candidates:
+        try:
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(payload)
+            written_path = path
+            break
+        except Exception:
+            continue
+
+    console.print(f"[red]Fataler Startfehler:[/red] {type(exc).__name__}: {exc}")
+    if written_path:
+        console.print(f"[yellow]Crash-Log geschrieben:[/yellow] {written_path}")
+    else:
+        console.print(
+            "[yellow]Crash-Log konnte nicht geschrieben werden "
+            "(fehlende Dateirechte?).[/yellow]"
+        )
 
 
 def _warn_if_no_env_file() -> None:
@@ -207,8 +319,18 @@ def show_status(bot):
     console.print(table)
 
     # Datenbank-Statistik (persistiert)
-    repo = TradeRepository()
-    db_stats = repo.get_summary_stats()
+    db_stats = None
+    recent = []
+    try:
+        from src.storage.trade_repository import TradeRepository
+        repo = TradeRepository()
+        db_stats = repo.get_summary_stats()
+        recent = repo.get_recent_trades(limit=5, status="closed")
+    except Exception as e:
+        console.print(
+            f"[yellow]DB-Status konnte nicht geladen werden:[/yellow] "
+            f"{type(e).__name__}: {e}"
+        )
     if db_stats:
         db_table = Table(title="Datenbank-Statistik (Gesamt)", border_style="green")
         db_table.add_column("Parameter", style="bold")
@@ -225,7 +347,6 @@ def show_status(bot):
         console.print(db_table)
 
     # Letzte 5 Trades aus DB
-    recent = repo.get_recent_trades(limit=5, status="closed")
     if recent:
         rt = Table(title="Letzte 5 abgeschlossene Trades", border_style="blue")
         for col in ["id", "timestamp_open", "symbol", "strategy_name", "side",
@@ -419,6 +540,13 @@ def _show_health() -> None:
 
 
 def main():
+    try:
+        from src.bot import TradingBot, MultiStrategyBot
+        from src.app import TradingApplication
+    except Exception as e:
+        _write_startup_crash_log("runtime-imports", e)
+        sys.exit(1)
+
     parser = argparse.ArgumentParser(
         description="Krypto Trading Bot + Backtester",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -467,7 +595,8 @@ def main():
         "--strategy", type=str, default=None,
         help=(
             "Strategie für Backtest: momentum_pullback, range_reversion, "
-            "volatility_breakout, trend_continuation"
+            "volatility_breakout, trend_continuation, "
+            "liquidity_sweep_reversal, ema_reclaim_breakout"
         ),
     )
     parser.add_argument(

@@ -7,6 +7,8 @@ from .momentum_pullback import MomentumPullbackStrategy
 from .range_reversion import RangeReversionStrategy
 from .volatility_breakout import VolatilityBreakoutStrategy
 from .trend_continuation import TrendContinuationStrategy
+from .liquidity_sweep_reversal import LiquiditySweepReversalStrategy
+from .ema_reclaim_breakout import EmaReclaimBreakoutStrategy
 from .legacy_adapter import LegacyEnhancedAdapter
 
 
@@ -39,6 +41,8 @@ def get_all_enhanced_strategies() -> list:
         RangeReversionStrategy(),
         VolatilityBreakoutStrategy(),
         TrendContinuationStrategy(),
+        LiquiditySweepReversalStrategy(),
+        EmaReclaimBreakoutStrategy(),
     ]
     legacy_wrapped = [
         LegacyEnhancedAdapter(RsiEmaStrategy()),
@@ -54,6 +58,8 @@ _ENHANCED_STRATEGY_REGISTRY = {
     "range_reversion":      RangeReversionStrategy,
     "volatility_breakout":  VolatilityBreakoutStrategy,
     "trend_continuation":   TrendContinuationStrategy,
+    "liquidity_sweep_reversal": LiquiditySweepReversalStrategy,
+    "ema_reclaim_breakout": EmaReclaimBreakoutStrategy,
 }
 
 
@@ -61,7 +67,8 @@ def get_enhanced_strategy(name: str) -> EnhancedBaseStrategy:
     """
     Gibt eine Enhanced-Strategie für den Backtest-Modus zurück.
     Unterstützte Namen: momentum_pullback, range_reversion,
-                        volatility_breakout, trend_continuation
+                        volatility_breakout, trend_continuation,
+                        liquidity_sweep_reversal, ema_reclaim_breakout
     """
     cls = _ENHANCED_STRATEGY_REGISTRY.get(name.lower().replace("-", "_"))
     if cls is None:
@@ -88,6 +95,8 @@ __all__ = [
     "RangeReversionStrategy",
     "VolatilityBreakoutStrategy",
     "TrendContinuationStrategy",
+    "LiquiditySweepReversalStrategy",
+    "EmaReclaimBreakoutStrategy",
     "get_strategy",
     "get_all_enhanced_strategies",
     "get_enhanced_strategy",

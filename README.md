@@ -150,7 +150,8 @@ python main.py --walk-forward --csv data/BTC_USDT_1h_test.csv --strategy trend_c
 2. Im Browser aufrufen (Token einsetzen):  
    `https://api.telegram.org/bot<TELEGRAM_BOT_TOKEN>/getUpdates`  
 3. In der JSON-Antwort die `chat.id` auslesen  
-4. Diese ID als `TELEGRAM_CHAT_ID` (und optional in `TELEGRAM_PANEL_ALLOWED_IDS`) setzen
+4. Diese ID als `TELEGRAM_CHAT_ID` setzen. In Gruppen zusätzlich die persönliche
+   `from.id` jedes Operators in `TELEGRAM_PANEL_ALLOWED_IDS` aufnehmen.
 
 #### 6.3 Benötigte `.env`-Einträge (Telegram)
 
@@ -172,8 +173,8 @@ TELEGRAM_ERROR_ALERT_COOLDOWN_SEC=120
 TELEGRAM_PANEL_ENABLED=true
 TELEGRAM_PANEL_POLL_INTERVAL_SEC=10
 TELEGRAM_PANEL_LOG_LINES=20
-# optional:
-TELEGRAM_PANEL_ALLOWED_IDS=<chat_id_1,chat_id_2>
+# Optional bei privaten Chats, zwingend mit persönlichen User-IDs bei Gruppen:
+TELEGRAM_PANEL_ALLOWED_IDS=<user_id_1,user_id_2>
 ```
 
 #### 6.4 Lokal testen
@@ -243,7 +244,8 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 - Live-Modus kann **nicht** per Telegram aktiviert werden (`/setmode` erlaubt nur `paper`)
 - Telegram muss explizit aktiviert werden (`ENABLE_TELEGRAM=true`)
 - Panel muss explizit aktiviert werden (`TELEGRAM_PANEL_ENABLED=true`)
-- Optionales Whitelisting über `TELEGRAM_PANEL_ALLOWED_IDS` (empfohlen)
+- Fail-closed-Allowlist über `TELEGRAM_PANEL_ALLOWED_IDS`; in Gruppen werden nur
+  explizit erlaubte persönliche User-IDs akzeptiert
 - Risk- und Pause-Flags blockieren nur **neue Entries**; offene Positionen bleiben verwaltet
 - Harte Live-Risk-Prüfung blockiert echte Orders bei Regelverstoß (inkl. Min-Equity/Free-Capital, Loss-Streak, Symbol-Freigabe)
 - Kill-Switch stoppt neue Orders sofort über Datei-Flag (`KILL_SWITCH_FILE`)
@@ -320,7 +322,7 @@ Dann nur eine Instanz laufen lassen (oder den alten Prozess beenden).
 | `TELEGRAM_PANEL_ENABLED`  | `false`         | `true` = Telegram-Control-Panel aktiviert (Polling) |
 | `TELEGRAM_PANEL_POLL_INTERVAL_SEC` | `10`   | Poll-Intervall des Panels (Sekunden) |
 | `TELEGRAM_PANEL_LOG_LINES` | `20`          | Anzahl Log-Zeilen für `/logs` |
-| `TELEGRAM_PANEL_ALLOWED_IDS` | –           | Kommagetrennte Chat-/User-IDs, die Befehle senden dürfen |
+| `TELEGRAM_PANEL_ALLOWED_IDS` | –           | Kommagetrennte Chat-/User-IDs; Gruppenbefehle benötigen eine explizit erlaubte persönliche User-ID |
 
 ## Exchange-Schicht (Read-only vs. orderfähig)
 

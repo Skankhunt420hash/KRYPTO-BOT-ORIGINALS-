@@ -1,16 +1,16 @@
 # Paper-Trading Status (KEIN echtes Geld)
 
 Strategie: Long/Short Cross-Coin-Momentum (14 Tage, Top 2 long / Flop 2 short, woechentlich Montag)
-Stand: 2026-11-07 02:49 UTC | Preisquelle: binanceus | Laufzeit: 30.5 Tage
+Stand: 2026-11-07 10:14 UTC | Preisquelle: binanceus | Laufzeit: 30.8 Tage
 
-**Eigenkapital: 10,204.34 USDT (Start 10,000) = +2.04%**
+**Eigenkapital: 10,224.95 USDT (Start 10,000) = +2.25%**
 
 | Coin | Seite | Volumen |
 |---|---|---|
-| BNB | LONG | 2,514 USDT |
-| XRP | LONG | 2,385 USDT |
-| ADA | SHORT | -2,452 USDT |
-| AVAX | SHORT | -2,466 USDT |
+| BNB | LONG | 2,507 USDT |
+| XRP | LONG | 2,389 USDT |
+| ADA | SHORT | -2,430 USDT |
+| AVAX | SHORT | -2,464 USDT |
 
 Letztes Rebalancing: 2026-11-02 | Ranking (14T-Rendite %): {'BNB': -1.3, 'XRP': -4.3, 'BTC': -4.6, 'DOGE': -4.8, 'LINK': -5.3, 'ETH': -5.6, 'LTC': -6.0, 'SOL': -9.2, 'AVAX': -10.7, 'ADA': -12.9}
 

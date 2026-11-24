@@ -34,6 +34,60 @@ from src.utils.win_chance import (
 
 logger = setup_logger("bot", settings.LOG_LEVEL)
 
+# Futures-Positionen unterhalb dieser Kontrakt-/Base-Menge gelten als flach
+# (Binance u. a. liefern oft Zero-Rows für jedes Symbol).
+_FUTURES_FLAT_ABS_EPS = 1e-12
+
+
+def _normalize_ccxt_symbol(symbol: str) -> str:
+    """BTC/USDT:USDT → BTC/USDT, sonst unverändert."""
+    text = str(symbol or "").strip()
+    if not text:
+        return ""
+    if ":" in text:
+        text = text.split(":", 1)[0].strip()
+    return text
+
+
+def _exchange_position_abs_size(row: Dict) -> float:
+    """
+    Best-effort Größe einer ccxt-Position. 0 bedeutet flach / unbrauchbar.
+    Nutzt contracts/amount/size/notional sowie gängige info-Felder (positionAmt).
+    """
+    if not isinstance(row, dict):
+        return 0.0
+    values: List[float] = []
+
+    def _take(raw: object) -> None:
+        if raw is None or raw == "":
+            return
+        try:
+            values.append(abs(float(raw)))
+        except (TypeError, ValueError):
+            return
+
+    for key in ("contracts", "amount", "size", "notional"):
+        _take(row.get(key))
+    info = row.get("info")
+    if isinstance(info, dict):
+        for key in ("positionAmt", "size", "qty", "contracts"):
+            _take(info.get(key))
+    return max(values) if values else 0.0
+
+
+def _real_futures_position_symbols(rows: List) -> Set[str]:
+    """Normalisierte Symbole mit tatsächlich offener Futures-Größe (> 0)."""
+    out: Set[str] = set()
+    for row in rows or []:
+        if not isinstance(row, dict):
+            continue
+        if _exchange_position_abs_size(row) <= _FUTURES_FLAT_ABS_EPS:
+            continue
+        sym = _normalize_ccxt_symbol(row.get("symbol") or "")
+        if sym:
+            out.add(sym)
+    return out
+
 
 class TradingBot:
     """Haupt-Trading-Bot: Verbindet Exchange, Strategie und Risikomanagement."""
@@ -944,6 +998,8 @@ class MultiStrategyBot:
         open_orders_count = 0
         exchange_order_symbols: Set[str] = set()
         exchange_pos_symbols: Set[str] = set()
+        open_positions: List[Dict] = []
+        positions_fetch_ok = False
 
         if settings.TRADING_MODE == "live":
             try:
@@ -956,6 +1012,7 @@ class MultiStrategyBot:
                 logger.warning(f"Recovery: Open-Orders konnten nicht geladen werden: {e}")
             try:
                 open_positions = self.exchange.fetch_open_positions() or []
+                positions_fetch_ok = True
                 exchange_pos_symbols = {
                     str(p.get("symbol") or "").strip() for p in open_positions if p.get("symbol")
                 }
@@ -973,6 +1030,31 @@ class MultiStrategyBot:
             issues.append(
                 f"orphan_exchange_positions:{','.join(sorted(orphan_position_symbols))}"
             )
+
+        # Live-Futures: erfolgreicher Positions-Fetch ohne Matching-Exposure bedeutet
+        # Phantom-DB-Rows (manuell/liquidiert geschlossen). SL/TP darauf würde ohne
+        # reduceOnly eine neue Gegenposition eröffnen — fail-closed.
+        if (
+            positions_fetch_ok
+            and settings.TRADING_MODE == "live"
+            and bool(getattr(settings, "FUTURES_MODE", False))
+            and db_symbols
+        ):
+            real_syms = _real_futures_position_symbols(open_positions)
+            phantom_symbols = {
+                sym
+                for sym in db_symbols
+                if _normalize_ccxt_symbol(sym) not in real_syms
+            }
+            if phantom_symbols:
+                self._recovery_blocked_symbols.update(phantom_symbols)
+                issues.append(
+                    "phantom_db_positions:" + ",".join(sorted(phantom_symbols))
+                )
+                logger.error(
+                    "[red]RECOVERY PHANTOM DB[/red] DB-open ohne Exchange-Exposure: %s",
+                    ",".join(sorted(phantom_symbols)),
+                )
         if issues:
             self._startup_checks_ok = False
             self._startup_block_reason = " | ".join(issues)
